@@ -479,7 +479,7 @@ fn attribute(
 /// Shells. The terminal's own shell may have any arguments; a shell started
 /// inside it counts as idle only without a script or command to run (`bash`,
 /// not `bash build.sh` or `pwsh -Command …`).
-const SHELLS: &[&str] =
+pub(crate) const SHELLS: &[&str] =
     &["bash", "sh", "dash", "zsh", "fish", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "pwsh", "powershell", "cmd"];
 
 /// Programs that only start a shell and wait for it: MSYS2's launcher runs

@@ -72,6 +72,20 @@ pub(crate) fn claude_working(title: &str) -> Option<bool> {
     }
 }
 
+/// The program a command line runs: its first word that is not a variable
+/// assignment or a wrapper such as `sudo`, without its folder and `.exe`.
+fn program_of(command: &str) -> Option<String> {
+    const WRAPPERS: &[&str] = &["builtin", "command", "env", "exec", "nice", "nohup", "sudo", "time"];
+    let word = command.split_whitespace().find(|w| !w.contains('=') && !WRAPPERS.contains(w))?;
+    let path = word.trim_matches(['\'', '"']);
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let name = match name.len().checked_sub(4).and_then(|i| Some((i, name.get(i..)?))) {
+        Some((i, ext)) if ext.eq_ignore_ascii_case(".exe") => &name[..i],
+        _ => name,
+    };
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 /// Turns one terminal's output signals into [`Alert`]s.
 #[derive(Debug, Default)]
 pub(crate) struct Tracker {
@@ -85,12 +99,24 @@ pub(crate) struct Tracker {
     status_busy: bool,
     /// The last command line the shell integration reported.
     command: Option<String>,
+    /// The program of the command typed at the prompt, from when the shell
+    /// integration reports that it started until it finished.
+    running: Option<String>,
 }
 
 impl Tracker {
     /// The agent is working, as far as its own signals tell.
     pub fn busy(&self) -> bool {
         self.title_busy || self.progress_busy || self.status_busy
+    }
+
+    /// The program of the command typed at the prompt while it runs, unless
+    /// it is a coding agent or a shell, which wait for the user most of the time.
+    pub fn running(&self) -> Option<&str> {
+        self.running.as_deref().filter(|name| {
+            let name = name.to_lowercase();
+            AgentKind::parse(&name).is_none() && !crate::detect::SHELLS.contains(&name.as_str())
+        })
     }
 
     /// A new shell started: nothing from the old one is still running.
@@ -124,7 +150,12 @@ impl Tracker {
                 self.command = Some(command).filter(|c| !c.trim().is_empty());
                 None
             }
+            Signal::CommandStart => {
+                self.running = self.command.as_deref().and_then(program_of);
+                None
+            }
             Signal::CommandDone(code) => {
+                self.running = None;
                 let command = self.command.take();
                 code.filter(|c| *c != 0 && !interrupted(*c)).map(|code| Alert::CommandFailed { code, command })
             }
@@ -250,6 +281,44 @@ mod tests {
             Some(Alert::CommandFailed { code: 1, command: None }),
             "the command line belongs to one status only"
         );
+    }
+
+    #[test]
+    fn typed_commands_run_until_they_finish() {
+        let mut t = Tracker::default();
+        let start = |t: &mut Tracker, line: &str| {
+            t.signal(Signal::CommandLine(line.into()));
+            t.signal(Signal::CommandStart);
+        };
+        start(&mut t, "vim notes.md");
+        assert_eq!(t.running(), Some("vim"));
+        t.signal(Signal::CommandLine(String::new()));
+        assert_eq!(t.signal(Signal::CommandDone(Some(0))), None);
+        assert_eq!(t.running(), None);
+
+        start(&mut t, "FOO=1 sudo /usr/bin/ssh -p 22 host");
+        assert_eq!(t.running(), Some("ssh"));
+        // A failure is still reported with the command line sent at the end.
+        t.signal(Signal::CommandLine("ssh -p 22 host".into()));
+        assert_eq!(
+            t.signal(Signal::CommandDone(Some(255))),
+            Some(Alert::CommandFailed { code: 255, command: Some("ssh -p 22 host".into()) })
+        );
+        assert_eq!(t.running(), None);
+
+        start(&mut t, r"C:\Tools\Watcher.EXE --poll");
+        assert_eq!(t.running(), Some("Watcher"));
+        t.reset();
+        assert_eq!(t.running(), None, "a new shell runs nothing yet");
+        // Agents and nested shells wait for the user most of the time.
+        for line in ["claude --resume x", "bash", "Codex"] {
+            start(&mut t, line);
+            assert_eq!(t.running(), None, "{line}");
+        }
+        // A shell that names no command: nothing to show.
+        t.signal(Signal::CommandDone(Some(0)));
+        t.signal(Signal::CommandStart);
+        assert_eq!(t.running(), None);
     }
 
     #[test]

@@ -27,6 +27,8 @@ struct Shell {
     prompt: &'static str,
     fail: &'static str,
     print: fn(&str) -> String,
+    /// A command that waits a moment.
+    pause: &'static str,
 }
 
 #[cfg_attr(windows, allow(dead_code))]
@@ -37,6 +39,7 @@ fn bash(command: String) -> Shell {
         prompt: "$",
         fail: "(exit 3)",
         print: |s| format!("printf '{}'", s.replace(r"\e", r"\033").replace(r"\a", r"\007")),
+        pause: "sleep 1",
     }
 }
 
@@ -46,6 +49,7 @@ fn windows_powershell() -> Shell {
         command: "powershell.exe -NoLogo -NoProfile".into(),
         prompt: "PS ",
         fail: "cmd /c exit 3",
+        pause: "Start-Sleep -Milliseconds 1000",
         print: |s| {
             let s = s.replace('\'', "''").replace(r"\e", "' + [char]27 + '").replace(r"\a", "' + [char]7 + '");
             // UTF-8, as agents write it (Windows PowerShell defaults to the OEM code page).
@@ -143,9 +147,11 @@ fn check(shell: Shell) {
         Alert::Agent { agent: Some(AgentKind::Codex), event: AgentEvent::Done, message: None }
     );
 
-    // Claude Code's title.
-    run(&(shell.print)("\\e]0;\u{25d0} Fixing\\a"));
-    run(&(shell.print)("\\e]0;\u{2733} Fixing\\a"));
+    // Claude Code's title, which it sets while it runs. (Not from two commands:
+    // between them, Git Bash's prompt sets a title of its own.)
+    let working = (shell.print)("\\e]0;\u{25d0} Fixing\\a");
+    let idle = (shell.print)("\\e]0;\u{2733} Fixing\\a");
+    run(&format!("{working}; {}; {idle}", shell.pause));
     assert_eq!(
         next_alert(&mut core, pane, long),
         Alert::Agent { agent: Some(AgentKind::Claude), event: AgentEvent::Done, message: None }
@@ -210,6 +216,33 @@ fn wait_for_activity(core: &mut Core, pane: PaneId, what: &str, check: impl Fn(&
             }
         }
     }
+}
+
+/// Git Bash's own tools leave the Windows process tree, so the scan can't see
+/// them; bash's shell integration says what runs. Skipped without Git Bash.
+#[cfg(windows)]
+#[test]
+fn git_bash_says_what_runs() {
+    let exe = r"C:\Program Files\Git\bin\bash.exe";
+    if !Path::new(exe).is_file() {
+        eprintln!("Git Bash is not installed; skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    // No scan in this test: what runs comes from the shell alone.
+    let mut core = Core::open(Config {
+        data_dir: Some(dir.path().to_path_buf()),
+        autosave_interval: Duration::from_secs(3600),
+        ..Default::default()
+    })
+    .unwrap();
+    core.dispatch(Command::SetDefaultShell(Some(format!("\"{exe}\" -i -l")))).unwrap();
+    core.dispatch(Command::CreateProject { name: "p".into(), working_dir: dir.path().into(), shell: None }).unwrap();
+    let pane = core.state().active_tab().unwrap().layout.first_pane();
+    wait_for_text(&mut core, pane, "$");
+    core.terminal(pane).unwrap().write("sleep 3\r");
+    wait_for_activity(&mut core, pane, "sleep", |a| a.busy_programs().any(|p| p.name == "sleep"));
+    wait_for_activity(&mut core, pane, "sleep to end", Activity::is_idle);
 }
 
 /// What the sidebar shows a terminal doing: programs from the periodic scan,

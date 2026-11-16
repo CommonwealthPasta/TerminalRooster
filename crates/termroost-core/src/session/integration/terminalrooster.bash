@@ -1,6 +1,7 @@
 # TerminalRooster shell integration for bash.
 #
-# After each command typed at the prompt, tells the terminal how it ended:
+# When a command typed at the prompt starts, tells the terminal what runs:
+# OSC 633;E with the command, then OSC 133;C. After it, tells how it ended:
 # OSC 633;E with the command line, then OSC 133;D with the exit status.
 # When the working directory changes, reports it with OSC 633;P;Cwd=<dir>.
 # TerminalRooster starts bash with PROMPT_COMMAND set to source this file on
@@ -29,9 +30,12 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
     __terminalrooster_at_prompt=
     __terminalrooster_running=
     __terminalrooster_command=
+    __terminalrooster_escaped=
     __terminalrooster_histcmd="${HISTCMD-}"
     __terminalrooster_pwd=
 
+    # Escapes $1 for an OSC 633 parameter into __terminalrooster_escaped (not
+    # printed: capturing output takes a subshell, which is slow in Git Bash).
     __terminalrooster_escape() {
         local s="$1"
         s="${s//\\/\\\\}"
@@ -40,7 +44,7 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
         s="${s//$'\r'/\\x0d}"
         s="${s//$'\a'/}"
         s="${s//$'\e'/}"
-        builtin printf '%s' "$s"
+        __terminalrooster_escaped="$s"
     }
 
     __terminalrooster_preexec() {
@@ -51,6 +55,10 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
             __terminalrooster_at_prompt=
             __terminalrooster_running=1
             __terminalrooster_command="$BASH_COMMAND"
+            # Git Bash's own tools (vim, less, ssh) can't be seen running
+            # from outside, so say what runs.
+            __terminalrooster_escape "$BASH_COMMAND"
+            builtin printf '\e]633;E;%s\a\e]133;C\a' "$__terminalrooster_escaped"
         fi
     }
 
@@ -68,7 +76,8 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
                 [[ "$line" =~ ^[[:space:]]*[0-9]+[[:space:]]+(.*)$ ]] && line="${BASH_REMATCH[1]}"
                 [[ -z "$line" ]] && line="$__terminalrooster_command"
             fi
-            builtin printf '\e]633;E;%s\a\e]133;D;%s\a' "$(__terminalrooster_escape "$line")" "$status"
+            __terminalrooster_escape "$line"
+            builtin printf '\e]633;E;%s\a\e]133;D;%s\a' "$__terminalrooster_escaped" "$status"
         fi
         __terminalrooster_histcmd="${HISTCMD-}"
         # Where the shell is, so the terminal starts there after a restart.
@@ -80,7 +89,8 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
             if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
                 dir="$(builtin pwd -W 2>/dev/null)" || dir="$PWD"
             fi
-            builtin printf '\e]633;P;Cwd=%s\a' "$(__terminalrooster_escape "$dir")"
+            __terminalrooster_escape "$dir"
+            builtin printf '\e]633;P;Cwd=%s\a' "$__terminalrooster_escaped"
         fi
         if [[ -n "$__terminalrooster_original" ]]; then
             (exit "$status")

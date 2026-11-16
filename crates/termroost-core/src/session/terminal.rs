@@ -155,12 +155,12 @@ impl Shared {
     }
 
     /// Runs `f` on the tracker, and tells the front end when that started or
-    /// ended an agent's turn.
+    /// ended an agent's turn or a command typed at the prompt.
     fn track<R>(&self, f: impl FnOnce(&mut Tracker) -> R) -> R {
         let mut tracker = self.tracker.lock().unwrap();
-        let was = tracker.busy();
+        let was = (tracker.busy(), tracker.running().map(str::to_owned));
         let out = f(&mut tracker);
-        let changed = tracker.busy() != was;
+        let changed = (tracker.busy(), tracker.running()) != (was.0, was.1.as_deref());
         drop(tracker);
         if changed {
             self.send(Event::ActivityChanged(self.pane));
@@ -278,7 +278,8 @@ pub struct Activity {
     /// The coding agent in it is in the middle of a turn.
     pub agent_working: bool,
     /// The programs below the shell, coding agents included, as the last
-    /// scan saw them (every few seconds).
+    /// scan saw them (every few seconds). When it saw none, the command typed
+    /// at the prompt if one is running (bash reports it).
     pub programs: Vec<Program>,
 }
 
@@ -471,7 +472,16 @@ impl TerminalHandle {
         if !self.is_running() {
             return Activity::default();
         }
-        Activity { agent_working: self.agent_working(), programs: self.0.shared.programs.lock().unwrap().clone() }
+        let tracker = self.0.shared.tracker.lock().unwrap();
+        let mut programs = self.0.shared.programs.lock().unwrap().clone();
+        // What the scan can't see: Git Bash's own tools (vim, less, ssh) leave
+        // the Windows process tree, but the shell integration names them.
+        if programs.is_empty()
+            && let Some(name) = tracker.running()
+        {
+            programs.push(Program { name: name.to_owned(), agent: None, started_by: None });
+        }
+        Activity { agent_working: tracker.busy(), programs }
     }
 
     /// Records what the background scan found below the shell.
