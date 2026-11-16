@@ -94,9 +94,11 @@ Restored sessions start their shells the first time you open them, so dozens of 
 
 ## Shortcuts
 
-Terminals receive every plain `Ctrl+letter`. App shortcuts use `Ctrl+Shift` or `Alt`.
+Terminals receive every plain `Ctrl+letter`. The default app shortcuts use `Ctrl+Shift`, `Alt` or `Shift` with keys like PgUp.
 
-| Keys | Action |
+Every keyboard shortcut can be changed in **Settings → Keyboard shortcuts**: click **+** next to an action and press the keys, or **✕** to remove a shortcut. An action can have several shortcuts. Giving keys to one action takes them away from any other, and the page says so. Letters and symbols need Ctrl, Alt or the Windows/Super key, so normal typing can't be taken over. **Reset** restores an action's defaults.
+
+| Default keys | Action |
 |---|---|
 | Ctrl+Shift+N | New project |
 | Ctrl+Shift+T | New session |
@@ -105,12 +107,18 @@ Terminals receive every plain `Ctrl+letter`. App shortcuts use `Ctrl+Shift` or `
 | Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | Next / previous session |
 | Ctrl+Shift+PgDn / Ctrl+Shift+PgUp | Next / previous project |
 | Alt+Arrows | Move between terminals |
-| Ctrl+Shift+C / Ctrl+Shift+V, Shift+Insert | Copy / paste |
-| Right click | Copy the selection, or paste when nothing is selected |
-| Shift+PgUp / Shift+PgDn, mouse wheel | Scroll history |
+| Ctrl+Shift+C / Ctrl+Shift+V, Ctrl+Insert / Shift+Insert | Copy / paste |
+| Shift+PgUp / Shift+PgDn, Shift+Home / Shift+End | Scroll history by a page / to the top or bottom |
 | Ctrl+Shift+K | Show / hide tasks |
 | Ctrl+Shift+= / - / 0 | Font size (also in Settings) |
-| Shift+Enter | Newline in Claude Code / Codex (sends `ESC CR`) |
+
+These can't be changed:
+
+| Keys | Action |
+|---|---|
+| Right click | Copy the selection, or paste when nothing is selected |
+| Mouse wheel | Scroll history |
+| Shift+Enter | Newline in Claude Code / Codex (the terminal sends `ESC CR` to the program) |
 
 ## Architecture
 

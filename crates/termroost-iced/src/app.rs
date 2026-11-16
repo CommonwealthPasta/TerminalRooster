@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId};
 
 use crate::color_picker::{ColorPicker, Hsl};
-use crate::keymap::{Action, Keymap};
+use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::terminal_view;
 use crate::theme;
@@ -132,6 +132,10 @@ pub struct SettingsState {
     pub name_input: String,
     pub name_error: Option<String>,
     pub shell_input: String,
+    /// Waiting for the keys of a new shortcut for this action.
+    pub recording: Option<Action>,
+    /// What the last shortcut change did, e.g. which action lost its keys.
+    pub shortcut_note: Option<String>,
 }
 
 /// Choice in a task's "linked session" dropdown.
@@ -197,6 +201,11 @@ pub enum Message {
     FontSize(f32),
     ShellInput(String),
     ShellCommit,
+    /// Wait for the keys of a new shortcut for an action (`None`: stop waiting).
+    RecordShortcut(Option<Action>),
+    RemoveShortcut(Action, Combo),
+    /// Back to the default shortcuts of one action, or of all (`None`).
+    ResetShortcuts(Option<Action>),
 
     PaneSettings(PaneId),
     AskDeleteProject(ProjectId),
@@ -517,9 +526,11 @@ impl App {
                     return self.update(Message::DialogCancel);
                 }
                 if let Some(st) = &mut self.settings
-                    && st.picker.is_some()
+                    && (st.recording.is_some() || st.picker.is_some())
                 {
-                    st.picker = None;
+                    if st.recording.take().is_none() {
+                        st.picker = None;
+                    }
                     return Task::none();
                 }
                 if self.settings.is_some() {
@@ -544,6 +555,13 @@ impl App {
                 }
             }
             Message::Key(keyboard::Event::KeyPressed { key, physical_key, modifiers, .. }) => {
+                if let Some(action) = self.settings.as_ref().and_then(|st| st.recording) {
+                    // A lone modifier or Escape isn't a shortcut: keep waiting.
+                    if let Some(combo) = Combo::from_event(&key, physical_key, modifiers) {
+                        self.record_shortcut(action, combo);
+                    }
+                    return Task::none();
+                }
                 if let Some(action) = self.keymap.action(&key, physical_key, modifiers)
                     && !action.in_terminal()
                 {
@@ -757,6 +775,33 @@ impl App {
                 }
             }
             Message::ShellCommit => self.commit_shell(),
+            Message::RecordShortcut(action) => {
+                if let Some(st) = &mut self.settings {
+                    st.recording = action;
+                    st.shortcut_note = None;
+                }
+            }
+            Message::RemoveShortcut(action, combo) => {
+                let rest = self.keymap.combos(action).iter().copied().filter(|c| *c != combo).collect();
+                self.set_shortcuts(action, rest);
+                if let Some(st) = &mut self.settings {
+                    st.shortcut_note = None;
+                }
+            }
+            Message::ResetShortcuts(None) => {
+                self.prefs.shortcuts.clear();
+                self.shortcuts_changed();
+                if let Some(st) = &mut self.settings {
+                    st.recording = None;
+                    st.shortcut_note = None;
+                }
+            }
+            Message::ResetShortcuts(Some(action)) => {
+                let notes = self.set_shortcuts(action, action.defaults());
+                if let Some(st) = &mut self.settings {
+                    st.shortcut_note = (!notes.is_empty()).then(|| notes.join(" "));
+                }
+            }
             Message::PaneSettings(pane) => {
                 if let Some(p) = self.core.state().pane(pane) {
                     let args = p.agent.as_ref().map(|a| a.args.clone()).unwrap_or_default();
@@ -1109,6 +1154,43 @@ impl App {
         self.themes_dirty = true;
         self.mark_prefs();
         self.apply_theme();
+    }
+
+    /// Adds the keys just pressed as a shortcut for `action` (from Settings).
+    fn record_shortcut(&mut self, action: Action, combo: Combo) {
+        let Some(st) = &mut self.settings else { return };
+        if !combo.leaves_typing_alone() {
+            st.shortcut_note = Some(format!(
+                "{combo} would get in the way of typing. Hold Ctrl, Alt or {} as well (for keys like Enter or the \
+                 arrows, Shift is enough), or press Escape to cancel.",
+                crate::keymap::LOGO
+            ));
+            return;
+        }
+        st.recording = None;
+        if self.keymap.owner(&combo) == Some(action) {
+            st.shortcut_note = Some(format!("{combo} already does this."));
+            return;
+        }
+        let mut combos = self.keymap.combos(action).to_vec();
+        combos.push(combo);
+        let notes = self.set_shortcuts(action, combos);
+        if let Some(st) = &mut self.settings {
+            st.shortcut_note = (!notes.is_empty()).then(|| notes.join(" "));
+        }
+    }
+
+    /// Gives `action` exactly these shortcuts, taking them away from any other
+    /// action that had them. Returns a note for each one taken away.
+    fn set_shortcuts(&mut self, action: Action, combos: Vec<Combo>) -> Vec<String> {
+        let taken = self.keymap.assign(&mut self.prefs.shortcuts, action, combos);
+        self.shortcuts_changed();
+        taken.into_iter().map(|(c, other)| format!("{c} no longer does “{}”.", other.label())).collect()
+    }
+
+    fn shortcuts_changed(&mut self) {
+        self.keymap = Arc::new(Keymap::new(&self.prefs.shortcuts));
+        self.mark_prefs();
     }
 
     fn shortcut(&mut self, action: Action) -> Task<Message> {

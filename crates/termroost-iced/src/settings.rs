@@ -6,7 +6,7 @@ use termroost_core::session::shell;
 
 use crate::app::{App, Message, SettingsState};
 use crate::color_picker;
-use crate::keymap::Action;
+use crate::keymap::{Action, Combo};
 use crate::sidebar::{BOLD, muted_text};
 use crate::theme::{self, MONO};
 use crate::themes::{ANSI_NAMES, ColorField, Hex, ThemeDef};
@@ -73,7 +73,7 @@ impl App {
             self.appearance_section(st),
             self.terminal_section(st),
             self.integrations_section(),
-            self.shortcuts_section(),
+            self.shortcuts_section(st),
             muted_text(format!(
                 "Everything is stored in {}. Logs are in {}.",
                 self.core.data_dir().join("termroost.db").display(),
@@ -500,6 +500,19 @@ fn preview<'a>(t: &ThemeDef) -> Element<'a, Message> {
     row![ui_mock, term_mock].spacing(12).into()
 }
 
+/// A shortcut as a small key cap with a remove button.
+fn key_chip<'a>(combo: Combo, remove: Message) -> Element<'a, Message> {
+    key_cap(
+        row![
+            text(combo.to_string()).font(MONO).size(12),
+            button(text("✕").size(10)).padding([0, 3]).style(theme::icon_button).on_press(remove),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+        3.0,
+    )
+}
+
 /// The key-cap frame around a shortcut.
 fn key_cap<'a>(content: impl Into<Element<'a, Message>>, right: f32) -> Element<'a, Message> {
     container(content)
@@ -515,29 +528,88 @@ fn key_cap<'a>(content: impl Into<Element<'a, Message>>, right: f32) -> Element<
         .into()
 }
 
-/// A row of the shortcuts list: what happens, then the keys.
-fn shortcut_row<'a>(what: &'a str, keys: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    row![text(what).size(13).width(240), keys.into()].spacing(8).align_y(Alignment::Center).height(28).into()
-}
-
 impl App {
-    fn shortcuts_section(&self) -> Element<'_, Message> {
-        let mut col = Column::new().spacing(6);
+    fn shortcuts_section<'a>(&'a self, st: &'a SettingsState) -> Element<'a, Message> {
+        let changed = !self.prefs.shortcuts.is_empty();
+        let mut col = column![
+            row![
+                muted_text(
+                    "Click + and press the keys for a new shortcut, or ✕ to remove one. Programs in terminals use \
+                     plain Ctrl+letter keys such as Ctrl+C, so Ctrl+Shift, Alt and the function keys work best."
+                )
+                .width(Length::Fill),
+                button(text("Reset all").size(12))
+                    .padding([4, 10])
+                    .style(button::secondary)
+                    .on_press_maybe(changed.then_some(Message::ResetShortcuts(None))),
+            ]
+            .spacing(16)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(6);
+        if let Some(note) = &st.shortcut_note {
+            col = col.push(container(text(note).size(12)).padding([6, 10]).width(Length::Fill).style(
+                |t: &iced::Theme| {
+                    let p = t.extended_palette();
+                    container::Style {
+                        background: Some(p.primary.weak.color.into()),
+                        text_color: Some(p.primary.weak.text),
+                        border: Border::default().rounded(4),
+                        ..container::Style::default()
+                    }
+                },
+            ));
+        }
         let mut group = "";
         for action in Action::ALL {
             if action.group() != group {
                 group = action.group();
                 col = col.push(text(group).size(13).font(BOLD));
             }
-            let keys = self.keymap.combos(action).iter().map(|c| key_cap(text(c.to_string()).font(MONO).size(12), 8.0));
-            col = col.push(shortcut_row(action.label(), row(keys).spacing(6).align_y(Alignment::Center)));
+            col = col.push(self.shortcut_row(st, action));
         }
         col = col.push(text("Fixed").size(13).font(BOLD));
         for (keys, what) in
             [("Right click", "Copy the selection, or paste"), ("Shift+Enter", "New line in Claude Code / Codex")]
         {
-            col = col.push(shortcut_row(what, key_cap(text(keys).font(MONO).size(12), 8.0)));
+            col = col.push(
+                row![text(what).size(13).width(240), key_cap(text(keys).font(MONO).size(12), 8.0)]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .height(28),
+            );
         }
         section("Keyboard shortcuts", col)
+    }
+
+    fn shortcut_row<'a>(&'a self, st: &'a SettingsState, action: Action) -> Element<'a, Message> {
+        let mut keys = row(self.keymap.combos(action).iter().map(|&c| key_chip(c, Message::RemoveShortcut(action, c))))
+            .spacing(6)
+            .align_y(Alignment::Center);
+        keys = keys.push(if st.recording == Some(action) {
+            button(text("Press the keys… (Esc cancels)").size(12))
+                .padding([3, 10])
+                .style(button::primary)
+                .on_press(Message::RecordShortcut(None))
+        } else {
+            button(text("+").size(14).align_x(Alignment::Center).width(14))
+                .padding([1, 6])
+                .style(theme::icon_button)
+                .on_press(Message::RecordShortcut(Some(action)))
+        });
+        let reset: Element<'a, Message> = if self.prefs.shortcuts.contains_key(action.id()) {
+            button(text("Reset").size(12))
+                .padding([3, 8])
+                .style(button::text)
+                .on_press(Message::ResetShortcuts(Some(action)))
+                .into()
+        } else {
+            space().into()
+        };
+        row![text(action.label()).size(13).width(240), container(keys).width(Length::Fill), reset]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .height(28)
+            .into()
     }
 }
