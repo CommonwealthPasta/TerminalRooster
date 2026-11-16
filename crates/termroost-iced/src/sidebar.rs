@@ -114,13 +114,13 @@ impl App {
             section_title("PROJECTS"),
             space::horizontal(),
             icon_button("⚙", Message::OpenSettings, "Settings"),
-            icon_button("+", Message::NewProject, "New project"),
+            icon_button("+", Message::NewProject, "New project (Ctrl+Shift+N)"),
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
 
         let items = column(s.projects.iter().map(|p| self.project_item(p)))
-            .push(add_item(Message::NewProject, "New project"))
+            .push(add_item(Message::NewProject, "New project (Ctrl+Shift+N)"))
             .spacing(2)
             .padding([0, 6]);
         container(column![header, scrollable(items).height(Length::Fill)])

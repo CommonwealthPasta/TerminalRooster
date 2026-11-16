@@ -500,7 +500,8 @@ fn preview<'a>(t: &ThemeDef) -> Element<'a, Message> {
 }
 
 fn shortcuts_section<'a>() -> Element<'a, Message> {
-    const SHORTCUTS: [(&str, &str); 12] = [
+    const SHORTCUTS: [(&str, &str); 13] = [
+        ("Ctrl+Shift+N", "New project"),
         ("Ctrl+Shift+T", "New session"),
         ("Ctrl+Shift+E / Ctrl+Shift+O", "Split right / split down"),
         ("Ctrl+Shift+W", "Close terminal"),

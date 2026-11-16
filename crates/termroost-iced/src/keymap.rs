@@ -9,6 +9,7 @@ use termroost_core as core;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shortcut {
+    NewProject,
     NewTab,
     SplitRight,
     SplitDown,
@@ -65,6 +66,7 @@ pub fn shortcut(key: &Key, physical: Physical, mods: Modifiers) -> Option<Shortc
         return None;
     }
     Some(match latin(key, physical)? {
+        'n' => Shortcut::NewProject,
         't' => Shortcut::NewTab,
         'e' => Shortcut::SplitRight,
         'o' => Shortcut::SplitDown,

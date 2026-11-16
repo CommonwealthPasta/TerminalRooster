@@ -98,6 +98,7 @@ Terminals receive every plain `Ctrl+letter`. App shortcuts use `Ctrl+Shift` or `
 
 | Keys | Action |
 |---|---|
+| Ctrl+Shift+N | New project |
 | Ctrl+Shift+T | New session |
 | Ctrl+Shift+E / Ctrl+Shift+O | Split right / split down |
 | Ctrl+Shift+W | Close terminal (the last one in a session can't be closed; delete the session) |

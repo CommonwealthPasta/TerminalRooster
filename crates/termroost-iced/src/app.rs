@@ -1107,6 +1107,7 @@ impl App {
         let s = self.core.state();
         let focused = s.active_tab().and_then(|t| t.focused_pane);
         match sc {
+            Shortcut::NewProject => return self.update(Message::NewProject),
             Shortcut::NewTab => return self.update(Message::NewTab),
             Shortcut::SplitRight => {
                 if let Some(p) = focused {
