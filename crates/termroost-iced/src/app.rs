@@ -23,8 +23,9 @@ use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
 use crate::worktree::{WorktreeForm, WorktreeMsg};
 
-/// How often the branches of the visible sessions are read again.
-const GIT_POLL: Duration = Duration::from_secs(3);
+/// How often the branches of the visible sessions, and the git log when it
+/// shows, are checked again.
+const GIT_POLL: Duration = Duration::from_secs(2);
 
 const PREFS_KEY: &str = "iced.prefs";
 pub const RENAME_INPUT: &str = "rename-input";

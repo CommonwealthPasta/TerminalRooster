@@ -1,5 +1,6 @@
 //! The Git tab of the side panel: the log of the visible session's
-//! repository, next to the Tasks tab.
+//! repository, next to the Tasks tab. It follows new commits: every git poll
+//! compares the repository's refs, and reads the log again when they moved.
 
 use std::path::PathBuf;
 
@@ -29,13 +30,17 @@ pub struct GitLog {
     pub worktree: PathBuf,
     /// `None` while it is read.
     pub commits: Option<Result<Vec<Commit>, String>>,
+    /// [`Repo::ref_stamp`] when `commits` were read.
+    pub stamp: Option<u64>,
 }
 
 /// A log read in the background.
 #[derive(Clone, Debug)]
 pub struct LogRead {
     pub worktree: PathBuf,
-    pub commits: Result<Vec<Commit>, String>,
+    pub stamp: u64,
+    /// `None` when the refs have not moved since the log on screen was read.
+    pub commits: Option<Result<Vec<Commit>, String>>,
 }
 
 /// "5m ago", or the date for anything older than a week.
@@ -65,22 +70,27 @@ impl App {
         self.prefs.tasks_open && self.prefs.side_tab == SideTab::Git && self.active_repo().is_some()
     }
 
-    /// Reads the log when the Git tab shows a repository it has not read yet,
-    /// such as after switching sessions.
+    /// Reads the log when the Git tab shows a repository it has not read yet
+    /// (such as after switching sessions), or when its refs moved since.
     pub(crate) fn refresh_log(&mut self) -> Task<Message> {
         if !self.git_tab_shown() || self.log_reading {
             return Task::none();
         }
         let Some(repo) = self.active_repo().cloned() else { return Task::none() };
-        if self.git_log.as_ref().is_some_and(|l| l.worktree == repo.worktree) {
-            return Task::none();
-        }
-        self.git_log = Some(GitLog { worktree: repo.worktree.clone(), commits: None });
+        let known = match &self.git_log {
+            Some(log) if log.worktree == repo.worktree => log.stamp,
+            _ => {
+                self.git_log = Some(GitLog { worktree: repo.worktree.clone(), commits: None, stamp: None });
+                None
+            }
+        };
         self.log_reading = true;
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let commits = repo.log(false, LOG_LIMIT);
-            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, commits });
+            // The stamp first: a commit landing in between is caught next time.
+            let stamp = repo.ref_stamp();
+            let commits = (known != Some(stamp)).then(|| repo.log(false, LOG_LIMIT));
+            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, stamp, commits });
         });
         Task::perform(async move { rx.recv().await.ok() }, |read| match read {
             Some(read) => Message::LogRead(read),
@@ -94,10 +104,19 @@ impl App {
         self.log_reading = false;
         match &mut self.git_log {
             Some(log) if log.worktree == read.worktree => {
-                if let Err(e) = &read.commits {
-                    tracing::warn!(repo = %read.worktree.display(), error = %e, "reading the git log failed");
+                match read.commits {
+                    None => {}
+                    Some(Ok(commits)) => {
+                        log.commits = Some(Ok(commits));
+                        log.stamp = Some(read.stamp);
+                    }
+                    // Without a stamp, the next poll tries again.
+                    Some(Err(e)) => {
+                        tracing::warn!(repo = %read.worktree.display(), error = %e, "reading the git log failed");
+                        log.commits = Some(Err(e));
+                        log.stamp = None;
+                    }
                 }
-                log.commits = Some(read.commits);
                 Task::none()
             }
             _ => self.refresh_log(),
