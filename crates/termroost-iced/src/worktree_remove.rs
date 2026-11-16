@@ -8,6 +8,7 @@ use std::time::Duration;
 use iced::widget::{button, checkbox, column, row, space, text};
 use iced::{Element, Task};
 use termroost_core::TabId;
+use termroost_core::detect::{self, FolderProcess};
 use termroost_core::git::{self, Head, Repo};
 
 use crate::app::{App, Dialog, Message, RunningTerminal};
@@ -32,6 +33,11 @@ pub struct RemoveForm {
     /// Terminals of other sessions in the folder running a program: they
     /// stay, and can keep git from deleting the folder.
     pub blocking: Vec<RunningTerminal>,
+    /// Programs outside the terminals working in the folder, looked for in
+    /// the background. git cannot delete the folder while they run.
+    pub others: Option<Vec<FolderProcess>>,
+    /// End `others` first.
+    pub end_others: bool,
     /// Uncommitted changes, counted in the background.
     pub changes: Option<Result<usize, String>>,
     /// Delete uncommitted changes too.
@@ -39,6 +45,9 @@ pub struct RemoveForm {
     pub removing: bool,
     /// Sessions an earlier attempt closed before git refused.
     pub closed: usize,
+    /// An earlier attempt removed the worktree from git but left part of
+    /// its folder.
+    pub leftover: bool,
     pub error: Option<String>,
 }
 
@@ -47,23 +56,30 @@ pub enum RemoveMsg {
     /// Ask before removing this worktree (from the Worktrees dialog).
     Ask(PathBuf),
     Changes(PathBuf, Result<usize, String>),
+    Others(PathBuf, Vec<FolderProcess>),
     Discard(bool),
+    EndOthers(bool),
     Confirm,
     Removed {
         path: PathBuf,
         result: Result<(), String>,
+        /// Part of the folder is left, and git no longer knows the worktree.
+        leftover: bool,
     },
 }
 
 impl RemoveForm {
     fn can_remove(&self) -> bool {
-        !self.removing
-            && match &self.changes {
+        let changes = self.leftover
+            || match &self.changes {
                 None => false,
                 Some(Ok(n)) => *n == 0 || self.discard,
                 // git checks again, and refuses without `discard`.
                 Some(Err(_)) => true,
-            }
+            };
+        // Deleting around a program would leave part of the folder.
+        let others = self.others.as_ref().is_some_and(|o| o.is_empty() || self.end_others);
+        !self.removing && changes && others
     }
 }
 
@@ -80,13 +96,23 @@ impl App {
                     f.changes = Some(changes);
                 }
             }
+            RemoveMsg::Others(path, found) => {
+                if let Some(f) = self.remove_form().filter(|f| f.path == path) {
+                    f.others = Some(found);
+                }
+            }
             RemoveMsg::Discard(on) => {
                 if let Some(f) = self.remove_form() {
                     f.discard = on;
                 }
             }
+            RemoveMsg::EndOthers(on) => {
+                if let Some(f) = self.remove_form() {
+                    f.end_others = on;
+                }
+            }
             RemoveMsg::Confirm => return self.confirm_remove(),
-            RemoveMsg::Removed { path, result } => {
+            RemoveMsg::Removed { path, result, leftover } => {
                 let Some(f) = self.remove_form().filter(|f| f.path == path) else { return Task::none() };
                 f.removing = false;
                 match result {
@@ -103,8 +129,13 @@ impl App {
                         return Task::batch([self.read_git(), self.focus_active()]);
                     }
                     Err(e) => {
-                        tracing::warn!(path = %path.display(), error = %e, "removing a worktree failed");
+                        tracing::warn!(path = %path.display(), error = %e, leftover, "removing a worktree failed");
                         f.error = Some(e);
+                        f.leftover = leftover;
+                        // What keeps the folder now.
+                        f.others = None;
+                        f.end_others = false;
+                        return self.look_for_others(path);
                     }
                 }
             }
@@ -145,10 +176,13 @@ impl App {
             sessions,
             running,
             blocking,
+            others: None,
+            end_others: false,
             changes: None,
             discard: false,
             removing: false,
             closed: 0,
+            leftover: false,
             error: None,
         })));
         let (tx, rx) = async_channel::bounded(1);
@@ -156,8 +190,23 @@ impl App {
         std::thread::spawn(move || {
             let _ = tx.send_blocking(Repo::changes(&dir));
         });
-        Task::perform(async move { rx.recv().await.unwrap_or_else(|e| Err(e.to_string())) }, move |changes| {
-            msg(RemoveMsg::Changes(path.clone(), changes))
+        let others = self.look_for_others(path.clone());
+        let changes = Task::perform(async move { rx.recv().await.unwrap_or_else(|e| Err(e.to_string())) }, move |c| {
+            msg(RemoveMsg::Changes(path.clone(), c))
+        });
+        Task::batch([changes, others])
+    }
+
+    /// Looks for programs working in the folder other than the terminals'.
+    fn look_for_others(&self, path: PathBuf) -> Task<Message> {
+        let shells = self.core.shell_pids();
+        let (tx, rx) = async_channel::bounded(1);
+        let dir = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(detect::processes_in(&dir, &shells));
+        });
+        Task::perform(async move { rx.recv().await.unwrap_or_default() }, move |found| {
+            msg(RemoveMsg::Others(path.clone(), found))
         })
     }
 
@@ -171,12 +220,14 @@ impl App {
         }
     }
 
-    /// Closes the worktree's sessions, then has git remove it on a thread
-    /// once their processes are gone.
+    /// Closes the worktree's sessions (and ends the other programs working
+    /// there, if asked to), then has git remove it on a thread once their
+    /// processes are gone. After git left part of the folder, deletes the rest.
     fn confirm_remove(&mut self) -> Task<Message> {
         let Some(f) = self.remove_form().filter(|f| f.can_remove()) else { return Task::none() };
-        let (path, force, repo) = (f.path.clone(), f.discard, f.back.repo.clone());
-        let left = self.core.leave_dir(&path);
+        let (path, force, was_leftover, repo) = (f.path.clone(), f.discard, f.leftover, f.back.repo.clone());
+        let others = if f.end_others { f.others.clone().unwrap_or_default() } else { Vec::new() };
+        let mut left = self.core.leave_dir(&path);
         for tab in &left.closed {
             self.grids.remove(tab);
             self.activity.remove(tab);
@@ -185,18 +236,24 @@ impl App {
             f.removing = true;
             f.error = None;
             f.closed += left.closed.len();
+            f.running.clear();
         }
         let (tx, rx) = async_channel::bounded(1);
         let target = path.clone();
         std::thread::spawn(move || {
+            left.pids.extend(detect::end_processes(&others));
             if !left.wait(EXIT_WAIT) {
                 tracing::warn!(path = %target.display(), "processes still running in a worktree being removed");
             }
-            let _ = tx.send_blocking(repo.remove_worktree(&target, force));
+            let result =
+                if was_leftover { repo.remove_leftover(&target) } else { repo.remove_worktree(&target, force) };
+            let leftover = result.is_err() && target.exists() && repo.has_worktree(&target) == Ok(false);
+            let _ = tx.send_blocking((result, leftover));
         });
-        let removed = Task::perform(async move { rx.recv().await.unwrap_or_else(|e| Err(e.to_string())) }, move |r| {
-            msg(RemoveMsg::Removed { path: path.clone(), result: r })
-        });
+        let removed = Task::perform(
+            async move { rx.recv().await.unwrap_or_else(|e| (Err(e.to_string()), false)) },
+            move |(result, leftover)| msg(RemoveMsg::Removed { path: path.clone(), result, leftover }),
+        );
         Task::batch([removed, self.after_select()])
     }
 
@@ -231,10 +288,12 @@ impl App {
             .collect();
         let this_one = if f.sessions.contains(&f.back.tab) { ", this one included" } else { "" };
         col = col.push(
-            text(match names.len() {
-                0 => "No session works there.".to_owned(),
-                1 => format!("It closes the session working there{this_one}: {}.", names[0]),
-                n => format!("It closes the {n} sessions working there{this_one}: {}.", names.join(", ")),
+            text(match (names.len(), f.closed) {
+                (0, 0) => "No session works there.".to_owned(),
+                (0, 1) => "Its session is closed.".to_owned(),
+                (0, n) => format!("Its {n} sessions are closed."),
+                (1, _) => format!("It closes the session working there{this_one}: {}.", names[0]),
+                (n, _) => format!("It closes the {n} sessions working there{this_one}: {}.", names.join(", ")),
             })
             .size(13),
         );
@@ -251,6 +310,24 @@ impl App {
                 ))
                 .size(12)
                 .style(text::danger),
+            );
+        }
+        if let Some(others) = f.others.as_ref().filter(|o| !o.is_empty()) {
+            col = col.push(
+                column![
+                    text(format!(
+                        "Other programs work in this folder, and it cannot be deleted while they run: {}.",
+                        program_list(others.iter().map(|p| p.name.as_str()))
+                    ))
+                    .size(13)
+                    .style(text::danger),
+                    checkbox(f.end_others)
+                        .label("End them")
+                        .on_toggle(|on| msg(RemoveMsg::EndOthers(on)))
+                        .size(14)
+                        .text_size(13),
+                ]
+                .spacing(6),
             );
         }
 
@@ -274,18 +351,33 @@ impl App {
             .into(),
             Some(Err(e)) => text(format!("git could not check for changes: {e}")).size(12).style(text::danger).into(),
         };
-        col = col.push(changes);
+        // Once the worktree is gone from git, what is left of it just goes.
+        if !f.leftover {
+            col = col.push(changes);
+        }
         if let Some(e) = &f.error {
-            let closed = if f.closed > 0 { " Its sessions are closed already." } else { "" };
-            col = col.push(text(format!("git did not remove it: {e}{closed}")).size(13).style(text::danger));
+            col = col.push(
+                text(if f.leftover {
+                    format!("The worktree is gone from git, but part of its folder is left: {e}")
+                } else {
+                    format!("git did not remove it: {e}")
+                })
+                .size(13)
+                .style(text::danger),
+            );
         }
 
         let back = button(text("Back")).padding([6, 14]).style(button::secondary);
+        let label = match (f.removing, f.leftover) {
+            (true, _) => "Removing…",
+            (false, true) => "Delete the rest",
+            (false, false) => "Remove worktree",
+        };
         col.push(
             row![
                 space::horizontal(),
                 if f.removing { back } else { back.on_press(Message::DialogCancel) },
-                button(text(if f.removing { "Removing…" } else { "Remove worktree" }))
+                button(text(label))
                     .padding([6, 14])
                     .style(button::danger)
                     .on_press_maybe(f.can_remove().then(|| msg(RemoveMsg::Confirm))),
@@ -293,5 +385,33 @@ impl App {
             .spacing(8),
         )
         .into()
+    }
+}
+
+/// Program names with how many of each run, most first:
+/// `conhost.exe ×3, cmd.exe ×2, more.com`.
+fn program_list<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for name in names {
+        match counts.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((name, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let items: Vec<String> =
+        counts.iter().map(|(name, n)| if *n == 1 { (*name).to_owned() } else { format!("{name} ×{n}") }).collect();
+    items.join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn program_lists() {
+        let names = ["cmd.exe", "conhost.exe", "more.com", "conhost.exe", "cmd.exe", "conhost.exe"];
+        assert_eq!(program_list(names.into_iter()), "conhost.exe ×3, cmd.exe ×2, more.com");
+        assert_eq!(program_list(["node.exe"].into_iter()), "node.exe");
     }
 }
