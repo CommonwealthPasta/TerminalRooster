@@ -60,6 +60,16 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // 2: the directory each terminal's shell was last in
     "ALTER TABLE panes ADD COLUMN cwd TEXT;",
+    // 3: project groups
+    r#"
+    CREATE TABLE project_groups (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT NOT NULL,
+        collapsed  INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+    );
+    ALTER TABLE projects ADD COLUMN group_id INTEGER REFERENCES project_groups(id) ON DELETE SET NULL;
+    "#,
 ];
 
 /// Applies connection pragmas used by every connection.

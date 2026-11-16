@@ -8,6 +8,7 @@ mod color_picker;
 mod desktop_entry;
 mod dialogs;
 mod git_panel;
+mod groups;
 mod keymap;
 mod layout_conv;
 mod leave_room;

@@ -8,7 +8,7 @@ use crate::agent::AgentKind;
 use crate::alert::Alert;
 use crate::detect::ObservedAgent;
 use crate::layout::{Axis, Layout};
-use crate::model::{PaneId, ProjectId, TabId, TaskId};
+use crate::model::{GroupId, PaneId, ProjectId, TabId, TaskId};
 
 /// A state change requested by the front end.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -31,12 +31,41 @@ pub enum Command {
         project: ProjectId,
         shell: Option<String>,
     },
+    /// Deletes a project, and its group if it was the group's last.
     DeleteProject(ProjectId),
+    /// Moves a project to `to_index` of the list without it, into `group`
+    /// (`None`: outside any group). A group's projects stay together, so the
+    /// place has to be next to or among `group`'s projects and not among
+    /// another group's. A group left without projects is deleted.
     MoveProject {
         project: ProjectId,
         to_index: usize,
+        group: Option<GroupId>,
     },
     SelectProject(ProjectId),
+
+    /// Puts `project` just after `with`, in `with`'s group. If `with` has
+    /// none, a new group holding the two takes `with`'s place
+    /// ([`Outcome::Group`]).
+    GroupProjects {
+        project: ProjectId,
+        with: ProjectId,
+    },
+    /// Moves a group's projects, together, to `to_index` of the list
+    /// without them. The place can't be among another group's projects.
+    MoveGroup {
+        group: GroupId,
+        to_index: usize,
+    },
+    RenameGroup {
+        group: GroupId,
+        name: String,
+    },
+    /// Hides (`true`) or shows a group's projects in the list.
+    SetGroupCollapsed {
+        group: GroupId,
+        collapsed: bool,
+    },
 
     /// Creates a tab (with one terminal) and selects it. Its terminals start
     /// in `working_dir`, or in the project's directory when that is `None`.
@@ -138,6 +167,8 @@ pub enum Command {
 pub enum Outcome {
     None,
     Project(ProjectId),
+    /// A new group (named [`crate::NEW_GROUP_NAME`]).
+    Group(GroupId),
     Tab(TabId),
     Pane(PaneId),
     Task(TaskId),

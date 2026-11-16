@@ -270,11 +270,11 @@ fn reordering_survives_restart() {
     let tabs = |core: &Core| core.state().tabs_of(c).map(|t| t.id).collect::<Vec<_>>();
 
     // `to_index` is the place in the list without the moved item.
-    core.dispatch(Command::MoveProject { project: c, to_index: 0 }).unwrap();
+    core.dispatch(Command::MoveProject { project: c, to_index: 0, group: None }).unwrap();
     assert_eq!(projects(&core), [c, a, b]);
-    core.dispatch(Command::MoveProject { project: a, to_index: 2 }).unwrap();
+    core.dispatch(Command::MoveProject { project: a, to_index: 2, group: None }).unwrap();
     assert_eq!(projects(&core), [c, b, a]);
-    core.dispatch(Command::MoveProject { project: b, to_index: 99 }).unwrap();
+    core.dispatch(Command::MoveProject { project: b, to_index: 99, group: None }).unwrap();
     assert_eq!(projects(&core), [c, a, b], "past the end means last");
 
     core.dispatch(Command::MoveTab { tab: tab3, to_index: 0 }).unwrap();
@@ -286,6 +286,77 @@ fn reordering_survives_restart() {
     let core = open(dir.path());
     assert_eq!(projects(&core), [c, a, b]);
     assert_eq!(tabs(&core), [tab3, tab2, tab1]);
+}
+
+#[test]
+fn groups_keep_their_projects_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(printer("x", None)))).unwrap();
+    let mut project = |name: &str| match core
+        .dispatch(Command::CreateProject { name: name.into(), working_dir: dir.path().into(), shell: None })
+        .unwrap()
+    {
+        Outcome::Project(p) => p,
+        _ => panic!(),
+    };
+    let (a, b, c, d) = (project("a"), project("b"), project("c"), project("d"));
+    // Each project with its group, in list order.
+    let list = |core: &Core| core.state().projects.iter().map(|p| (p.id, p.group)).collect::<Vec<_>>();
+
+    // Dropped on a project without a group: the two make a new group where that project was.
+    let Outcome::Group(g) = core.dispatch(Command::GroupProjects { project: c, with: a }).unwrap() else {
+        panic!("expected a new group")
+    };
+    assert_eq!(list(&core), [(a, Some(g)), (c, Some(g)), (b, None), (d, None)]);
+    assert_eq!(core.state().group(g).unwrap().name, NEW_GROUP_NAME);
+    // Dropped on a project in a group: it joins that group, just after it.
+    assert_eq!(core.dispatch(Command::GroupProjects { project: d, with: a }).unwrap(), Outcome::None);
+    assert_eq!(list(&core), [(a, Some(g)), (d, Some(g)), (c, Some(g)), (b, None)]);
+    assert!(core.dispatch(Command::GroupProjects { project: d, with: d }).is_err());
+
+    // A group's projects can't be split up.
+    let before = list(&core);
+    assert!(core.dispatch(Command::MoveProject { project: b, to_index: 1, group: None }).is_err());
+    assert!(core.dispatch(Command::MoveProject { project: a, to_index: 3, group: Some(g) }).is_err());
+    assert_eq!(list(&core), before, "refused moves change nothing");
+    // But a project can move in among them, or out next to them.
+    core.dispatch(Command::MoveProject { project: b, to_index: 1, group: Some(g) }).unwrap();
+    assert_eq!(list(&core), [(a, Some(g)), (b, Some(g)), (d, Some(g)), (c, Some(g))]);
+    core.dispatch(Command::MoveProject { project: c, to_index: 3, group: None }).unwrap();
+    assert_eq!(list(&core), [(a, Some(g)), (b, Some(g)), (d, Some(g)), (c, None)]);
+
+    // A group moves with all its projects, and not into another group.
+    core.dispatch(Command::MoveGroup { group: g, to_index: 1 }).unwrap();
+    assert_eq!(list(&core), [(c, None), (a, Some(g)), (b, Some(g)), (d, Some(g))]);
+    let Outcome::Group(h) = core.dispatch(Command::GroupProjects { project: d, with: c }).unwrap() else { panic!() };
+    assert_eq!(list(&core), [(c, Some(h)), (d, Some(h)), (a, Some(g)), (b, Some(g))]);
+    assert!(core.dispatch(Command::MoveGroup { group: g, to_index: 1 }).is_err());
+    core.dispatch(Command::MoveGroup { group: g, to_index: 0 }).unwrap();
+    assert_eq!(list(&core), [(a, Some(g)), (b, Some(g)), (c, Some(h)), (d, Some(h))]);
+
+    core.dispatch(Command::RenameGroup { group: g, name: " work ".into() }).unwrap();
+    assert!(core.dispatch(Command::RenameGroup { group: g, name: "  ".into() }).is_err());
+    core.dispatch(Command::SetGroupCollapsed { group: g, collapsed: true }).unwrap();
+    drop(core);
+    let mut core = open(dir.path());
+    assert_eq!(list(&core), [(a, Some(g)), (b, Some(g)), (c, Some(h)), (d, Some(h))]);
+    let group = core.state().group(g).unwrap();
+    assert_eq!((group.name.as_str(), group.collapsed), ("work", true));
+
+    // A group goes away with its last project, whether moved out or deleted.
+    core.dispatch(Command::MoveProject { project: c, to_index: 0, group: None }).unwrap();
+    assert!(core.state().group(h).is_some());
+    core.dispatch(Command::MoveProject { project: d, to_index: 0, group: None }).unwrap();
+    assert!(core.state().group(h).is_none());
+    core.dispatch(Command::DeleteProject(a)).unwrap();
+    core.dispatch(Command::DeleteProject(b)).unwrap();
+    assert!(core.state().groups.is_empty());
+    assert_eq!(list(&core), [(d, None), (c, None)]);
+    drop(core);
+    let core = open(dir.path());
+    assert!(core.state().groups.is_empty());
+    assert_eq!(list(&core), [(d, None), (c, None)]);
 }
 
 const CRASH_CHILD_ENV: &str = "TERMINALROOSTER_TEST_CRASH_CHILD";

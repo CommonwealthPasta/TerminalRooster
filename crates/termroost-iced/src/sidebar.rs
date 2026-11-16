@@ -6,10 +6,11 @@ use std::path::Path;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input, tooltip};
 use iced::{Alignment, Element, Font, Length, Padding, font};
 use termroost_core::git::Head;
-use termroost_core::{AgentKind, PaneId, Project, ProjectId, Tab, TabId};
+use termroost_core::{AgentKind, PaneId, Project, ProjectGroup, Tab, TabId};
 
 use crate::agent_icon::{agent_icon, terminal_icon};
-use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget, place};
+use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget};
+use crate::groups::{self, Row};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
 use crate::on_escape::on_escape;
@@ -20,6 +21,8 @@ use crate::theme;
 const ACTIONS_WIDTH: f32 = 26.0;
 /// Space between the items of the project and session lists.
 const LIST_SPACING: f32 = 2.0;
+/// How far right a group's projects are.
+const GROUP_INDENT: f32 = 12.0;
 
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
 
@@ -101,16 +104,18 @@ pub fn short_dir(path: &std::path::Path, max: usize) -> String {
 }
 
 /// Whether a project matches the projects search: each word of `query` is in
-/// its name or its folder's name, ignoring case. An empty query matches all.
-pub fn matches_search(name: &str, dir: &Path, query: &str) -> bool {
+/// its name, its group's name or its folder's name, ignoring case. An empty
+/// query matches all.
+pub fn matches_search(name: &str, group: Option<&str>, dir: &Path, query: &str) -> bool {
     let mut words = query.split_whitespace().map(str::to_lowercase).peekable();
     if words.peek().is_none() {
         return true;
     }
     let name = name.to_lowercase();
+    let group = group.unwrap_or_default().to_lowercase();
     // Not the whole path: its first folders are often shared by every project.
     let folder = dir.file_name().map(|f| f.to_string_lossy().to_lowercase()).unwrap_or_default();
-    words.all(|w| name.contains(&w) || folder.contains(&w))
+    words.all(|w| name.contains(&w) || group.contains(&w) || folder.contains(&w))
 }
 
 /// Text size of a list item's name.
@@ -141,6 +146,15 @@ fn item_style(selected: bool, drop_target: bool) -> impl Fn(&iced::Theme) -> con
             ..container::Style::default()
         }
     }
+}
+
+/// The line down the left of a group's projects, as wide as they are indented.
+fn group_rail<'a>() -> Element<'a, Message> {
+    let line = container(space::horizontal()).width(2).height(Length::Fill).style(|t: &iced::Theme| container::Style {
+        background: Some(iced::Background::Color(iced::Color { a: 0.5, ..theme::muted(t) })),
+        ..container::Style::default()
+    });
+    container(line).padding(Padding { left: 5.0, ..Padding::ZERO }).width(GROUP_INDENT).height(Length::Fill).into()
 }
 
 /// A "+" under the last item of a list, as wide as the list.
@@ -217,13 +231,26 @@ impl App {
         .padding([8, 10]);
 
         let shown: Vec<&Project> = self.listed_projects().collect();
-        let ids: Vec<ProjectId> = shown.iter().map(|p| p.id).collect();
-        let all: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
-        let list = reorder(shown.iter().map(|p| self.project_item(p))).spacing(LIST_SPACING).on_move_if(
-            self.rename.is_none(),
-            // While searching, a place in the list isn't the same place among all projects.
-            move |from, to| Message::MoveProject(ids[from], place(&all, &ids, ids[from], to)),
-        );
+        // While searching, groups show the projects found in them.
+        let searching = self.searching_projects();
+        let open = |g| searching || s.group(g).is_some_and(|g| !g.collapsed);
+        let (rows, depths): (Vec<Row>, Vec<u8>) =
+            groups::rows(&groups::entries(shown.iter().copied()), open).into_iter().unzip();
+        let rows_view = rows.iter().zip(&depths).map(|(row, depth)| {
+            let item = match *row {
+                Row::Group(g) => s.group(g).map(|g| self.group_item(g, searching)),
+                Row::Project(p) => s.project(p).map(|p| self.project_item(p, *depth > 0)),
+            };
+            item.unwrap_or_else(|| space::horizontal().width(0).into())
+        });
+        // While searching, a place in the list isn't the same place among all projects.
+        let all = groups::entries(&s.projects);
+        let list = reorder(rows_view)
+            .spacing(LIST_SPACING)
+            .nested(depths, GROUP_INDENT)
+            .on_drop_if(self.rename.is_none(), move |from, target| {
+                groups::drop_command(&all, &rows, from, target).map(Message::ArrangeProjects)
+            });
         let mut items = column![list].spacing(LIST_SPACING).padding([0, 6]);
         if shown.is_empty() && !s.projects.is_empty() {
             items = items.push(container(muted_text("No projects match")).padding([6, 8]));
@@ -238,8 +265,16 @@ impl App {
 
     /// The projects the list shows: those matching the search, in their order.
     pub(crate) fn listed_projects(&self) -> impl Iterator<Item = &Project> {
+        let s = self.core.state();
         let query = self.project_search.as_str();
-        self.core.state().projects.iter().filter(move |p| matches_search(&p.name, &p.working_dir, query))
+        s.projects.iter().filter(move |p| {
+            let group = p.group.and_then(|g| s.group(g)).map(|g| g.name.as_str());
+            matches_search(&p.name, group, &p.working_dir, query)
+        })
+    }
+
+    pub(crate) fn searching_projects(&self) -> bool {
+        self.project_search.split_whitespace().next().is_some()
     }
 
     /// The box that filters the projects list, with a ✕ to empty it.
@@ -260,7 +295,45 @@ impl App {
         container(field).padding(Padding { top: 0.0, right: 6.0, bottom: 6.0, left: 6.0 }).into()
     }
 
-    fn project_item<'a>(&'a self, p: &'a Project) -> Element<'a, Message> {
+    /// A group's row: a click shows or hides its projects.
+    fn group_item<'a>(&'a self, group: &'a ProjectGroup, searching: bool) -> Element<'a, Message> {
+        if let Some(input) = self.rename_input(RenameTarget::Group(group.id)) {
+            return input;
+        }
+        let s = self.core.state();
+        let projects: Vec<&Project> = s.projects_in(group.id).collect();
+        let open = searching || !group.collapsed;
+        let arrow = text(if open { "▼" } else { "▶" }).font(theme::MONO).size(9).width(12);
+        let mut label = row![arrow, text(&group.name).size(13).font(BOLD).width(Length::Fill)]
+            .spacing(4)
+            .align_y(Alignment::Center);
+        let mut selected = false;
+        if !open {
+            // Closed, it stands for its projects: their alerts, and the selection.
+            selected = projects.iter().any(|p| s.selected_project == Some(p.id));
+            let tabs = || projects.iter().flat_map(|p| s.tabs_of(p.id));
+            let notice = self.notice_of(tabs().flat_map(|t| t.layout.panes()));
+            label = label.push(marker(notice, tabs().any(|t| self.activity.contains(&t.id))));
+        }
+        let label = label.push(muted_text(projects.len().to_string()));
+        let mut body =
+            mouse_area(container(label).padding([5, 8]).width(Length::Fill).style(item_style(selected, false)))
+                .on_double_click(Message::GroupDoubleClicked(group.id));
+        if !searching {
+            // On release, so pressing it to drag it doesn't open or close it.
+            body = body.on_release(Message::ToggleGroup(group.id));
+        }
+        let rename = icon_button("✎", Message::StartRename(RenameTarget::Group(group.id)), "Rename group");
+        row![body, container(rename).width(ACTIONS_WIDTH)].align_y(Alignment::Center).into()
+    }
+
+    /// A project's row; `nested` in a group, it is drawn further right.
+    fn project_item<'a>(&'a self, p: &'a Project, nested: bool) -> Element<'a, Message> {
+        let item = self.project_row(p);
+        if nested { row![group_rail(), item].into() } else { item }
+    }
+
+    fn project_row<'a>(&'a self, p: &'a Project) -> Element<'a, Message> {
         if let Some(input) = self.rename_input(RenameTarget::Project(p.id)) {
             return input;
         }
@@ -416,7 +489,7 @@ mod tests {
     #[test]
     fn search_matches_each_word_in_the_name_or_folder() {
         let worktree = dir(&["projects", "TermRoost-feature-search"]);
-        let m = |query| matches_search("TerminalRooster", &worktree, query);
+        let m = |query| matches_search("TerminalRooster", None, &worktree, query);
         assert!(m(""), "no search: every project");
         assert!(m("   "));
         assert!(m("rooster"), "in the name, any case");
@@ -429,7 +502,16 @@ mod tests {
 
     #[test]
     fn search_copes_with_folders_without_a_name() {
-        assert!(matches_search("Root", Path::new("/"), "root"));
-        assert!(!matches_search("Root", Path::new("/"), "home"));
+        assert!(matches_search("Root", None, Path::new("/"), "root"));
+        assert!(!matches_search("Root", None, Path::new("/"), "home"));
+    }
+
+    #[test]
+    fn search_finds_a_group_by_its_name() {
+        let api = dir(&["work", "api"]);
+        assert!(matches_search("api", Some("Client work"), &api, "client"), "every project of the group");
+        assert!(matches_search("api", Some("Client work"), &api, "client api"), "each word anywhere");
+        assert!(!matches_search("api", Some("Client work"), &api, "client web"));
+        assert!(!matches_search("api", None, &api, "client"));
     }
 }
