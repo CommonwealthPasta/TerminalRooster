@@ -15,6 +15,8 @@
 //! * `OSC 7 ; file://<host>/<path>`, `OSC 9 ; 9 ; <path>` (ConEmu, Windows
 //!   Terminal) and `OSC 633 ; P ; Cwd=<path>` (VS Code): the shell's working
 //!   directory, so a restored terminal can start there again.
+//! * `CSI 2 J`, `CSI 3 J` and `ESC c` outside the alternate screen: the screen
+//!   was cleared (see `terminal::Pin`).
 
 use std::path::PathBuf;
 
@@ -34,16 +36,21 @@ pub(crate) enum Signal {
     Notify { title: Option<String>, body: String },
     /// The shell's working directory, as an absolute path of this system.
     Cwd(PathBuf),
+    /// The main screen was cleared, or the terminal reset.
+    Cleared,
 }
 
 /// Longest OSC payload kept; longer ones (e.g. huge OSC 52 copies) are skipped.
 const MAX_OSC: usize = 4096;
+/// Longest CSI parameter list kept; the ones of interest are a few bytes.
+const MAX_CSI: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum State {
     #[default]
     Ground,
     Escape,
+    Csi,
     Osc,
     /// ESC inside an OSC: `\` ends it, anything else aborts it.
     OscEscape,
@@ -55,6 +62,11 @@ pub(crate) struct OscScanner {
     state: State,
     buf: Vec<u8>,
     overflow: bool,
+    /// Parameters of the CSI sequence being read.
+    csi: Vec<u8>,
+    /// A full-screen program switched to the alternate screen, whose clears
+    /// leave the main screen alone.
+    alt_screen: bool,
     /// Kitty notification being assembled from chunks (`d=0`).
     kitty: Option<(Option<String>, String)>,
 }
@@ -68,7 +80,22 @@ impl OscScanner {
                         self.state = State::Escape;
                     }
                 }
-                State::Escape => self.escape(b),
+                State::Escape => self.escape(b, out),
+                State::Csi => match b {
+                    0x20..=0x3f => {
+                        if self.csi.len() < MAX_CSI {
+                            self.csi.push(b);
+                        }
+                    }
+                    0x40..=0x7e => {
+                        self.csi_final(b, out);
+                        self.state = State::Ground;
+                    }
+                    0x1b => self.state = State::Escape,
+                    0x18 | 0x1a => self.state = State::Ground,
+                    // Other control characters run without ending the sequence.
+                    _ => {}
+                },
                 State::Osc => match b {
                     0x07 => {
                         self.dispatch(out);
@@ -85,23 +112,50 @@ impl OscScanner {
                         self.dispatch(out);
                         self.state = State::Ground;
                     } else {
-                        self.escape(b);
+                        self.escape(b, out);
                     }
                 }
             }
         }
     }
 
-    fn escape(&mut self, b: u8) {
+    fn escape(&mut self, b: u8, out: &mut Vec<Signal>) {
         self.state = match b {
             b']' => {
                 self.buf.clear();
                 self.overflow = false;
                 State::Osc
             }
+            b'[' => {
+                self.csi.clear();
+                State::Csi
+            }
+            b'c' => {
+                // RIS: a full reset, which also leaves the alternate screen.
+                self.alt_screen = false;
+                out.push(Signal::Cleared);
+                State::Ground
+            }
             0x1b => State::Escape,
             _ => State::Ground,
         };
+    }
+
+    fn csi_final(&mut self, b: u8, out: &mut Vec<Signal>) {
+        let params = self.csi.as_slice();
+        match b {
+            // ED 2 (the screen) and ED 3 (the scrollback); ED 0 and 1 clear a part only.
+            b'J' if (params == b"2" || params == b"3") && !self.alt_screen => out.push(Signal::Cleared),
+            // Private modes 47, 1047 and 1049 switch to and from the alternate screen.
+            b'h' | b'l'
+                if params.strip_prefix(b"?").is_some_and(|modes| {
+                    modes.split(|c| *c == b';').any(|m| matches!(m, b"47" | b"1047" | b"1049"))
+                }) =>
+            {
+                self.alt_screen = b == b'h';
+            }
+            _ => {}
+        }
     }
 
     fn dispatch(&mut self, out: &mut Vec<Signal>) {
@@ -430,5 +484,19 @@ mod tests {
         // Not a drive: left alone (and not absolute on Windows).
         assert_eq!(windows_path("/home/me"), r"\home\me");
         assert_eq!(windows_path("/mnt/wsl"), r"\mnt\wsl");
+    }
+
+    #[test]
+    fn screen_clears() {
+        assert_eq!(scan(&[b"a\x1b[2J", b"\x1b[3J\x1bc"]), [Signal::Cleared, Signal::Cleared, Signal::Cleared]);
+        assert_eq!(scan(&[b"\x1b[", b"2", b"J"]), [Signal::Cleared]);
+        // Partial clears, other sequences, and selective erase.
+        assert!(scan(&[b"\x1b[J\x1b[1J\x1b[2K\x1b[?2J\x1b[2;3H\x1b[32m"]).is_empty());
+        // A full-screen program clearing the alternate screen.
+        assert!(scan(&[b"\x1b[?1049h\x1b[2J\x1b[H\x1b[?1049l"]).is_empty());
+        assert_eq!(scan(&[b"\x1b[?1049h\x1b[2J\x1b[?1049l\x1b[2J"]), [Signal::Cleared]);
+        assert_eq!(scan(&[b"\x1b[?1;1049h\x1bc\x1b[2J"]), [Signal::Cleared, Signal::Cleared]);
+        // An OSC right after a CSI still counts.
+        assert_eq!(scan(&[b"\x1b[2J\x1b]133;D;0\x07"]), [Signal::Cleared, Signal::CommandDone(Some(0))]);
     }
 }

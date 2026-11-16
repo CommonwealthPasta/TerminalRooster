@@ -115,6 +115,8 @@ pub(crate) struct Shared {
     tracker: Mutex<Tracker>,
     /// The directory the shell last reported (shells report it at every prompt).
     cwd: Mutex<Option<PathBuf>>,
+    /// Locked after the term, never before.
+    pin: Mutex<Pin>,
 }
 
 impl Shared {
@@ -141,6 +143,7 @@ impl Shared {
                     self.send(Event::CwdChanged { pane: self.pane, dir });
                 }
             }
+            Signal::Cleared => self.pin.lock().unwrap().screen_cleared(),
             signal => {
                 let alert = self.tracker.lock().unwrap().signal(signal);
                 self.alert(alert);
@@ -273,6 +276,7 @@ impl TerminalHandle {
             palette,
             tracker: Mutex::new(Tracker::default()),
             cwd: Mutex::new(None),
+            pin: Mutex::new(Pin::Off),
         });
         let config = term::Config { scrolling_history: scrollback_lines, ..Default::default() };
         let term = Term::new(config, &size, Proxy { shared: shared.clone(), run: None });
@@ -326,6 +330,9 @@ impl TerminalHandle {
         let size = *shared.size.lock().unwrap();
         // The new shell reports its directory afresh.
         *shared.cwd.lock().unwrap() = None;
+        if cfg!(windows) {
+            self.make_room_for_conpty();
+        }
         let pty = tty::new(&options, size.window_size(), shared.pane.0 as u64)?;
         #[cfg(not(windows))]
         let shell_pid = pty.child().id();
@@ -342,6 +349,23 @@ impl TerminalHandle {
         let _ = event_loop.spawn();
         shared.wake();
         Ok(())
+    }
+
+    /// ConPTY clears the screen when it starts and from then on draws the
+    /// whole screen itself, from the top. So what is on the screen now (a
+    /// restored session, or the last shell's output) moves into the history,
+    /// and the view is pinned to keep it in sight above the new shell's output.
+    fn make_room_for_conpty(&self) {
+        let mut term = self.0.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return;
+        }
+        // Scrolls everything up to the last non-blank line into the history.
+        snapshot::replay(&mut term, b"\x1b[0m\x1b[2J\x1b[H", None);
+        let pin = if term.grid().history_size() > 0 { Pin::starting() } else { Pin::Off };
+        *self.0.shared.pin.lock().unwrap() = pin;
+        drop(term);
+        self.0.shared.bump();
     }
 
     /// Stops the shell process (the content is kept).
@@ -414,14 +438,22 @@ impl TerminalHandle {
     fn on_user_input(&self) {
         let mut term = self.0.term.lock();
         let mut changed = term.selection.take().is_some();
-        if term.grid().display_offset() != 0 {
+        let offset = term.grid().display_offset();
+        if offset != 0 {
             term.scroll_display(Scroll::Bottom);
-            changed = true;
+            // A pinned view stops at the newest output instead.
+            self.user_scrolled(&mut term);
+            changed |= term.grid().display_offset() != offset;
         }
         drop(term);
         if changed {
             self.0.shared.bump();
         }
+    }
+
+    /// After the user moved the view: keeps it within the pin.
+    fn user_scrolled(&self, term: &mut Term<Proxy>) {
+        apply_pin(term, &mut self.0.shared.pin.lock().unwrap(), true);
     }
 
     /// Sends a key press. Returns `false` if the key produces no input.
@@ -486,6 +518,7 @@ impl TerminalHandle {
             } else {
                 term.resize(size);
             }
+            apply_pin(&mut term, &mut self.0.shared.pin.lock().unwrap(), false);
         }
         if let Some(s) = self.0.shared.sender.lock().unwrap().as_ref() {
             let _ = s.send(Msg::Resize(size.window_size()));
@@ -500,7 +533,13 @@ impl TerminalHandle {
 
     /// Forwards a mouse event to the program. Returns `false` if it was not reported.
     pub fn mouse(&self, ev: &MouseInput) -> bool {
-        match input::encode_mouse(ev, self.mode()) {
+        let (mode, offset) = {
+            let term = self.0.term.lock();
+            (*term.mode(), term.grid().display_offset())
+        };
+        // A view scrolled back (see `Pin`) shows history above the program's screen.
+        let Some(row) = ev.row.checked_sub(offset) else { return false };
+        match input::encode_mouse(&MouseInput { row, ..*ev }, mode) {
             Some(bytes) => {
                 self.write(bytes);
                 true
@@ -532,18 +571,23 @@ impl TerminalHandle {
             };
             self.write(seq.repeat(delta.unsigned_abs().min(20) as usize));
         } else {
-            self.0.term.lock().scroll_display(Scroll::Delta(delta));
-            self.0.shared.bump();
+            self.scroll(Scroll::Delta(delta));
         }
     }
 
     pub fn scroll_page(&self, up: bool) {
-        self.0.term.lock().scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
-        self.0.shared.bump();
+        self.scroll(if up { Scroll::PageUp } else { Scroll::PageDown });
     }
 
     pub fn scroll_to_bottom(&self) {
-        self.0.term.lock().scroll_display(Scroll::Bottom);
+        self.scroll(Scroll::Bottom);
+    }
+
+    fn scroll(&self, scroll: Scroll) {
+        let mut term = self.0.term.lock();
+        term.scroll_display(scroll);
+        self.user_scrolled(&mut term);
+        drop(term);
         self.0.shared.bump();
     }
 
@@ -596,7 +640,9 @@ impl TerminalHandle {
         let generation = self.generation();
         let mut cache = self.0.render.lock().unwrap();
         if cache.0 != generation {
-            let term = self.0.term.lock();
+            let mut term = self.0.term.lock();
+            // The output moved on: the pinned view follows it.
+            apply_pin(&mut term, &mut self.0.shared.pin.lock().unwrap(), false);
             cache.1.rebuild(&term, &self.0.shared.palette.read().unwrap());
             cache.0 = generation;
         }
@@ -606,6 +652,85 @@ impl TerminalHandle {
     /// Serialized scrollback, or `None` while the alternate screen is active.
     pub(crate) fn snapshot(&self, max_lines: usize) -> Option<Vec<u8>> {
         snapshot::serialize(&*self.0.term.lock(), max_lines)
+    }
+}
+
+/// Keeps output from before a shell started in sight on Windows.
+///
+/// ConPTY clears the screen when a shell starts and from then on draws the
+/// whole screen itself, from the top, so the earlier output (a restored
+/// session, a previous shell's) can only be kept in the history (see
+/// [`TerminalHandle::make_room_for_conpty`]). The new shell's first prompt
+/// would then sit at the top of an empty screen. Instead, while the new
+/// output has not reached the bottom row, the view stays scrolled back just
+/// far enough that it ends at the cursor's row, with the earlier output right
+/// above, as if the screen had never been cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Pin {
+    Off,
+    /// `follow`: the view stays with the newest output (the user has not
+    /// scrolled further back). `cleared`: ConPTY's clear of its first frame
+    /// has come by; the next clear is a program's.
+    On {
+        follow: bool,
+        cleared: bool,
+    },
+    /// A program cleared the screen: the view goes back to the live screen.
+    Ending {
+        follow: bool,
+    },
+}
+
+impl Pin {
+    fn starting() -> Pin {
+        Pin::On { follow: true, cleared: false }
+    }
+
+    /// The output cleared the screen or reset the terminal.
+    fn screen_cleared(&mut self) {
+        *self = match *self {
+            Pin::On { follow, cleared: false } => Pin::On { follow, cleared: true },
+            Pin::On { follow, cleared: true } => Pin::Ending { follow },
+            other => other,
+        };
+    }
+}
+
+/// Moves the view to where the pin keeps it. `user`: the user just moved the
+/// view, which decides whether it follows the output from now on.
+fn apply_pin<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>, pin: &mut Pin, user: bool) {
+    let follow = match *pin {
+        Pin::Off => return,
+        Pin::Ending { follow } => {
+            if follow {
+                term.scroll_display(Scroll::Bottom);
+            }
+            *pin = Pin::Off;
+            return;
+        }
+        // Full-screen programs draw on a screen of their own.
+        Pin::On { .. } if term.mode().contains(TermMode::ALT_SCREEN) => return,
+        Pin::On { follow, .. } => follow,
+    };
+    let grid = term.grid();
+    // How far back the view must be for its last row to be the cursor's.
+    let below = term.screen_lines().saturating_sub(1).saturating_sub(grid.cursor.point.line.0.max(0) as usize);
+    let floor = below.min(grid.history_size());
+    let offset = grid.display_offset();
+    let follow = if user { offset <= floor } else { follow };
+    if floor == 0 {
+        // The output reached the bottom row: the plain view shows it all.
+        if follow {
+            term.scroll_display(Scroll::Bottom);
+        }
+        *pin = Pin::Off;
+        return;
+    }
+    if follow || offset < floor {
+        term.scroll_display(Scroll::Delta(floor as i32 - offset as i32));
+    }
+    if let Pin::On { follow: f, .. } = pin {
+        *f = follow;
     }
 }
 
@@ -655,12 +780,12 @@ mod tests {
 
     mod conpty {
         use alacritty_terminal::event::VoidListener;
-        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::grid::{Dimensions, Scroll};
         use alacritty_terminal::index::{Column, Line};
         use alacritty_terminal::term::{self, Term};
         use alacritty_terminal::vte::ansi::Processor;
 
-        use super::super::{GridSize, resize_like_conpty};
+        use super::super::{GridSize, Pin, apply_pin, resize_like_conpty};
 
         fn term(cols: u16, rows: u16) -> Term<VoidListener> {
             let size = GridSize { cols, rows, cell_width: 1, cell_height: 1 };
@@ -681,6 +806,75 @@ mod tests {
         fn view(t: &Term<VoidListener>) -> Vec<String> {
             let offset = t.grid().display_offset() as i32;
             (0..t.screen_lines() as i32).map(|r| row(t, r - offset)).collect()
+        }
+
+        /// A restored session as a shell on Windows starts: the old output
+        /// is moved into the history, then ConPTY clears and draws its prompt.
+        fn restored() -> (Term<VoidListener>, Pin) {
+            let mut t = term(20, 6);
+            for i in 1..=8 {
+                feed(&mut t, &format!("old-{i}\r\n"));
+            }
+            feed(&mut t, "-- restored --\r\n");
+            feed(&mut t, "\x1b[0m\x1b[2J\x1b[H");
+            let mut pin = Pin::starting();
+            pin.screen_cleared();
+            feed(&mut t, "\x1b[2J\x1b[H\r\n$ ");
+            apply_pin(&mut t, &mut pin, false);
+            (t, pin)
+        }
+
+        #[test]
+        fn earlier_output_stays_above_the_new_prompt() {
+            let (mut t, mut pin) = restored();
+            assert_eq!(view(&t), ["old-6", "old-7", "old-8", "-- restored --", "", "$"]);
+
+            // Typing jumps to the newest output, which is the pinned view.
+            t.scroll_display(Scroll::Bottom);
+            apply_pin(&mut t, &mut pin, true);
+            assert_eq!(view(&t)[5], "$");
+
+            // Output follows on, pulling the earlier lines up.
+            feed(&mut t, "ls\r\na b\r\n$ ");
+            apply_pin(&mut t, &mut pin, false);
+            assert_eq!(view(&t), ["old-8", "-- restored --", "", "$ ls", "a b", "$"]);
+            assert!(matches!(pin, Pin::On { .. }));
+
+            // Once it reaches the bottom row, the view is a plain one again.
+            feed(&mut t, "x\r\ny\r\nz\r\n$ ");
+            apply_pin(&mut t, &mut pin, false);
+            assert_eq!(pin, Pin::Off);
+            assert_eq!(t.grid().display_offset(), 0);
+            assert_eq!(view(&t)[5], "$");
+            assert_eq!(view(&t)[0], "$ ls");
+        }
+
+        #[test]
+        fn a_program_clearing_the_screen_ends_the_pin() {
+            let (mut t, mut pin) = restored();
+            pin.screen_cleared();
+            feed(&mut t, "\x1b[H\x1b[2J$ ");
+            apply_pin(&mut t, &mut pin, false);
+            assert_eq!(pin, Pin::Off);
+            assert_eq!(t.grid().display_offset(), 0);
+            assert_eq!(view(&t)[0], "$");
+        }
+
+        #[test]
+        fn scrolling_back_further_stops_following() {
+            let (mut t, mut pin) = restored();
+            t.scroll_display(Scroll::Delta(2));
+            apply_pin(&mut t, &mut pin, true);
+            assert_eq!(view(&t)[0], "old-4");
+            feed(&mut t, "echo\r\n$ ");
+            apply_pin(&mut t, &mut pin, false);
+            assert_eq!(view(&t)[0], "old-4", "the view stays where the user put it");
+
+            // Scrolling down can't go past the pinned view.
+            t.scroll_display(Scroll::Bottom);
+            apply_pin(&mut t, &mut pin, true);
+            assert_eq!(view(&t)[5], "$");
+            assert_eq!(view(&t)[0], "old-7");
         }
 
         #[test]
