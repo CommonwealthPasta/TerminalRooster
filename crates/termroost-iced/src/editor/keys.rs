@@ -28,8 +28,14 @@ pub fn binding(keymap: &Keymap, doc: DocId, press: KeyPress) -> Option<Binding<M
     }
     let mods = press.modifiers;
     // Not with Alt: AltGr arrives as Ctrl+Alt and types characters.
-    if mods.command() && !mods.alt() && press.key.to_latin(press.physical_key) == Some('s') {
-        return editor(EditorMsg::Save(doc));
+    if mods.command() && !mods.alt() {
+        match press.key.to_latin(press.physical_key) {
+            Some('s') => return editor(EditorMsg::Save(doc)),
+            Some('z') if mods.shift() => return editor(EditorMsg::Redo(doc)),
+            Some('z') => return editor(EditorMsg::Undo(doc)),
+            Some('y') => return editor(EditorMsg::Redo(doc)),
+            _ => {}
+        }
     }
     match press.key.as_ref() {
         // iced lets go of the keyboard on Escape, then typing goes nowhere.
@@ -71,6 +77,8 @@ mod tests {
         match b {
             None => "none".into(),
             Some(Binding::Custom(Message::Editor(EditorMsg::Save(_)))) => "save".into(),
+            Some(Binding::Custom(Message::Editor(EditorMsg::Undo(_)))) => "undo".into(),
+            Some(Binding::Custom(Message::Editor(EditorMsg::Redo(_)))) => "redo".into(),
             Some(Binding::Custom(Message::Editor(EditorMsg::Indent(_, back)))) => format!("indent back={back}"),
             Some(Binding::Insert(c)) => format!("insert {c}"),
             Some(Binding::Copy) => "copy".into(),
@@ -87,6 +95,9 @@ mod tests {
         let ctrl = Modifiers::CTRL;
         let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
         assert_eq!(b(letter("s", Code::KeyS, ctrl)), "save");
+        assert_eq!(b(letter("z", Code::KeyZ, ctrl)), "undo");
+        assert_eq!(b(letter("y", Code::KeyY, ctrl)), "redo");
+        assert_eq!(b(letter("z", Code::KeyZ, ctrl_shift)), "redo");
         assert_eq!(b(letter("a", Code::KeyA, Modifiers::empty())), "insert a");
         assert_eq!(b(letter("f", Code::KeyF, ctrl_shift)), "none", "Show / hide files reaches the app");
         assert_eq!(b(letter("c", Code::KeyC, ctrl_shift)), "copy");

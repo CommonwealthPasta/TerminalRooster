@@ -1,12 +1,14 @@
 //! Files opened from the Files tab. Each session has its own open files, and
 //! one of them can be shown in place of the session's terminals.
 
+mod history;
 mod keys;
 mod text;
 mod view;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use iced::Task;
 use iced::widget::operation;
@@ -14,6 +16,7 @@ use iced::widget::text_editor::{self, Action, Cursor, Edit, Position};
 use termroost_core::TabId;
 
 use crate::app::{App, Dialog, Message};
+use history::{History, Snapshot};
 pub use text::{Decoded, Format, Indent};
 
 /// Widget id of the file editor, for focusing it.
@@ -65,11 +68,21 @@ pub struct TextDoc {
     pub saving: bool,
     /// Close it once it is written (Save in the close dialog).
     close_after_save: bool,
+    pub history: History,
 }
 
 impl TextDoc {
     pub fn modified(&self) -> bool {
         self.version != self.saved_version
+    }
+
+    /// Before an edit of `kind`: keeps the text for undo if the edit starts a new step.
+    fn keep_for_undo(&mut self, kind: history::Kind) {
+        let now = Instant::now();
+        if self.history.starts_step(kind, now) {
+            self.history.push(Snapshot::of(&self.content, self.version));
+        }
+        self.history.edited(kind, now);
     }
 }
 
@@ -99,6 +112,8 @@ pub enum EditorMsg {
     Action(DocId, text_editor::Action),
     /// Tab (`false`) or Shift+Tab (`true`).
     Indent(DocId, bool),
+    Undo(DocId),
+    Redo(DocId),
     Save(DocId),
     /// A file was written as it was at that version.
     Saved(DocId, u64, Result<(), String>),
@@ -304,6 +319,7 @@ impl App {
                         saved_version: version,
                         saving: false,
                         close_after_save: false,
+                        history: History::default(),
                     }));
                 }
                 self.focus_active()
@@ -317,25 +333,55 @@ impl App {
                 self.focus_active()
             }
             EditorMsg::Action(id, action) => {
-                let version = if action.is_edit() { Some(self.next_version()) } else { None };
-                if let Some(doc) = self.text_mut(id) {
-                    doc.content.perform(action);
-                    if let Some(v) = version {
-                        doc.version = v;
+                let version = self.next_version();
+                let Some(doc) = self.text_mut(id) else { return Task::none() };
+                match &action {
+                    Action::Edit(edit) => {
+                        let kind = history::Kind::of(edit);
+                        doc.keep_for_undo(kind);
+                        doc.content.perform(action);
+                        doc.version = version;
+                    }
+                    // Scrolling doesn't end what is being typed; moving the cursor does.
+                    Action::Scroll { .. } => doc.content.perform(action),
+                    _ => {
+                        doc.history.close_step();
+                        doc.content.perform(action);
                     }
                 }
                 Task::none()
             }
             EditorMsg::Indent(id, back) => {
                 let version = self.next_version();
-                if let Some(doc) = self.text_mut(id)
-                    && indent(doc, back)
-                {
-                    doc.version = version;
+                if let Some(doc) = self.text_mut(id) {
+                    let before = Snapshot::of(&doc.content, doc.version);
+                    if indent(doc, back) {
+                        doc.history.push(before);
+                        doc.history.edited(history::Kind::Single, Instant::now());
+                        doc.version = version;
+                    }
                 }
                 Task::none()
             }
-            EditorMsg::Save(id) => self.save_doc(id, false),
+            EditorMsg::Undo(id) | EditorMsg::Redo(id) => {
+                let undo = matches!(msg, EditorMsg::Undo(_));
+                if let Some(doc) = self.text_mut(id) {
+                    let current = Snapshot::of(&doc.content, doc.version);
+                    let target = if undo { doc.history.undo(current) } else { doc.history.redo(current) };
+                    if let Some(target) = target {
+                        target.restore(&mut doc.content);
+                        // Back at the saved text, the file shows as unchanged again.
+                        doc.version = target.version;
+                    }
+                }
+                Task::none()
+            }
+            EditorMsg::Save(id) => {
+                if let Some(doc) = self.text_mut(id) {
+                    doc.history.close_step();
+                }
+                self.save_doc(id, false)
+            }
             EditorMsg::Saved(id, version, result) => {
                 let name = self.doc(id).map(|(tab, d)| self.file_label(Some(tab), &d.path));
                 let Some(doc) = self.text_mut(id) else { return Task::none() };
