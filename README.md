@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="packaging/icons/terminalrooster-256.png" alt="TerminalRooster's icon: a rooster's head in a terminal window" width="128">
+  <img src="packaging/icons/terminalrooster-256.png" alt="Terminal Rooster's icon: a rooster's head in a terminal window" width="128">
 </p>
 
-# TerminalRooster
+# Terminal Rooster
 
 A project-based terminal manager for running coding agents (Claude Code, Codex, Grok, …) side by side.
 
@@ -25,7 +25,7 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 cargo run --release -p termroost-iced
 ```
 
-Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show TerminalRooster's icon for its window on Wayland. Once a package is installed, TerminalRooster removes this entry again. Set `TERMINALROOSTER_NO_DESKTOP_ENTRY=1` to skip it.
+Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show Terminal Rooster's icon for its window on Wayland. Once a package is installed, Terminal Rooster removes this entry again. Set `TERMINALROOSTER_NO_DESKTOP_ENTRY=1` to skip it.
 
 ### Windows (installer)
 
@@ -44,7 +44,7 @@ Run `TerminalRooster-<version>-x64-setup.exe` (see [Packaging (Windows)](#packag
 
 Windows 10 1809 or newer is required, for ConPTY. Terminals use `pwsh` if it is installed, otherwise Windows PowerShell, otherwise `cmd`. Release builds do not open a console window.
 
-**Bash on Windows:** Settings → Terminal lists the shells it finds (Git Bash, MSYS2, each WSL distribution, PowerShell, cmd), for the default shell and for each project. Without any bash installed, **TerminalRooster bash → Install and use** downloads a pinned Git for Windows release (bash with coreutils, vim, less, ssh and git), checks its SHA-256, and unpacks it with Windows' own `curl.exe` and `tar.exe` into `%LOCALAPPDATA%\TerminalRooster\data\bash`. Nothing outside that folder changes. Delete the folder to remove it.
+**Bash on Windows:** Settings → Terminal lists the shells it finds (Git Bash, MSYS2, each WSL distribution, PowerShell, cmd), for the default shell and for each project. Without any bash installed, **Terminal Rooster bash → Install and use** downloads a pinned Git for Windows release (bash with coreutils, vim, less, ssh and git), checks its SHA-256, and unpacks it with Windows' own `curl.exe` and `tar.exe` into `%LOCALAPPDATA%\TerminalRooster\data\bash`. Nothing outside that folder changes. Delete the folder to remove it.
 
 ### Where data lives
 
@@ -71,7 +71,7 @@ Terminals switch colors instantly, including their scrollback. Programs that ask
 
 ## Notifications
 
-TerminalRooster tells you when something happens in a terminal you aren't looking at:
+Terminal Rooster tells you when something happens in a terminal you aren't looking at:
 
 - **Coding agents:** Claude Code, Codex or Grok finishes its turn, needs an approval, or asks a question.
 - **Failed commands:** a command exits with an error status, or a terminal's shell does.
@@ -79,22 +79,22 @@ TerminalRooster tells you when something happens in a terminal you aren't lookin
 In **Settings → Notifications**, each of the two can be **Off**, **Subtle** or **Prominent**. By default, agents are Prominent and failed commands are Subtle.
 
 - **Subtle:** a ✓ (agent) or ✗ (failure) next to the session and the project, and a label in the terminal's title bar. These stay until you focus that terminal.
-- **Prominent:** the same marks. If the terminal is out of view, a note also pops up in the top right corner; **Show** takes you to it. While TerminalRooster is in the background, you get a desktop notification instead and the taskbar entry flashes. Clicking the notification brings up the terminal.
+- **Prominent:** the same marks. If the terminal is out of view, a note also pops up in the top right corner; **Show** takes you to it. While Terminal Rooster is in the background, you get a desktop notification instead and the taskbar entry flashes. Clicking the notification brings up the terminal.
 
-The terminal you are looking at never notifies. **Send a test notification** in Settings checks that desktop notifications get through. On Windows, TerminalRooster registers its name and icon for them under `HKCU\Software\Classes\AppUserModelId`, and the uninstaller removes that again.
+The terminal you are looking at never notifies. **Send a test notification** in Settings checks that desktop notifications get through. On Windows, Terminal Rooster registers its name and icon for them under `HKCU\Software\Classes\AppUserModelId`, and the uninstaller removes that again.
 
 ### How it knows
 
 No agent needs any setup.
 
-| Source | What TerminalRooster reads |
+| Source | What Terminal Rooster reads |
 |---|---|
 | Claude Code | Its terminal title: `◐`/`◑` while it works, `✳` once it is done or waiting for you |
 | Codex | The state it reports to the terminal (`OSC 7501`: working, done, error, waiting for an approval) |
 | Grok and other programs | Desktop notification requests (`OSC 9`, `OSC 777`, `OSC 99`), progress indicators (`OSC 9;4`), and the bell in a terminal running an agent |
 | Failed commands | The exit status the shell reports after each command (`OSC 133;D`) |
 
-**Shell integration:** bash and PowerShell (`pwsh`, `powershell`) don't report exit statuses or their working directory by themselves, so TerminalRooster loads a small script into them when a terminal starts. The scripts live in the data directory, in `shell-integration/`, and your startup files are not changed:
+**Shell integration:** bash and PowerShell (`pwsh`, `powershell`) don't report exit statuses or their working directory by themselves, so Terminal Rooster loads a small script into them when a terminal starts. The scripts live in the data directory, in `shell-integration/`, and your startup files are not changed:
 
 - **bash** gets `PROMPT_COMMAND` in its environment. That sources the script at the first prompt, after `~/.bashrc`. If your `~/.bashrc` replaces `PROMPT_COMMAND` instead of adding to it, there is no integration.
 - **PowerShell** runs the script after your profile, with `-NoExit -Command`. This is skipped when the shell's command line already runs a command or a file.
@@ -107,7 +107,7 @@ Closing the window while terminals run programs (an agent, a build, a server) as
 
 ## Logging
 
-TerminalRooster logs with `tracing`, to stderr and to a daily file that keeps the last 7 days:
+Terminal Rooster logs with `tracing`, to stderr and to a daily file that keeps the last 7 days:
 
 | Platform | Log location |
 |---|---|
@@ -128,7 +128,7 @@ Restored sessions start their shells the first time you open them, so dozens of 
 
 ### Exact agent sessions, not "continue last"
 
-`--continue` and `resume --last` reopen the most recent conversation in a folder, which is wrong when several agents work in one project. TerminalRooster watches each terminal's processes instead (every 5 seconds, and once more on shutdown). It finds the coding agent running there and reads the agent's session id from the agent's own records:
+`--continue` and `resume --last` reopen the most recent conversation in a folder, which is wrong when several agents work in one project. Terminal Rooster watches each terminal's processes instead (every 5 seconds, and once more on shutdown). It finds the coding agent running there and reads the agent's session id from the agent's own records:
 
 | Agent | Where the session id comes from | Restore command |
 |---|---|---|
@@ -139,7 +139,7 @@ Restored sessions start their shells the first time you open them, so dozens of 
 - **How agents are found:** it works whether you start the agent with **Start agent** or type `claude` yourself. It follows `/clear`, `/new` and `/resume`, and it forgets the agent when you quit it.
 - **Missing sessions:** if a session never got a message, so nothing is saved to resume, the agent is started fresh instead.
 - **Extra arguments:** arguments set in terminal settings (e.g. `--model opus`) are reused on resume.
-- **Codex accuracy:** Codex runs every terminal through one shared daemon and keeps no per-process record, so by default its session is inferred. That is exact with one Codex per folder. For exact tracking, add the optional **Codex hook**. TerminalRooster offers it once at startup, and you can also add it from Settings → Integrations. Codex only runs hooks you trust, so TerminalRooster then opens a small Codex window: type `/hooks` there and trust it. The hook goes in `~/.codex/hooks.json`, your other hooks are kept, and it only writes while TerminalRooster runs.
+- **Codex accuracy:** Codex runs every terminal through one shared daemon and keeps no per-process record, so by default its session is inferred. That is exact with one Codex per folder. For exact tracking, add the optional **Codex hook**. Terminal Rooster offers it once at startup, and you can also add it from Settings → Integrations. Codex only runs hooks you trust, so Terminal Rooster then opens a small Codex window: type `/hooks` there and trust it. The hook goes in `~/.codex/hooks.json`, your other hooks are kept, and it only writes while Terminal Rooster runs.
 - **Debugging detection:** `cargo run -p termroost-core --example detect_agents -- <shell pid>…` prints what is detected under any shell.
 
 ## Shortcuts
@@ -228,6 +228,6 @@ cargo run -p termroost-core --example seed -- /some/dir   # demo data (use with 
 
 ## License
 
-TerminalRooster is released under the [MIT License](LICENSE).
+Terminal Rooster is released under the [MIT License](LICENSE).
 
 The bundled fonts keep their own license, the SIL Open Font License 1.1: JetBrains Mono and Noto Sans Symbols 2. Their license texts are in `crates/termroost-iced/fonts/`.

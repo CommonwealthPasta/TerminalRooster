@@ -1,7 +1,7 @@
 # Agent logos
 
 The logos are trademarks of their owners: Claude of Anthropic, Codex of
-OpenAI, Grok of xAI. TerminalRooster shows them only to mark which agent runs
+OpenAI, Grok of xAI. Terminal Rooster shows them only to mark which agent runs
 in a terminal.
 
 ## claude.svg

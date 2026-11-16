@@ -35,6 +35,9 @@ ManifestDPIAware true
 !endif
 
 !define APP_NAME "TerminalRooster"
+; The name people read. APP_NAME stays the folder and registry key name, so
+; earlier installs are still found and updated in place.
+!define DISPLAY_NAME "Terminal Rooster"
 !define EXE_NAME "terminalrooster.exe"
 !define PUBLISHER "Emma Davenport"
 !define HOMEPAGE "https://github.com/Davenport-Physics/TermRoost"
@@ -45,19 +48,19 @@ ManifestDPIAware true
 !include "FileFunc.nsh"
 !include "x64.nsh"
 
-Name "${APP_NAME}"
-Caption "${APP_NAME} ${VERSION} Setup"
+Name "${DISPLAY_NAME}"
+Caption "${DISPLAY_NAME} ${VERSION} Setup"
 OutFile "${OUTFILE}"
 RequestExecutionLevel user
 InstallDir "$LOCALAPPDATA\Programs\${APP_NAME}"
 InstallDirRegKey HKCU "${SETTINGS_KEY}" "InstallDir"
-BrandingText "${APP_NAME} ${VERSION}"
+BrandingText "${DISPLAY_NAME} ${VERSION}"
 
 VIProductVersion "${VERSION_QUAD}"
-VIAddVersionKey "ProductName" "${APP_NAME}"
+VIAddVersionKey "ProductName" "${DISPLAY_NAME}"
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileVersion" "${VERSION}"
-VIAddVersionKey "FileDescription" "${APP_NAME} Setup"
+VIAddVersionKey "FileDescription" "${DISPLAY_NAME} Setup"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 ${PUBLISHER}"
 
@@ -66,7 +69,7 @@ VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 ${PUBLISHER}"
 !define MUI_ABORTWARNING
 
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE_NAME}"
-!define MUI_FINISHPAGE_RUN_TEXT "Start ${APP_NAME}"
+!define MUI_FINISHPAGE_RUN_TEXT "Start ${DISPLAY_NAME}"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${ROOT}\LICENSE"
@@ -82,12 +85,12 @@ VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 ${PUBLISHER}"
 
 Function .onInit
   ${IfNot} ${RunningX64}
-    MessageBox MB_ICONSTOP "${APP_NAME} needs 64-bit Windows 10 (1809) or newer."
+    MessageBox MB_ICONSTOP "${DISPLAY_NAME} needs 64-bit Windows 10 (1809) or newer."
     Abort
   ${EndIf}
 FunctionEnd
 
-Section "${APP_NAME}" SecApp
+Section "${DISPLAY_NAME}" SecApp
   SectionIn RO
   SetOutPath "$INSTDIR"
   ; Overwriting a running exe fails; NSIS then offers Retry once the app is closed.
@@ -99,10 +102,12 @@ Section "${APP_NAME}" SecApp
   SetOutPath "$INSTDIR"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
-  CreateShortCut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}" "" "$INSTDIR\${EXE_NAME}" 0
+  ; Shortcuts carry the display name; drop the one an earlier version named APP_NAME.
+  Delete "$SMPROGRAMS\${APP_NAME}.lnk"
+  CreateShortCut "$SMPROGRAMS\${DISPLAY_NAME}.lnk" "$INSTDIR\${EXE_NAME}" "" "$INSTDIR\${EXE_NAME}" 0
 
   WriteRegStr HKCU "${SETTINGS_KEY}" "InstallDir" "$INSTDIR"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME}"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${DISPLAY_NAME}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "${PUBLISHER}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "URLInfoAbout" "${HOMEPAGE}"
@@ -118,11 +123,12 @@ Section "${APP_NAME}" SecApp
 SectionEnd
 
 Section "Desktop shortcut" SecDesktop
-  CreateShortCut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${EXE_NAME}" "" "$INSTDIR\${EXE_NAME}" 0
+  Delete "$DESKTOP\${APP_NAME}.lnk"
+  CreateShortCut "$DESKTOP\${DISPLAY_NAME}.lnk" "$INSTDIR\${EXE_NAME}" "" "$INSTDIR\${EXE_NAME}" 0
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The ${APP_NAME} app and a Start menu shortcut."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The ${DISPLAY_NAME} app and a Start menu shortcut."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "A shortcut on the desktop."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
@@ -136,6 +142,9 @@ Section "Uninstall"
   ; Only removed when empty, so nothing the user put there is lost.
   RMDir "$INSTDIR"
 
+  Delete "$SMPROGRAMS\${DISPLAY_NAME}.lnk"
+  Delete "$DESKTOP\${DISPLAY_NAME}.lnk"
+  ; Shortcuts from versions before the name had a space.
   Delete "$SMPROGRAMS\${APP_NAME}.lnk"
   Delete "$DESKTOP\${APP_NAME}.lnk"
 

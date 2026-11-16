@@ -3,11 +3,11 @@
   <id>io.github.Davenport_Physics.TerminalRooster</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
-  <name>TerminalRooster</name>
+  <name>Terminal Rooster</name>
   <summary>Project-based terminals for running coding agents side by side</summary>
   <description>
     <p>
-      TerminalRooster organizes terminals by project in renamable, splittable sessions, so you can run
+      Terminal Rooster organizes terminals by project in renamable, splittable sessions, so you can run
       Claude Code, Codex and Grok side by side and keep track of per-project tasks.
     </p>
     <p>

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=TerminalRooster
+Name=Terminal Rooster
 GenericName=Agent Terminal
 Comment=Project-based terminals for running coding agents side by side
 Exec=terminalrooster
