@@ -10,6 +10,7 @@ use termroost_core::session::shell::{self, ShellOption};
 use crate::app::{App, Message, SettingsState};
 use crate::color_picker;
 use crate::keymap::{Action, Combo};
+use crate::notify::{Category, Level};
 use crate::sidebar::{BOLD, muted_text};
 use crate::theme::{self, MONO};
 use crate::themes::{ANSI_NAMES, ColorField, Hex, ThemeDef};
@@ -75,6 +76,7 @@ impl App {
         let body = column![
             self.appearance_section(st),
             self.terminal_section(st),
+            self.notifications_section(),
             self.integrations_section(),
             self.shortcuts_section(st),
             muted_text(format!(
@@ -323,6 +325,72 @@ impl App {
         .spacing(10)
         .padding(iced::Padding { top: 8.0, ..Default::default() })
         .into()
+    }
+
+    fn notifications_section(&self) -> Element<'_, Message> {
+        let level_row = |category: Category, label: &'static str, about: &'static str| -> Element<'_, Message> {
+            let current = self.prefs.level(category);
+            let choices = row(Level::ALL.into_iter().map(|level| {
+                let selected = level == current;
+                // Always pressable: a disabled button would make the choice look faded.
+                button(text(level.label()).size(12))
+                    .padding([4, 12])
+                    .style(if selected { button::primary } else { button::secondary })
+                    .on_press(Message::NotifyLevel(category, level))
+                    .into()
+            }))
+            .spacing(4);
+            row![column![text(label).size(13), muted_text(about)].spacing(2).width(Length::Fill), choices]
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .into()
+        };
+        let integration = self.core.state().settings.shell_integration;
+        section(
+            "Notifications",
+            column![
+                level_row(
+                    Category::Agent,
+                    "Coding agents",
+                    "Claude Code, Codex or Grok finishes its turn or waits for you. Programs that ask for a \
+                     notification count too.",
+                ),
+                level_row(
+                    Category::Error,
+                    "Failed commands",
+                    "A command exits with an error status, or a terminal's shell does.",
+                ),
+                muted_text(
+                    "Subtle marks the terminal, its session and its project until you look at the terminal. \
+                     Prominent also pops up a note when the terminal is out of view, and a desktop notification with \
+                     a flashing taskbar entry while TerminalRooster is in the background. The terminal you are \
+                     looking at never notifies.",
+                ),
+                row![
+                    button(text("Send a test notification").size(12))
+                        .padding([4, 10])
+                        .style(button::secondary)
+                        .on_press(Message::TestNotification),
+                ],
+                checkbox(integration)
+                    .label("Shell integration for bash and PowerShell")
+                    .on_toggle(Message::ShellIntegration)
+                    .size(16)
+                    .text_size(13),
+                muted_text(
+                    "Lets TerminalRooster see how each command ends, which failed commands need. It is loaded when a \
+                     terminal starts, from TerminalRooster's own folder; your startup files are not changed. Other \
+                     shells can report a command's status themselves with OSC 133;D. Applies to terminals started \
+                     from now on.",
+                ),
+                checkbox(self.prefs.confirm_quit)
+                    .label("Ask before quitting while terminals run programs")
+                    .on_toggle(Message::ConfirmQuitPref)
+                    .size(16)
+                    .text_size(13),
+            ]
+            .spacing(12),
+        )
     }
 
     fn integrations_section(&self) -> Element<'_, Message> {

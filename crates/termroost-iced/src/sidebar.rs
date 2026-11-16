@@ -3,10 +3,11 @@
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text, text_input, tooltip};
 use iced::{Alignment, Element, Font, Length, font};
 use termroost_core::git::Head;
-use termroost_core::{Project, ProjectId, Tab, TabId};
+use termroost_core::{PaneId, Project, ProjectId, Tab, TabId};
 
 use crate::app::{App, DropTarget, Message, RENAME_INPUT, RenameTarget};
 use crate::keymap::Action;
+use crate::notify::{Category, Notice};
 use crate::reorder::reorder;
 use crate::theme;
 
@@ -124,7 +125,33 @@ fn activity_dot<'a>(on: bool) -> Element<'a, Message> {
     }
 }
 
+/// What a list item shows next to its name: the mark of an unseen alert
+/// (✗ a failure, ✓ an agent), else a dot for new output.
+fn marker<'a>(notice: Option<&Notice>, activity: bool) -> Element<'a, Message> {
+    let Some(n) = notice else { return activity_dot(activity) };
+    let category = n.category;
+    tooltip(
+        text(n.glyph())
+            .size(13)
+            .font(BOLD)
+            .style(move |t: &iced::Theme| text::Style { color: Some(theme::notice_color(t, category)) }),
+        container(text(n.headline.clone()).size(12)).padding([4, 8]).style(container::rounded_box),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
 impl App {
+    /// The alert to show for a set of terminals: a failure before an agent.
+    fn notice_of(&self, panes: impl IntoIterator<Item = PaneId>) -> Option<&Notice> {
+        let found: Vec<&Notice> = panes.into_iter().filter_map(|p| self.notices.get(&p)?.first()).collect();
+        found.iter().find(|n| n.category == Category::Error).or(found.first()).copied()
+    }
+
+    fn tab_notice(&self, tab: &Tab) -> Option<&Notice> {
+        self.notice_of(tab.layout.panes())
+    }
+
     fn rename_input(&self, target: RenameTarget) -> Option<Element<'_, Message>> {
         let r = self.rename.as_ref().filter(|r| r.target == target)?;
         Some(
@@ -170,8 +197,9 @@ impl App {
         let s = self.core.state();
         let selected = s.selected_project == Some(p.id);
         let busy = s.tabs_of(p.id).any(|t| self.activity.contains(&t.id));
+        let notice = self.notice_of(s.tabs_of(p.id).flat_map(|t| t.layout.panes()));
         let label = column![
-            row![text(&p.name).size(14).width(Length::Fill), activity_dot(busy)].align_y(Alignment::Center),
+            row![text(&p.name).size(14).width(Length::Fill), marker(notice, busy)].align_y(Alignment::Center),
             muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None),
         ]
         .spacing(1);
@@ -249,9 +277,13 @@ impl App {
             space::horizontal().width(0).into()
         };
         let mut label = column![
-            row![activity_dot(self.activity.contains(&tab.id)), text(&tab.title).size(14).width(Length::Fill), badge]
-                .spacing(4)
-                .align_y(Alignment::Center),
+            row![
+                marker(self.tab_notice(tab), self.activity.contains(&tab.id)),
+                text(&tab.title).size(14).width(Length::Fill),
+                badge
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
         ]
         .spacing(1);
         if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {

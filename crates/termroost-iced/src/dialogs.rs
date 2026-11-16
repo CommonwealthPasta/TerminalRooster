@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use iced::widget::{button, center, column, container, mouse_area, opaque, row, space, text, text_input};
+use iced::widget::{
+    Column, button, center, checkbox, column, container, mouse_area, opaque, row, scrollable, space, text, text_input,
+};
 use iced::{Alignment, Element, Length};
 use termroost_core::AgentKind;
 use termroost_core::session::shell;
@@ -149,6 +151,44 @@ impl App {
                     actions("Delete session", true),
                 ]
                 .spacing(14)
+                .into()
+            }
+            Dialog::ConfirmQuit { running, dont_ask } => {
+                let n = running.len();
+                let list = Column::with_children(running.iter().map(|r| {
+                    row![
+                        text("•").size(13),
+                        column![text(&r.programs).size(13), muted_text(&r.place)].spacing(1).width(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .into()
+                }))
+                .spacing(6);
+                let mut col = column![
+                    text("Quit TerminalRooster?").size(18).font(BOLD),
+                    text(if n == 1 {
+                        "A terminal is still running a program. Quitting stops it.".to_owned()
+                    } else {
+                        format!("{n} terminals are still running programs. Quitting stops them.")
+                    })
+                    .size(13),
+                    container(scrollable(list)).max_height(320),
+                ]
+                .spacing(12);
+                if running.iter().any(|r| r.agent) {
+                    col = col.push(muted_text(
+                        "Coding agents come back in the same conversation when TerminalRooster starts again, but a \
+                         reply they are writing now is cut off.",
+                    ));
+                }
+                col.push(
+                    checkbox(*dont_ask)
+                        .label("Don't ask again (Settings → Notifications)")
+                        .on_toggle(Message::DialogDontAsk)
+                        .size(14)
+                        .text_size(12),
+                )
+                .push(actions("Quit", true))
                 .into()
             }
             Dialog::CodexTrust(handle) => return codex_window(handle, &self.keymap, self.prefs.font_size),

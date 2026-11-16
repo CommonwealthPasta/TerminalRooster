@@ -16,12 +16,16 @@ use alacritty_terminal::term::{self, Term, TermMode, viewport_to_point};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::Rgb as ARgb;
 
+use crate::agent::AgentKind;
+use crate::alert::{Alert, Tracker};
 use crate::command::Event;
 use crate::model::PaneId;
 use crate::session::input::{self, KeyInput, MouseInput};
+use crate::session::osc::Signal;
 use crate::session::render::{RenderContent, SharedPalette};
 use crate::session::shell::ShellCommand;
 use crate::session::snapshot;
+use crate::session::tap::TapPty;
 
 /// Size of the terminal grid and of one cell in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,11 +111,26 @@ pub(crate) struct Shared {
     title: Mutex<Option<String>>,
     size: Mutex<GridSize>,
     palette: SharedPalette,
+    /// Turns what the program sends into alerts (failed commands, finished agents).
+    tracker: Mutex<Tracker>,
 }
 
 impl Shared {
     fn send(&self, ev: Event) {
         let _ = self.events.try_send(ev);
+    }
+
+    fn alert(&self, alert: Option<Alert>) {
+        if let Some(alert) = alert {
+            tracing::debug!(pane = %self.pane, ?alert, "alert");
+            self.send(Event::Alert { pane: self.pane, alert });
+        }
+    }
+
+    /// A sequence found in the output by the PTY tap.
+    pub(crate) fn on_signal(&self, signal: Signal) {
+        let alert = self.tracker.lock().unwrap().signal(signal);
+        self.alert(alert);
     }
 
     fn bump(&self) {
@@ -167,13 +186,20 @@ impl EventListener for Proxy {
             AEvent::Wakeup => s.wake(),
             AEvent::Title(t) => {
                 *s.title.lock().unwrap() = Some(t.clone());
+                let alert = s.tracker.lock().unwrap().title(&t);
                 s.send(Event::TitleChanged { pane: s.pane, title: t });
+                s.alert(alert);
             }
             AEvent::ResetTitle => {
                 *s.title.lock().unwrap() = None;
+                s.tracker.lock().unwrap().title("");
                 s.send(Event::TitleChanged { pane: s.pane, title: String::new() });
             }
-            AEvent::Bell => s.send(Event::Bell(s.pane)),
+            AEvent::Bell => {
+                s.send(Event::Bell(s.pane));
+                let alert = s.tracker.lock().unwrap().bell();
+                s.alert(alert);
+            }
             AEvent::PtyWrite(text) => s.write(Cow::Owned(text.into_bytes())),
             AEvent::ClipboardStore(_, text) => s.send(Event::ClipboardStore(text)),
             AEvent::ColorRequest(index, fmt) => {
@@ -230,6 +256,7 @@ impl TerminalHandle {
             title: Mutex::new(None),
             size: Mutex::new(size),
             palette,
+            tracker: Mutex::new(Tracker::default()),
         });
         let config = term::Config { scrolling_history: scrollback_lines, ..Default::default() };
         let term = Term::new(config, &size, Proxy { shared: shared.clone(), run: None });
@@ -287,6 +314,8 @@ impl TerminalHandle {
         #[cfg(windows)]
         let shell_pid = pty.child_watcher().pid().map_or(0, |p| p.get());
         shared.shell_pid.store(shell_pid, Ordering::Release);
+        shared.tracker.lock().unwrap().reset();
+        let pty = TapPty::new(pty, shared.clone());
         let run = shared.run_counter.fetch_add(1, Ordering::AcqRel) + 1;
         let proxy = Proxy { shared: shared.clone(), run: Some(run) };
         let event_loop = EventLoop::new(self.0.term.clone(), proxy, pty, true, false)?;
@@ -325,6 +354,18 @@ impl TerminalHandle {
             ProcState::Exited(code) => Some(code),
             _ => None,
         }
+    }
+
+    /// Tells the terminal which coding agent runs in it, so its signals (the
+    /// bell, progress, notifications) count as the agent finishing a turn.
+    pub(crate) fn set_agent(&self, agent: Option<AgentKind>) {
+        self.0.shared.tracker.lock().unwrap().agent = agent;
+    }
+
+    /// The agent in this terminal is working on a turn, as far as its own
+    /// signals tell (Claude Code's title, a progress indicator).
+    pub fn agent_working(&self) -> bool {
+        self.0.shared.tracker.lock().unwrap().busy()
     }
 
     /// Title set by the running program (OSC 0/2), if any.

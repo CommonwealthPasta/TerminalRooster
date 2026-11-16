@@ -14,6 +14,7 @@
 //! appear in this API.
 
 pub mod agent;
+pub mod alert;
 pub mod codex_hook;
 pub mod command;
 pub mod detect;
@@ -33,6 +34,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 pub use agent::{AgentKind, AgentSession};
+pub use alert::{AgentEvent, Alert};
 pub use codex_hook::CodexHookStatus;
 pub use command::{Command, Event, Outcome};
 pub use detect::{AgentHomes, ObservedAgent};
@@ -95,6 +97,8 @@ pub struct Core {
     data_dir: PathBuf,
     homes: AgentHomes,
     renamed: Renamed,
+    /// Where the shell integration scripts are, if they could be written.
+    integration: Option<PathBuf>,
     _lock: InstanceLock,
 }
 
@@ -125,6 +129,9 @@ impl Core {
             Err(e) => tracing::warn!(error = %e, "could not update TermRoost's Codex hook"),
         }
         let (store, mut state) = Store::open(&data_dir.join(paths::DB_FILE))?;
+        let integration = session::integration::install(&data_dir)
+            .map_err(|e| tracing::warn!(error = %e, "could not write the shell integration scripts"))
+            .ok();
 
         let mut next_id = max_id(&state) + 1;
         let repairs = repair(&mut state, &mut next_id);
@@ -163,6 +170,7 @@ impl Core {
             data_dir,
             homes: config.agent_homes,
             renamed,
+            integration,
             _lock: lock,
         };
         tracing::info!(
@@ -258,6 +266,21 @@ impl Core {
             p.agent = new;
             self.store.write(vec![StoreOp::UpsertPane(p.clone())]);
         }
+        if let Some(h) = self.terminal(pane) {
+            h.set_agent(observed.map(|o| o.kind));
+        }
+    }
+
+    /// The programs running in each terminal (below its shell), by name, for
+    /// asking before quitting. Terminals with nothing running are left out.
+    /// Inspects every process, so it can take a moment.
+    pub fn running_programs(&self) -> Vec<(PaneId, Vec<String>)> {
+        let shells: Vec<(PaneId, u32)> =
+            self.bg.sessions.lock().unwrap().values().filter_map(|h| Some((h.pane(), h.shell_pid()?))).collect();
+        let mut found: Vec<(PaneId, Vec<String>)> =
+            self.bg.detector.lock().unwrap().programs(&shells).into_iter().filter(|(_, n)| !n.is_empty()).collect();
+        found.sort_by_key(|(p, _)| *p);
+        found
     }
 
     /// Blocks until all queued database writes are committed.
@@ -559,6 +582,7 @@ impl Core {
                 } else {
                     handle.write(format!("{line}\r"))
                 }
+                handle.set_agent(Some(kind));
                 let p = self.state.panes.get_mut(&pane).expect("checked");
                 p.agent = Some(session);
                 ops.push(StoreOp::UpsertPane(p.clone()));
@@ -568,6 +592,9 @@ impl Core {
                 let p = self.state.panes.get_mut(&pane).ok_or(Error::NotFound("pane"))?;
                 p.agent = None;
                 ops.push(StoreOp::UpsertPane(p.clone()));
+                if let Some(h) = self.terminal(pane) {
+                    h.set_agent(None);
+                }
                 Ok(Outcome::None)
             }
             C::RestartPane(pane) => {
@@ -654,6 +681,13 @@ impl Core {
             C::SetDefaultShell(shell) => {
                 self.state.settings.default_shell = shell.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty());
                 ops.push(StoreOp::Settings(self.state.settings.clone()));
+                Ok(Outcome::None)
+            }
+            C::SetShellIntegration(on) => {
+                if self.state.settings.shell_integration != on {
+                    self.state.settings.shell_integration = on;
+                    ops.push(StoreOp::Settings(self.state.settings.clone()));
+                }
                 Ok(Outcome::None)
             }
             C::SetGuiValue { key, value } => {
@@ -752,6 +786,7 @@ impl Core {
                 .unwrap_or_default();
             handle.replay(&data, Some(&format!("restored session from {when}")));
         }
+        handle.set_agent(self.state.pane(pane).and_then(|p| p.agent.as_ref()).map(|a| a.kind));
         self.bg.sessions.lock().unwrap().insert(pane, handle.clone());
         self.start_process(pane, &handle, restored);
         handle
@@ -760,11 +795,16 @@ impl Core {
     fn spawn_spec(&self, pane: PaneId) -> Option<SpawnSpec> {
         let tab = self.state.tab(self.state.pane(pane)?.tab)?;
         let project = self.state.project(tab.project)?;
-        let shell = session::shell::resolve(project.shell.as_deref(), self.state.settings.default_shell.as_deref());
+        let mut shell = session::shell::resolve(project.shell.as_deref(), self.state.settings.default_shell.as_deref());
         let cwd = self.state.tab_working_dir(tab);
         let mut env = base_env();
         env.insert("TERMINALROOSTER_PANE_ID".to_owned(), pane.to_string());
         env.insert("TERMINALROOSTER_PROJECT".to_owned(), project.name.clone());
+        if self.state.settings.shell_integration
+            && let Some(dir) = &self.integration
+        {
+            session::integration::apply(&mut shell, &mut env, dir);
+        }
         Some(SpawnSpec { shell, cwd, env })
     }
 

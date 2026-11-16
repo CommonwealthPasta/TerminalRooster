@@ -207,3 +207,47 @@ pub fn notice_banner(theme: &Theme) -> container::Style {
         ..container::Style::default()
     }
 }
+
+/// The color of an alert: danger for failures, success for agents.
+pub fn notice_color(theme: &Theme, category: crate::notify::Category) -> Color {
+    let p = theme.extended_palette();
+    match category {
+        crate::notify::Category::Error => p.danger.base.color,
+        crate::notify::Category::Agent => p.success.base.color,
+    }
+}
+
+/// A small label in a terminal's title bar saying what happened in it.
+pub fn notice_chip(category: crate::notify::Category) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let p = theme.extended_palette();
+        let pair = match category {
+            crate::notify::Category::Error => p.danger.base,
+            crate::notify::Category::Agent => p.success.base,
+        };
+        container::Style {
+            background: Some(Background::Color(pair.color)),
+            text_color: Some(pair.text),
+            border: Border::default().rounded(8),
+            ..container::Style::default()
+        }
+    }
+}
+
+/// A pop-up about a terminal that is out of view.
+pub fn toast(category: crate::notify::Category) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let p = theme.extended_palette();
+        container::Style {
+            background: Some(Background::Color(p.background.weak.color)),
+            text_color: Some(p.background.weak.text),
+            border: Border { width: 1.5, color: notice_color(theme, category), radius: 8.0.into() },
+            shadow: iced::Shadow {
+                color: Color { a: 0.35, ..Color::BLACK },
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 12.0,
+            },
+            ..container::Style::default()
+        }
+    }
+}

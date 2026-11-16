@@ -16,6 +16,7 @@ use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, Pro
 use crate::color_picker::{ColorPicker, Hsl};
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
+use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
 use crate::terminal_view;
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
@@ -56,6 +57,12 @@ pub struct Prefs {
     /// Keyboard shortcuts the user changed: action id -> its shortcuts, such
     /// as `"Ctrl+Shift+T"`. Actions not listed use their defaults.
     pub shortcuts: BTreeMap<String, Vec<String>>,
+    /// How to tell the user that a command failed.
+    pub notify_errors: Level,
+    /// How to tell the user that a coding agent finished or needs them.
+    pub notify_agents: Level,
+    /// Ask before quitting while terminals run programs.
+    pub confirm_quit: bool,
 }
 
 impl Default for Prefs {
@@ -74,6 +81,9 @@ impl Default for Prefs {
             terminal_theme: None,
             codex_hook_asked: false,
             shortcuts: BTreeMap::new(),
+            notify_errors: Level::Subtle,
+            notify_agents: Level::Prominent,
+            confirm_quit: true,
         }
     }
 }
@@ -90,6 +100,25 @@ impl Prefs {
     pub fn load(core: &Core) -> Prefs {
         core.state().gui_value(PREFS_KEY).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default()
     }
+
+    pub fn level(&self, category: Category) -> Level {
+        match category {
+            Category::Error => self.notify_errors,
+            Category::Agent => self.notify_agents,
+        }
+    }
+}
+
+/// A terminal with programs running in it, listed when asking before quitting.
+#[derive(Clone, Debug)]
+pub struct RunningTerminal {
+    pub pane: PaneId,
+    /// "Session 2 · my-service".
+    pub place: String,
+    /// "Claude Code (working), cargo".
+    pub programs: String,
+    /// One of them is a coding agent.
+    pub agent: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +157,11 @@ pub enum Dialog {
     Renamed(termroost_core::Renamed),
     /// Make a git worktree and move the session into it.
     Worktree(Box<WorktreeForm>),
+    /// Quitting while terminals still run programs.
+    ConfirmQuit {
+        running: Vec<RunningTerminal>,
+        dont_ask: bool,
+    },
 }
 
 /// State of the settings page while it is open.
@@ -183,7 +217,19 @@ pub enum Message {
     Tick,
     WindowMoved(iced::Point),
     WindowResized(iced::Size),
+    /// The window gained (`true`) or lost focus.
+    WindowFocus(window::Id, bool),
+    WindowFound(Option<window::Id>),
     CloseRequested,
+    /// Bring a terminal into view and focus it (from a notification).
+    ShowPane(PaneId),
+    DismissToast(PaneId),
+    NotifyLevel(Category, Level),
+    ShellIntegration(bool),
+    ConfirmQuitPref(bool),
+    /// "Don't ask again" in the quit dialog.
+    DialogDontAsk(bool),
+    TestNotification,
     Key(keyboard::Event),
     /// Escape, even when a text input captured it (closes dialogs and editors).
     Escape,
@@ -339,6 +385,18 @@ pub struct App {
     pub(crate) keymap: Arc<Keymap>,
     /// A task held with the mouse, to be dropped on a session.
     pub(crate) task_drag: Option<TaskDrag>,
+    /// Alerts in terminals the user has not looked at since.
+    pub(crate) notices: HashMap<PaneId, PaneNotices>,
+    /// Pop-ups about terminals that are out of view, oldest first.
+    pub(crate) toasts: Vec<Toast>,
+    window_focused: bool,
+    window_id: Option<window::Id>,
+    /// The terminal the user is looking at: the focused one of the visible
+    /// session, while the window has focus. Programs in it are told they
+    /// have focus (if they asked to know), and its alerts are dropped.
+    attended: Option<PaneId>,
+    /// Clicks on desktop notifications, by pane.
+    clicks: (async_channel::Sender<PaneId>, async_channel::Receiver<PaneId>),
     closing: bool,
 }
 
@@ -377,6 +435,15 @@ impl Hash for Events {
     }
 }
 
+/// Hashable wrapper for the clicks on desktop notifications.
+struct Clicks(async_channel::Receiver<PaneId>);
+
+impl Hash for Clicks {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "terminalrooster-notification-clicks".hash(state);
+    }
+}
+
 impl App {
     pub fn new(core: Core) -> (App, Task<Message>) {
         let prefs = Prefs::load(&core);
@@ -407,8 +474,15 @@ impl App {
             codex_hook: termroost_core::CodexHookStatus::default(),
             keymap,
             task_drag: None,
+            notices: HashMap::new(),
+            toasts: Vec::new(),
+            window_focused: true,
+            window_id: None,
+            attended: None,
+            clicks: async_channel::unbounded(),
             closing: false,
         };
+        notify::init(app.core.data_dir());
         app.apply_theme();
         app.ensure_active_grid();
         app.codex_hook = app.core.codex_hook_status();
@@ -419,11 +493,13 @@ impl App {
         if renamed.moved_from.is_some() || renamed.codex_hook_updated {
             app.dialog = Some(Dialog::Renamed(renamed.clone()));
         }
+        app.sync_attention();
         let task = Task::batch([
             app.focus_active(),
             iced::system::theme().map(Message::SystemTheme),
             detect_shells(),
             app.read_git(),
+            window::latest().map(Message::WindowFound),
         ]);
         (app, task)
     }
@@ -481,9 +557,10 @@ impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
             Subscription::run_with(Events(self.core.events()), |e| e.0.clone()).map(Message::Core),
+            Subscription::run_with(Clicks(self.clicks.1.clone()), |c| c.0.clone()).map(Message::ShowPane),
             keyboard::listen().map(Message::Key),
             iced::system::theme_changes().map(Message::SystemTheme),
-            iced::event::listen_with(|event, _status, _id| match event {
+            iced::event::listen_with(|event, _status, id| match event {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
@@ -500,6 +577,8 @@ impl App {
                 iced::Event::Window(window::Event::Moved(p)) => Some(Message::WindowMoved(p)),
                 iced::Event::Window(window::Event::Resized(s)) => Some(Message::WindowResized(s)),
                 iced::Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested),
+                iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocus(id, true)),
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(id, false)),
                 _ => None,
             }),
             iced::time::every(GIT_POLL).map(|_| Message::GitPoll),
@@ -516,7 +595,7 @@ impl App {
                 _ => None,
             }));
         }
-        if !self.layout_dirty.is_empty() || self.prefs_dirty || self.themes_dirty {
+        if !self.layout_dirty.is_empty() || self.prefs_dirty || self.themes_dirty || !self.toasts.is_empty() {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
@@ -637,6 +716,12 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        self.sync_attention();
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         if self.closing {
             return Task::none();
         }
@@ -655,10 +740,61 @@ impl App {
                         }
                     }
                     Event::ClipboardStore(text) => return iced::clipboard::write(text),
+                    Event::Alert { pane, alert } => return self.on_notice(pane, Notice::from_alert(&alert)),
+                    Event::ProcessExited { pane, code: Some(code) } if code != 0 => {
+                        return self.on_notice(pane, Notice::shell_exited(code));
+                    }
                     _ => {}
                 }
             }
-            Message::Tick => self.flush_pending(),
+            Message::Tick => {
+                self.flush_pending();
+                self.toasts.retain(|t| t.shown.elapsed() < notify::TOAST_LIFETIME);
+            }
+            Message::WindowFocus(id, focused) => {
+                self.window_id = Some(id);
+                self.window_focused = focused;
+            }
+            Message::WindowFound(id) => self.window_id = self.window_id.or(id),
+            Message::ShowPane(pane) => return self.show_pane(pane),
+            Message::DismissToast(pane) => self.toasts.retain(|t| t.pane != pane),
+            Message::NotifyLevel(category, level) => {
+                match category {
+                    Category::Error => self.prefs.notify_errors = level,
+                    Category::Agent => self.prefs.notify_agents = level,
+                }
+                if level == Level::Off {
+                    for n in self.notices.values_mut() {
+                        match category {
+                            Category::Error => n.error = None,
+                            Category::Agent => n.agent = None,
+                        }
+                    }
+                    self.toasts.retain(|t| t.notice.category != category);
+                }
+                self.mark_prefs();
+            }
+            Message::ShellIntegration(on) => {
+                self.dispatch(Command::SetShellIntegration(on));
+            }
+            Message::ConfirmQuitPref(on) => {
+                self.prefs.confirm_quit = on;
+                self.mark_prefs();
+            }
+            Message::DialogDontAsk(v) => {
+                if let Some(Dialog::ConfirmQuit { dont_ask, .. }) = &mut self.dialog {
+                    *dont_ask = v;
+                }
+            }
+            Message::TestNotification => {
+                let pane = self.core.state().active_tab().and_then(|t| t.focused_pane).unwrap_or(PaneId(0));
+                notify::desktop(
+                    "TerminalRooster".into(),
+                    "Desktop notifications work. Clicking one brings its terminal into view.".into(),
+                    pane,
+                    self.clicks.0.clone(),
+                );
+            }
             Message::WindowMoved(p) => {
                 let w = self.prefs.window.get_or_insert_with(Default::default);
                 w.x = Some(p.x);
@@ -672,10 +808,18 @@ impl App {
                 self.mark_prefs();
             }
             Message::CloseRequested => {
-                self.flush_pending();
-                self.core.shutdown();
-                self.closing = true;
-                return iced::exit();
+                if matches!(self.dialog, Some(Dialog::ConfirmQuit { .. })) {
+                    return Task::none();
+                }
+                if self.prefs.confirm_quit {
+                    let running = self.running_terminals();
+                    if !running.is_empty() {
+                        self.rename = None;
+                        self.dialog = Some(Dialog::ConfirmQuit { running, dont_ask: false });
+                        return Task::none();
+                    }
+                }
+                return self.quit();
             }
             Message::Escape => {
                 if self.task_drag.take().is_some() {
@@ -707,7 +851,10 @@ impl App {
             }
             Message::Enter => {
                 // Dialogs with text fields submit through the fields themselves.
-                if matches!(self.dialog, Some(Dialog::ConfirmDeleteProject(_) | Dialog::ConfirmDeleteTab(_))) {
+                if matches!(
+                    self.dialog,
+                    Some(Dialog::ConfirmDeleteProject(_) | Dialog::ConfirmDeleteTab(_) | Dialog::ConfirmQuit { .. })
+                ) {
                     return self.submit_dialog();
                 }
             }
@@ -1356,8 +1503,148 @@ impl App {
                 self.dialog = Some(Dialog::Worktree(form));
                 return self.update_worktree(WorktreeMsg::Submit);
             }
+            Dialog::ConfirmQuit { dont_ask, .. } => {
+                if dont_ask {
+                    self.prefs.confirm_quit = false;
+                    self.mark_prefs();
+                }
+                return self.quit();
+            }
         }
         self.focus_active()
+    }
+
+    /// Saves everything, stops the terminals and exits.
+    fn quit(&mut self) -> Task<Message> {
+        self.flush_pending();
+        self.core.shutdown();
+        self.closing = true;
+        iced::exit()
+    }
+
+    /// Terminals running programs, in sidebar order, for asking before quitting.
+    fn running_terminals(&self) -> Vec<RunningTerminal> {
+        let s = self.core.state();
+        let mut out: Vec<(usize, RunningTerminal)> = self
+            .core
+            .running_programs()
+            .into_iter()
+            .filter_map(|(pane, names)| {
+                let tab = s.pane(pane)?.tab;
+                let rank = s.tabs.iter().position(|t| t.id == tab).unwrap_or(usize::MAX);
+                let working = self.core.terminal(pane).is_some_and(|h| h.agent_working());
+                let is_agent = |n: &String| AgentKind::ALL.iter().any(|k| k.label() == n);
+                let programs = names
+                    .iter()
+                    .map(|n| if working && is_agent(n) { format!("{n} (working)") } else { n.clone() })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let agent = names.iter().any(is_agent);
+                Some((rank, RunningTerminal { pane, place: self.place_of(pane)?, programs, agent }))
+            })
+            .collect();
+        out.sort_by_key(|(rank, t)| (*rank, t.pane));
+        out.into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// Where a terminal is, for notifications: "Session 2 · my-service".
+    pub(crate) fn place_of(&self, pane: PaneId) -> Option<String> {
+        let s = self.core.state();
+        let tab = s.tab(s.pane(pane)?.tab)?;
+        let project = s.project(tab.project)?;
+        Some(format!("{} · {}", tab.title, project.name))
+    }
+
+    /// The terminal is on screen: in the visible session, settings closed.
+    fn pane_visible(&self, pane: PaneId) -> bool {
+        self.settings.is_none() && self.core.state().pane(pane).map(|p| p.tab) == self.active_tab_id()
+    }
+
+    /// An alert from a terminal: mark it, and say so as loudly as the user chose.
+    fn on_notice(&mut self, pane: PaneId, notice: Notice) -> Task<Message> {
+        let level = self.prefs.level(notice.category);
+        // Scratch terminals (the Codex window) are not in the state.
+        let Some(place) = self.place_of(pane) else { return Task::none() };
+        if level == Level::Off || self.attended == Some(pane) {
+            return Task::none();
+        }
+        tracing::debug!(%pane, headline = %notice.headline, "notification");
+        let category = notice.category;
+        let notices = self.notices.entry(pane).or_default();
+        if !notices.add(notice.clone()) {
+            // Repeats an alert from a moment ago; keep its pop-up's text current.
+            let detail = notices.iter().find(|n| n.category == category).and_then(|n| n.detail.clone());
+            if let Some(t) = self.toasts.iter_mut().find(|t| t.pane == pane && t.notice.category == category) {
+                t.notice.detail = detail;
+            }
+            return Task::none();
+        }
+        if level != Level::Prominent {
+            return Task::none();
+        }
+        if !self.window_focused {
+            let body = notice.detail.iter().chain([&place]).cloned().collect::<Vec<_>>().join(" · ");
+            notify::desktop(notice.headline.clone(), body, pane, self.clicks.0.clone());
+            if let Some(id) = self.window_id {
+                return window::request_user_attention(id, Some(window::UserAttention::Informational));
+            }
+        } else if !self.pane_visible(pane) {
+            self.toasts.retain(|t| t.pane != pane);
+            self.toasts.push(Toast { pane, notice, place, shown: std::time::Instant::now() });
+            if self.toasts.len() > 4 {
+                self.toasts.remove(0);
+            }
+        }
+        Task::none()
+    }
+
+    /// Brings a terminal into view and focuses it, and the window too.
+    fn show_pane(&mut self, pane: PaneId) -> Task<Message> {
+        let Some(tab) = self.core.state().pane(pane).map(|p| p.tab) else { return Task::none() };
+        if self.settings.is_some() {
+            self.commit_shell();
+            self.settings = None;
+        }
+        self.rename = None;
+        self.toasts.retain(|t| t.pane != pane);
+        self.dispatch(Command::SelectTab(tab));
+        self.dispatch(Command::FocusPane(pane));
+        let focus = self.after_select();
+        match self.window_id {
+            Some(id) => Task::batch([focus, window::gain_focus(id)]),
+            None => focus,
+        }
+    }
+
+    /// Works out which terminal the user is looking at (see `attended`): tells
+    /// programs about focus changes, and clears that terminal's alerts.
+    fn sync_attention(&mut self) {
+        if self.closing {
+            return;
+        }
+        let attended = self
+            .core
+            .state()
+            .active_tab()
+            .and_then(|t| t.focused_pane)
+            .filter(|_| self.window_focused && self.settings.is_none());
+        if attended != self.attended {
+            if let Some(h) = self.attended.and_then(|p| self.core.terminal(p)) {
+                h.focus_changed(false);
+            }
+            if let Some(h) = attended.and_then(|p| self.core.terminal(p)) {
+                h.focus_changed(true);
+            }
+            self.attended = attended;
+        }
+        if let Some(p) = attended
+            && self.notices.remove(&p).is_some()
+        {
+            self.toasts.retain(|t| t.pane != p);
+        }
+        let s = self.core.state();
+        self.notices.retain(|p, n| s.pane(*p).is_some() && n.first().is_some());
+        self.toasts.retain(|t| s.pane(t.pane).is_some());
     }
 
     fn commit_shell(&mut self) {
@@ -1555,6 +1842,8 @@ impl App {
             // The second layer shows a dragged task next to the pointer.
             container(stack![main, self.view_task_drag()]).width(Length::Fill).height(Length::Fill).into()
         };
+        let base: Element<'_, Message> =
+            if self.toasts.is_empty() { base } else { stack![base, self.view_toasts()].into() };
         match &self.dialog {
             Some(d) => stack![base, self.view_dialog(d)].into(),
             None => column![base].into(),

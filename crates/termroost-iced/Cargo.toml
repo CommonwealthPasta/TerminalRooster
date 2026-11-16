@@ -26,6 +26,14 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
 
+# Desktop notifications: Windows toasts (with a click handler), and D-Bus elsewhere.
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.8"
+windows-registry = "0.6"
+
+[target.'cfg(not(windows))'.dependencies]
+notify-rust = "4.19"
+
 [build-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
 winresource = "0.1"

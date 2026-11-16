@@ -2,9 +2,12 @@
 
 pub mod bundled_bash;
 pub mod input;
+pub mod integration;
+pub(crate) mod osc;
 pub mod render;
 pub mod shell;
 mod snapshot;
+mod tap;
 mod terminal;
 
 pub(crate) use terminal::SpawnSpec;
