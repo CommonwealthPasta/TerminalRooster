@@ -30,8 +30,8 @@ fn main() {
         if let Outcome::Pane(right) = core.dispatch(Command::SplitPane { pane: first, axis: Axis::Vertical }).unwrap() {
             core.dispatch(Command::SplitPane { pane: right, axis: Axis::Horizontal }).unwrap();
         }
-        core.dispatch(Command::CreateTab { project, title: Some("build".into()) }).unwrap();
-        core.dispatch(Command::CreateTab { project, title: Some("logs".into()) }).unwrap();
+        core.dispatch(Command::CreateTab { project, title: Some("build".into()), working_dir: None }).unwrap();
+        core.dispatch(Command::CreateTab { project, title: Some("logs".into()), working_dir: None }).unwrap();
         core.dispatch(Command::CreateTask { project, title: "Fix auth token refresh".into(), tab: Some(tab) }).unwrap();
         core.dispatch(Command::CreateTask { project, title: "Add CI workflow".into(), tab: None }).unwrap();
         if let Outcome::Task(t) =

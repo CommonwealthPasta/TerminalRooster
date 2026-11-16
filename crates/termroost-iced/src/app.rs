@@ -155,7 +155,7 @@ pub enum Dialog {
     CodexTrust(termroost_core::TerminalHandle),
     /// Says once what was carried over from TermRoost, the app's old name.
     Renamed(termroost_core::Renamed),
-    /// Make a git worktree and move the session into it.
+    /// Switch the session to another git worktree, or make one.
     Worktree(Box<WorktreeForm>),
     /// Quitting while terminals still run programs.
     ConfirmQuit {
@@ -701,7 +701,7 @@ impl App {
         }
     }
 
-    fn after_select(&mut self) -> Task<Message> {
+    pub(crate) fn after_select(&mut self) -> Task<Message> {
         if let Some(tab) = self.active_tab_id() {
             self.activity.remove(&tab);
         }
@@ -894,7 +894,7 @@ impl App {
             }
             Message::NewTab => {
                 if let Some(project) = self.core.state().selected_project {
-                    self.dispatch(Command::CreateTab { project, title: None });
+                    self.dispatch(Command::CreateTab { project, title: None, working_dir: None });
                     return self.after_select();
                 }
             }
