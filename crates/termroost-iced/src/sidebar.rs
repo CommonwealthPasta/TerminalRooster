@@ -10,6 +10,7 @@ use termroost_core::{AgentKind, PaneId, Project, ProjectGroup, Tab, TabId};
 
 use crate::agent_icon::{agent_icon, terminal_icon};
 use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget};
+use crate::busy::busy_mark;
 use crate::groups::{self, Row};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
@@ -171,6 +172,12 @@ fn add_item<'a>(msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, M
     .into()
 }
 
+/// The color of a list item's busy mark: the accent, or the item's text
+/// color where the accent would not stand out (a selected item).
+fn mark_ink(selected: bool) -> impl Fn(&iced::Theme) -> iced::Color {
+    move |t| if selected { item_text(t, true) } else { theme::accent(t) }
+}
+
 fn activity_dot<'a>(on: bool) -> Element<'a, Message> {
     if on {
         text("●").size(10).style(|t: &iced::Theme| text::Style { color: Some(theme::accent(t)) }).into()
@@ -313,6 +320,7 @@ impl App {
             selected = projects.iter().any(|p| s.selected_project == Some(p.id));
             let tabs = || projects.iter().flat_map(|p| s.tabs_of(p.id));
             let notice = self.notice_of(tabs().flat_map(|t| t.layout.panes()));
+            label = label.push(busy_mark(self.busy_in(tabs().flat_map(|t| t.layout.panes())), mark_ink(selected)));
             label = label.push(marker(notice, tabs().any(|t| self.activity.contains(&t.id))));
         }
         let label = label.push(muted_text(projects.len().to_string()));
@@ -339,10 +347,17 @@ impl App {
         }
         let s = self.core.state();
         let selected = s.selected_project == Some(p.id);
-        let busy = s.tabs_of(p.id).any(|t| self.activity.contains(&t.id));
+        let new_output = s.tabs_of(p.id).any(|t| self.activity.contains(&t.id));
         let notice = self.notice_of(s.tabs_of(p.id).flat_map(|t| t.layout.panes()));
+        let busy = self.busy_in(s.tabs_of(p.id).flat_map(|t| t.layout.panes()));
         let label = column![
-            row![text(&p.name).size(14).width(Length::Fill), marker(notice, busy)].align_y(Alignment::Center),
+            row![
+                text(&p.name).size(14).width(Length::Fill),
+                busy_mark(busy, mark_ink(selected)),
+                marker(notice, new_output)
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center),
             muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None),
         ]
         .spacing(1);
@@ -445,7 +460,8 @@ impl App {
         }
         // A long name wraps, breaking inside a word too when one doesn't fit.
         let name = text(&tab.title).size(NAME_SIZE).width(Length::Fill).wrapping(text::Wrapping::WordOrGlyph);
-        let mut label = column![row![on_first_line(marks), name, on_first_line(badge)].spacing(4)].spacing(1);
+        let busy = on_first_line(busy_mark(self.busy_in(panes.iter().copied()), mark_ink(selected)));
+        let mut label = column![row![on_first_line(marks), name, busy, on_first_line(badge)].spacing(4)].spacing(1);
         if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
             label = label.push(branch_label(head, 11.0, 24));
         }

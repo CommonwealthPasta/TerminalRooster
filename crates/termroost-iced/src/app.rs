@@ -11,7 +11,9 @@ use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
 use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
-use termroost_core::{AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git};
+use termroost_core::{
+    Activity, AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git,
+};
 
 use crate::color_picker::{ColorPicker, Hsl};
 use crate::git_panel::{GitLog, GitSync, LogRead, SideTab, SyncOp};
@@ -408,6 +410,8 @@ pub struct App {
     pub(crate) task_edit: Option<(TaskId, String)>,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
+    /// What goes on in the terminals that are not idle (see [`Activity`]).
+    pub(crate) busy: HashMap<PaneId, Activity>,
     pub(crate) error: Option<String>,
     /// Information worth a banner that is not an error.
     pub(crate) notice: Option<String>,
@@ -513,6 +517,7 @@ impl App {
             new_task: String::new(),
             task_edit: None,
             activity: HashSet::new(),
+            busy: HashMap::new(),
             error: None,
             notice: None,
             git: HashMap::new(),
@@ -796,6 +801,12 @@ impl App {
                         if let Some(tab) = tab.filter(|t| Some(*t) != self.active_tab_id()) {
                             self.activity.insert(tab);
                         }
+                    }
+                    Event::ActivityChanged(pane) => {
+                        match self.core.terminal(pane).map(|h| h.activity()).filter(|a| !a.is_idle()) {
+                            Some(activity) => self.busy.insert(pane, activity),
+                            None => self.busy.remove(&pane),
+                        };
                     }
                     Event::ClipboardStore(text) => return iced::clipboard::write(text),
                     Event::Alert { pane, alert } => return self.on_notice(pane, Notice::from_alert(&alert)),
