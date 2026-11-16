@@ -175,6 +175,113 @@ impl Repo {
         }
         git(&self.worktree, &args).map(drop)
     }
+
+    /// The latest `limit` commits of this working tree's HEAD, or of every
+    /// branch and tag when `all`, newest first.
+    pub fn log(&self, all: bool, limit: usize) -> Result<Vec<Commit>, String> {
+        let max = format!("--max-count={limit}");
+        // Unit and record separators keep subjects and names unambiguous.
+        let format = "--format=%H%x1f%h%x1f%an%x1f%at%x1f%D%x1f%s%x1e";
+        let mut args = vec!["-c", "log.showSignature=false", "log", "--no-color", &max, format];
+        if all {
+            args.push("--all");
+        }
+        match git(&self.worktree, &args) {
+            Ok(out) => Ok(parse_log(&out)),
+            // A new repository: git complains that there are no commits yet.
+            Err(_) if self.head_commit().is_none() && !all => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The commit HEAD points at, read from the files under `.git`.
+    fn head_commit(&self) -> Option<String> {
+        let head = std::fs::read_to_string(self.git_dir.join("HEAD")).ok()?;
+        let Some(target) = head.trim().strip_prefix("ref:").map(str::trim) else {
+            return Some(head.trim().to_owned());
+        };
+        if let Ok(id) = std::fs::read_to_string(self.common_dir.join(target)) {
+            return Some(id.trim().to_owned());
+        }
+        let packed = std::fs::read_to_string(self.common_dir.join("packed-refs")).ok()?;
+        packed.lines().find_map(|l| l.strip_suffix(target)?.strip_suffix(' ').map(str::to_owned))
+    }
+
+    /// A fingerprint of where HEAD and every branch and tag point. It changes
+    /// when a commit, checkout, reset, rebase or fetch moves a ref. It only
+    /// reads files, so it can be checked often to decide when to run `git log`.
+    pub fn ref_stamp(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let read = |p: &Path| std::fs::read(p).ok();
+        read(&self.git_dir.join("HEAD")).hash(&mut h);
+        for file in ["packed-refs", "reftable/tables.list"] {
+            read(&self.common_dir.join(file)).hash(&mut h);
+        }
+        let mut dirs = vec![self.common_dir.join("refs")];
+        let mut loose = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for e in entries.flatten() {
+                match e.file_type() {
+                    Ok(t) if t.is_dir() => dirs.push(e.path()),
+                    Ok(_) => loose.push(e.path()),
+                    Err(_) => {}
+                }
+            }
+        }
+        loose.sort();
+        for file in loose {
+            file.hash(&mut h);
+            read(&file).hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
+/// One commit, as `git log` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Commit {
+    pub id: String,
+    /// The abbreviated id.
+    pub short: String,
+    pub author: String,
+    /// When it was authored, in seconds since the epoch.
+    pub time: i64,
+    pub subject: String,
+    /// Branches and tags pointing at it (tags as `tag: v1.0`).
+    pub refs: Vec<String>,
+    /// The working tree's HEAD points at it.
+    pub head: bool,
+}
+
+/// Parses `git log` output in the format [`Repo::log`] asks for.
+fn parse_log(out: &str) -> Vec<Commit> {
+    out.split('\u{1e}')
+        .filter_map(|record| {
+            let mut f = record.trim_start_matches(['\r', '\n']).split('\u{1f}');
+            let id = f.next().filter(|id| !id.is_empty())?.to_owned();
+            let short = f.next()?.to_owned();
+            let author = f.next()?.to_owned();
+            let time = f.next()?.parse().unwrap_or(0);
+            let decorations = f.next()?;
+            let subject = f.next()?.trim_end().to_owned();
+            let mut head = false;
+            let mut refs = Vec::new();
+            for d in decorations.split(", ").filter(|d| !d.is_empty()) {
+                if let Some(branch) = d.strip_prefix("HEAD -> ") {
+                    head = true;
+                    refs.push(branch.to_owned());
+                } else if d == "HEAD" {
+                    head = true;
+                } else if !d.ends_with("/HEAD") {
+                    // `origin/HEAD` only repeats the remote's default branch.
+                    refs.push(d.to_owned());
+                }
+            }
+            Some(Commit { id, short, author, time, subject, refs, head })
+        })
+        .collect()
 }
 
 /// Branches of a repository and the working trees that have them checked out.
@@ -528,5 +635,68 @@ mod tests {
         assert_eq!(repo.branches().unwrap().plan("two"), Plan::Existing);
         repo.add_worktree(&two, "two", &Plan::Existing, None).unwrap();
         assert_eq!(Status::of(&two).unwrap().head, Some(Head::Branch("two".into())));
+    }
+
+    #[test]
+    fn parses_the_log() {
+        let out = "aaaa1111\u{1f}aaaa1\u{1f}Ann\u{1f}1700000000\u{1f}HEAD -> main, origin/main, origin/HEAD, tag: v1\
+                   \u{1f}Add: a thing\u{1e}\n\
+                   bbbb2222\u{1f}bbbb2\u{1f}Bo B\u{1f}1690000000\u{1f}\u{1f}Fix: x, y\u{1e}\n";
+        let log = parse_log(out);
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].refs, vec!["main", "origin/main", "tag: v1"]);
+        assert!(log[0].head);
+        assert_eq!((log[0].short.as_str(), log[0].author.as_str(), log[0].time), ("aaaa1", "Ann", 1_700_000_000));
+        assert_eq!(log[1].subject, "Fix: x, y");
+        assert!(log[1].refs.is_empty() && !log[1].head);
+        assert!(parse_log("").is_empty());
+    }
+
+    /// The log and its stamp follow new commits, with git installed.
+    #[test]
+    fn log_follows_commits_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        std::fs::create_dir(&root).unwrap();
+        let run = |args: &[&str]| git(&root, args);
+        if run(&["init", "-q", "-b", "main"]).is_err() {
+            eprintln!("git not available; skipping");
+            return;
+        }
+        let who = ["-c", "user.name=Tess", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"];
+        let commit = |msg: &str| run(&[&who[..], &["commit", "-q", "--allow-empty", "-m", msg]].concat()).unwrap();
+        let repo = Repo::discover(&root).unwrap();
+        assert_eq!(repo.log(false, 50).unwrap(), Vec::new(), "no commits yet");
+
+        commit("first");
+        let stamp = repo.ref_stamp();
+        assert_eq!(repo.ref_stamp(), stamp, "nothing moved");
+        let log = repo.log(false, 50).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!((log[0].subject.as_str(), log[0].author.as_str()), ("first", "Tess"));
+        assert_eq!(log[0].refs, vec!["main"]);
+        assert!(log[0].head);
+
+        commit("second");
+        assert_ne!(repo.ref_stamp(), stamp);
+        assert_eq!(repo.log(false, 50).unwrap()[0].subject, "second");
+        assert_eq!(repo.log(false, 1).unwrap().len(), 1);
+
+        // A commit on another branch shows only in the log of every branch.
+        run(&["switch", "-q", "-c", "side"]).unwrap();
+        commit("on side");
+        run(&["switch", "-q", "main"]).unwrap();
+        let here: Vec<String> = repo.log(false, 50).unwrap().into_iter().map(|c| c.subject).collect();
+        assert_eq!(here, vec!["second", "first"]);
+        // Commits made within one second come in no particular order.
+        let all = repo.log(true, 50).unwrap();
+        let find = |subject: &str| all.iter().find(|c| c.subject == subject).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(find("on side").refs, vec!["side"]);
+        assert!(!find("on side").head && find("second").head);
+
+        // Packed refs still resolve.
+        run(&["pack-refs", "--all"]).unwrap();
+        assert_eq!(repo.head_commit(), Some(find("second").id.clone()));
     }
 }
