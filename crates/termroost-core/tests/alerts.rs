@@ -154,3 +154,34 @@ fn check(shell: Shell) {
     run(shell.fail);
     assert_eq!(next_alert(&mut core, pane, long), Alert::CommandFailed { code: 3, command: Some(shell.fail.into()) });
 }
+
+/// What the quit confirmation lists: programs started from the shell, not the shell.
+#[test]
+fn running_programs_are_listed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open(dir.path());
+    let (shell, prompt, sleep, name) = if cfg!(windows) {
+        ("powershell.exe -NoLogo -NoProfile", "PS ", "ping -n 30 127.0.0.1", "ping")
+    } else {
+        ("bash --norc --noprofile", "$", "sleep 30", "sleep")
+    };
+    core.dispatch(Command::SetDefaultShell(Some(shell.into()))).unwrap();
+    core.dispatch(Command::CreateProject { name: "p".into(), working_dir: dir.path().into(), shell: None }).unwrap();
+    let pane = core.state().active_tab().unwrap().layout.first_pane();
+    wait_for_text(&mut core, pane, prompt);
+    assert_eq!(core.running_programs(), vec![], "an idle shell runs nothing");
+
+    core.terminal(pane).unwrap().write(format!("{sleep}\r"));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let running = core.running_programs();
+        if let [(p, names)] = running.as_slice()
+            && *p == pane
+            && names.iter().any(|n| n.eq_ignore_ascii_case(name))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{name} not listed: {running:?}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}

@@ -270,6 +270,18 @@ impl Core {
         }
     }
 
+    /// The programs running in each terminal (below its shell), by name, for
+    /// asking before quitting. Terminals with nothing running are left out.
+    /// Inspects every process, so it can take a moment.
+    pub fn running_programs(&self) -> Vec<(PaneId, Vec<String>)> {
+        let shells: Vec<(PaneId, u32)> =
+            self.bg.sessions.lock().unwrap().values().filter_map(|h| Some((h.pane(), h.shell_pid()?))).collect();
+        let mut found: Vec<(PaneId, Vec<String>)> =
+            self.bg.detector.lock().unwrap().programs(&shells).into_iter().filter(|(_, n)| !n.is_empty()).collect();
+        found.sort_by_key(|(p, _)| *p);
+        found
+    }
+
     /// Blocks until all queued database writes are committed.
     pub fn flush(&self) {
         self.store.flush();

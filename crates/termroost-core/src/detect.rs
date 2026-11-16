@@ -265,6 +265,64 @@ impl Detector {
     }
 }
 
+impl Detector {
+    /// What runs below each shell, by name: the processes the shell started,
+    /// not their own children. Shell forks (MSYS bash starts programs from a
+    /// copy of itself) are looked through.
+    pub(crate) fn programs(&mut self, shells: &[(PaneId, u32)]) -> HashMap<PaneId, Vec<String>> {
+        let Some(sys) = self.sys.as_mut() else { return HashMap::new() };
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().without_tasks().with_cmd(UpdateKind::OnlyIfNotSet),
+        );
+        let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+        for (pid, p) in sys.processes() {
+            if let Some(parent) = p.parent() {
+                children.entry(parent).or_default().push(*pid);
+            }
+        }
+        let mut out = HashMap::new();
+        for (pane, shell) in shells {
+            let shell = Pid::from_u32(*shell);
+            let Some(shell_name) = sys.process(shell).map(|p| stem(p.name())) else { continue };
+            let mut names = Vec::new();
+            let mut queue: VecDeque<Pid> = children.get(&shell).into_iter().flatten().copied().collect();
+            while let Some(pid) = queue.pop_front() {
+                let Some(p) = sys.process(pid) else { continue };
+                let name = stem(p.name());
+                if name == shell_name {
+                    queue.extend(children.get(&pid).into_iter().flatten().copied());
+                    continue;
+                }
+                // Helpers nobody started on purpose: console hosts, and the
+                // processes wsl.exe always keeps (what runs inside WSL can't be seen).
+                if matches!(name.as_str(), "conhost" | "openconsole" | "wslhost" | "wslrelay") {
+                    continue;
+                }
+                let label = AgentKind::ALL
+                    .into_iter()
+                    .find(|k| runs(p, k.as_str()))
+                    .map(|k| k.label().to_owned())
+                    .unwrap_or_else(|| without_exe(&p.name().to_string_lossy()).to_owned());
+                if !names.contains(&label) {
+                    names.push(label);
+                }
+            }
+            out.insert(*pane, names);
+        }
+        out
+    }
+}
+
+/// A process name without a Windows `.exe` (any case): `PING.EXE` -> `PING`.
+fn without_exe(name: &str) -> &str {
+    match name.len().checked_sub(4).and_then(|i| Some((i, name.get(i..)?))) {
+        Some((i, ext)) if ext.eq_ignore_ascii_case(".exe") => &name[..i],
+        _ => name,
+    }
+}
+
 /// Which terminal a hook report belongs to: the only Codex in that folder, or
 /// the one that most recently submitted a prompt (or started) before the
 /// event. The pane id the hook saw is used only to break a tie.
