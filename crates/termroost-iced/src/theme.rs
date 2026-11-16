@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use iced::widget::{button, container, pane_grid};
+use iced::widget::{button, container, pane_grid, text_editor};
 use iced::{Background, Border, Color, Font, Theme};
 
 /// Bundled terminal font (JetBrains Mono, SIL Open Font License 1.1).
@@ -125,6 +125,23 @@ pub fn tree_row(theme: &Theme, status: button::Status) -> button::Style {
         text_color: p.background.base.text,
         border: Border::default().rounded(3),
         ..button::Style::default()
+    }
+}
+
+/// The file editor: square, framed like a terminal, in the accent color while it has the keyboard.
+pub fn file_editor(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let p = theme.extended_palette();
+    let focused = matches!(status, text_editor::Status::Focused { .. });
+    text_editor::Style {
+        background: Background::Color(p.background.base.color),
+        border: Border {
+            width: 1.0,
+            color: if focused { p.primary.base.color } else { p.background.strong.color },
+            radius: 0.0.into(),
+        },
+        placeholder: muted(theme),
+        value: p.background.base.text,
+        selection: p.primary.weak.color,
     }
 }
 

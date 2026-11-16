@@ -14,6 +14,7 @@ use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
+use crate::editor::{EditorMsg, SessionFiles};
 use crate::files::{FilesMsg, FilesState};
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
@@ -334,6 +335,7 @@ pub enum Message {
     ShowPanel(SideTab),
     ClosePanel,
     Files(FilesMsg),
+    Editor(EditorMsg),
     NewTaskInput(String),
     AddTask,
     TaskDone(TaskId, bool),
@@ -387,6 +389,10 @@ pub struct App {
     pub(crate) task_edit: Option<(TaskId, String)>,
     /// The folders read for the Files tab.
     pub(crate) files: FilesState,
+    /// The files each session has open.
+    pub(crate) editors: HashMap<TabId, SessionFiles>,
+    /// The last id given to an open file.
+    pub(crate) next_doc: u64,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     pub(crate) error: Option<String>,
@@ -488,6 +494,8 @@ impl App {
             new_task: String::new(),
             task_edit: None,
             files: FilesState::default(),
+            editors: HashMap::new(),
+            next_doc: 0,
             activity: HashSet::new(),
             error: None,
             notice: None,
@@ -701,10 +709,14 @@ impl App {
         Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::GitStatus)
     }
 
-    /// Moves keyboard focus to the focused terminal of the visible tab.
+    /// Moves keyboard focus to the focused terminal of the visible tab, or to
+    /// the file shown in place of its terminals.
     pub(crate) fn focus_active(&self) -> Task<Message> {
         if self.dialog.is_some() || self.rename.is_some() || self.task_edit.is_some() {
             return Task::none();
+        }
+        if let Some(focus) = self.focus_doc() {
+            return focus;
         }
         match self.core.state().active_tab().and_then(|t| t.focused_pane) {
             Some(p) => operation::focus(terminal_view::widget_id(p)),
@@ -762,7 +774,13 @@ impl App {
             return Task::none();
         }
         // Key events are never logged: they can carry what the user types.
-        if !matches!(message, Message::Core(_) | Message::Tick | Message::Key(_)) {
+        // Nor are editor actions and folder listings: what is in people's files.
+        let quiet = match &message {
+            Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
+            Message::Editor(msg) => !msg.loggable(),
+            _ => false,
+        };
+        if !quiet {
             tracing::trace!(?message, "update");
         }
         match message {
@@ -1417,6 +1435,7 @@ impl App {
                 return self.focus_active();
             }
             Message::Files(msg) => return self.update_files(msg),
+            Message::Editor(msg) => return self.update_editor(msg),
             Message::NewTaskInput(v) => self.new_task = v,
             Message::AddTask => {
                 let title = std::mem::take(&mut self.new_task);
@@ -1547,6 +1566,7 @@ impl App {
                 for t in tabs {
                     self.grids.remove(&t);
                     self.activity.remove(&t);
+                    self.editors.remove(&t);
                 }
                 return self.after_select();
             }
@@ -1554,6 +1574,7 @@ impl App {
                 self.dispatch(Command::DeleteTab(tab));
                 self.grids.remove(&tab);
                 self.activity.remove(&tab);
+                self.editors.remove(&tab);
                 return self.after_select();
             }
             Dialog::Pane { pane, resume, .. } => {
@@ -1622,9 +1643,12 @@ impl App {
         Some(format!("{} · {}", tab.title, project.name))
     }
 
-    /// The terminal is on screen: in the visible session, settings closed.
+    /// The terminal is on screen: in the visible session, settings closed, no
+    /// file shown in place of the terminals.
     fn pane_visible(&self, pane: PaneId) -> bool {
-        self.settings.is_none() && self.core.state().pane(pane).map(|p| p.tab) == self.active_tab_id()
+        self.settings.is_none()
+            && self.shown_doc().is_none()
+            && self.core.state().pane(pane).map(|p| p.tab) == self.active_tab_id()
     }
 
     /// An alert from a terminal: mark it, and say so as loudly as the user chose.
@@ -1676,6 +1700,7 @@ impl App {
         self.toasts.retain(|t| t.pane != pane);
         self.dispatch(Command::SelectTab(tab));
         self.dispatch(Command::FocusPane(pane));
+        self.show_terminals();
         let focus = self.after_select();
         match self.window_id {
             Some(id) => Task::batch([focus, window::gain_focus(id)]),
@@ -1689,12 +1714,13 @@ impl App {
         if self.closing {
             return;
         }
+        // A file shown in place of the terminals hides them.
         let attended = self
             .core
             .state()
             .active_tab()
             .and_then(|t| t.focused_pane)
-            .filter(|_| self.window_focused && self.settings.is_none());
+            .filter(|_| self.window_focused && self.settings.is_none() && self.shown_doc().is_none());
         if attended != self.attended {
             if let Some(h) = self.attended.and_then(|p| self.core.terminal(p)) {
                 h.focus_changed(false);
@@ -1810,6 +1836,21 @@ impl App {
     fn shortcut(&mut self, action: Action) -> Task<Message> {
         if self.dialog.is_some() || self.settings.is_some() {
             return Task::none();
+        }
+        // With a file in place of the terminals, terminal shortcuts don't act
+        // on terminals out of sight: closing closes the file, and splitting or
+        // moving between terminals brings them back first.
+        if let Some(doc) = self.shown_doc().map(|d| d.id) {
+            match action {
+                Action::CloseTerminal => return self.update(Message::Editor(EditorMsg::Close(doc))),
+                Action::SplitRight
+                | Action::SplitDown
+                | Action::FocusLeft
+                | Action::FocusRight
+                | Action::FocusUp
+                | Action::FocusDown => self.show_terminals(),
+                _ => {}
+            }
         }
         let s = self.core.state();
         let focused = s.active_tab().and_then(|t| t.focused_pane);

@@ -59,6 +59,8 @@ pub struct FilesState {
 pub enum FilesMsg {
     /// Open or close a folder.
     Toggle(PathBuf),
+    /// Open a file in place of the terminals.
+    Open(PathBuf),
     /// Folders were read.
     Listed(Vec<(PathBuf, Result<Vec<Entry>, String>)>),
     /// Time to read the folders shown again.
@@ -235,6 +237,7 @@ impl App {
                 }
                 Task::none()
             }
+            FilesMsg::Open(path) => self.open_file(path),
             FilesMsg::Poll => self.refresh_files(),
             FilesMsg::Refresh => Task::batch([self.refresh_files(), self.focus_active()]),
         }
@@ -269,8 +272,14 @@ fn file_row(r: Row<'_>) -> Element<'_, Message> {
             ]
             .spacing(2)
             .align_y(Alignment::Center);
-            let toggle = entry.is_dir.then(|| Message::Files(FilesMsg::Toggle(entry.path.clone())));
-            button(label).width(Length::Fill).padding([2, 4]).style(theme::tree_row).on_press_maybe(toggle).into()
+            let press =
+                if entry.is_dir { FilesMsg::Toggle(entry.path.clone()) } else { FilesMsg::Open(entry.path.clone()) };
+            button(label)
+                .width(Length::Fill)
+                .padding([2, 4])
+                .style(theme::tree_row)
+                .on_press(Message::Files(press))
+                .into()
         }
         Row::Note { text: note, depth } => {
             row![space::horizontal().width(depth as f32 * INDENT + 18.0), muted_text(note)].padding([2, 4]).into()

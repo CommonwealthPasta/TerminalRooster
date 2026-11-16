@@ -74,14 +74,14 @@ impl App {
         }
         let header = header.push(panel_buttons).spacing(10).align_y(Alignment::Center).padding([4, 10]);
 
-        let mut content = column![header];
-        let banners = [
+        let mut banners = column![];
+        let messages = [
             (&self.error, Message::DismissError, theme::error_banner as fn(&iced::Theme) -> container::Style),
             (&self.notice, Message::DismissNotice, theme::notice_banner),
         ];
-        for (message, dismiss, style) in banners {
+        for (message, dismiss, style) in messages {
             if let Some(message) = message {
-                content = content.push(
+                banners = banners.push(
                     container(
                         row![text(message).size(13).width(Length::Fill), icon_button("✕", dismiss, "Dismiss")]
                             .align_y(Alignment::Center),
@@ -91,17 +91,21 @@ impl App {
                 );
             }
         }
-        let grid: Element<'_, Message> = match self.grids.get(&tab.id) {
-            Some(grid) => pane_grid(grid, move |_, pane, _| self.pane_content(*pane, tab))
+        let body: Element<'_, Message> = match (self.shown_doc(), self.grids.get(&tab.id)) {
+            (Some(doc), _) => self.view_doc(doc),
+            (None, Some(grid)) => pane_grid(grid, move |_, pane, _| self.pane_content(*pane, tab))
                 .spacing(3)
                 .on_click(Message::PaneClicked)
                 .on_drag(Message::PaneDragged)
                 .on_resize(8, Message::PaneResized)
                 .style(theme::pane_grid_style)
                 .into(),
-            None => center(text("…")).into(),
+            (None, None) => center(text("…")).into(),
         };
-        content.push(container(grid).padding(3).height(Length::Fill)).into()
+        // Each part keeps its place in the column whether it shows anything or
+        // not: widgets are matched to their state by position, so a banner
+        // coming and going would otherwise reset the editor and the terminals.
+        column![header, self.view_file_strip(), banners, container(body).padding(3).height(Length::Fill)].into()
     }
 
     fn pane_content<'a>(&'a self, pane: PaneId, tab: &'a Tab) -> pane_grid::Content<'a, Message> {
