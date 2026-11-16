@@ -265,51 +265,173 @@ impl Detector {
     }
 }
 
+/// A program running in a terminal, below its shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Program {
+    /// The process name without `.exe` (`node`), or the agent's name (`Claude Code`).
+    pub name: String,
+    /// The coding agent this is.
+    pub agent: Option<AgentKind>,
+    /// The coding agent that runs it: one of the agent's commands, such as a
+    /// dev server it left running in the background.
+    pub started_by: Option<AgentKind>,
+}
+
 impl Detector {
-    /// What runs below each shell, by name: the processes the shell started,
-    /// not their own children. Shell forks (MSYS bash starts programs from a
-    /// copy of itself) are looked through.
-    pub(crate) fn programs(&mut self, shells: &[(PaneId, u32)]) -> HashMap<PaneId, Vec<String>> {
+    /// What runs below each shell; see [`Procs::programs_below`].
+    pub(crate) fn programs(&mut self, shells: &[(PaneId, u32)]) -> HashMap<PaneId, Vec<Program>> {
         let Some(sys) = self.sys.as_mut() else { return HashMap::new() };
         sys.refresh_processes_specifics(
             ProcessesToUpdate::All,
             true,
             ProcessRefreshKind::nothing().without_tasks().with_cmd(UpdateKind::OnlyIfNotSet),
         );
-        let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-        for (pid, p) in sys.processes() {
-            if let Some(parent) = p.parent() {
-                children.entry(parent).or_default().push(*pid);
+        self.programs_seen(shells)
+    }
+
+    /// Like [`Self::programs`], from the processes as the last refresh saw them.
+    pub(crate) fn programs_seen(&self, shells: &[(PaneId, u32)]) -> HashMap<PaneId, Vec<Program>> {
+        let Some(sys) = self.sys.as_ref() else { return HashMap::new() };
+        let procs = Procs::below(sys, shells.iter().map(|(_, shell)| *shell));
+        shells.iter().map(|(pane, shell)| (*pane, procs.programs_below(*shell))).collect()
+    }
+}
+
+/// Helpers nobody started on purpose: console hosts, and the processes
+/// wsl.exe always keeps (what runs inside WSL can't be seen).
+const HELPERS: &[&str] = &["conhost", "openconsole", "wslhost", "wslrelay"];
+
+/// What the walks below need to know about a process.
+#[derive(Debug)]
+struct Proc {
+    /// Lowercased name without extension (`bash`).
+    stem: String,
+    /// The name as shown, without `.exe` (`PING`).
+    shown: String,
+    /// The command line after the program.
+    args: Vec<std::ffi::OsString>,
+    agent: Option<AgentKind>,
+}
+
+/// The processes below some shells, with who started whom.
+#[derive(Debug, Default)]
+struct Procs {
+    procs: HashMap<u32, Proc>,
+    children: HashMap<u32, Vec<u32>>,
+}
+
+impl Procs {
+    /// The given processes and everything below them.
+    fn below(sys: &System, roots: impl IntoIterator<Item = u32>) -> Procs {
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (pid, kids) in children_of(sys) {
+            children.insert(pid.as_u32(), kids.iter().map(|k| k.as_u32()).collect());
+        }
+        for kids in children.values_mut() {
+            kids.sort_unstable();
+        }
+        let mut procs = HashMap::new();
+        let mut queue: Vec<u32> = roots.into_iter().collect();
+        while let Some(pid) = queue.pop() {
+            if procs.contains_key(&pid) {
+                continue;
+            }
+            let Some(p) = sys.process(Pid::from_u32(pid)) else { continue };
+            let proc = Proc {
+                stem: stem(p.name()),
+                shown: without_exe(&p.name().to_string_lossy()).to_owned(),
+                args: p.cmd().get(1..).unwrap_or_default().to_vec(),
+                agent: AgentKind::ALL.into_iter().find(|k| runs(p, k.as_str())),
+            };
+            procs.insert(pid, proc);
+            queue.extend(children.get(&pid).into_iter().flatten().copied());
+        }
+        Procs { procs, children }
+    }
+
+    fn kids(&self, pid: u32) -> impl Iterator<Item = u32> + '_ {
+        self.children.get(&pid).into_iter().flatten().copied()
+    }
+
+    /// What runs below a terminal's shell: the programs the shell started,
+    /// not their own children, except the commands of coding agents (see
+    /// [`Self::agent_commands`]). Shell forks (MSYS bash starts programs from
+    /// a copy of itself) are looked through.
+    fn programs_below(&self, shell: u32) -> Vec<Program> {
+        let Some(shell_name) = self.procs.get(&shell).map(|p| p.stem.as_str()) else { return Vec::new() };
+        let mut out: Vec<Program> = Vec::new();
+        let mut add = |program: Program| {
+            if !out.contains(&program) {
+                out.push(program);
+            }
+        };
+        let mut seen = HashSet::from([shell]);
+        let mut queue: VecDeque<u32> = self.kids(shell).collect();
+        while let Some(pid) = queue.pop_front() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            let Some(p) = self.procs.get(&pid) else { continue };
+            if p.stem == shell_name {
+                queue.extend(self.kids(pid));
+                continue;
+            }
+            if HELPERS.contains(&p.stem.as_str()) {
+                continue;
+            }
+            match p.agent {
+                Some(kind) => {
+                    add(Program { name: kind.label().to_owned(), agent: Some(kind), started_by: None });
+                    for name in self.agent_commands(pid) {
+                        add(Program { name, agent: None, started_by: Some(kind) });
+                    }
+                }
+                None => add(Program { name: p.shown.clone(), agent: None, started_by: None }),
             }
         }
-        let mut out = HashMap::new();
-        for (pane, shell) in shells {
-            let shell = Pid::from_u32(*shell);
-            let Some(shell_name) = sys.process(shell).map(|p| stem(p.name())) else { continue };
-            let mut names = Vec::new();
-            let mut queue: VecDeque<Pid> = children.get(&shell).into_iter().flatten().copied().collect();
+        out
+    }
+
+    /// The commands a coding agent runs, by the programs they run. Agents
+    /// run commands through a shell (`bash -c …`, `cmd /c …`), in the
+    /// foreground or left in the background; what they start directly is
+    /// their own machinery (language servers, MCP servers) and is left out.
+    /// A command whose program can't be seen (a builtin, or an MSYS tool,
+    /// which leaves the Windows process tree) is named by its shell.
+    fn agent_commands(&self, agent: u32) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen = HashSet::from([agent]);
+        for command in self.kids(agent) {
+            let Some(p) = self.procs.get(&command) else { continue };
+            if !SHELLS.contains(&p.stem.as_str()) || interactive_shell(&p.stem, &p.args) {
+                continue;
+            }
+            let mut shell = &p.shown;
+            let mut found = Vec::new();
+            let mut queue = VecDeque::from([command]);
             while let Some(pid) = queue.pop_front() {
-                let Some(p) = sys.process(pid) else { continue };
-                let name = stem(p.name());
-                if name == shell_name {
-                    queue.extend(children.get(&pid).into_iter().flatten().copied());
+                if !seen.insert(pid) {
                     continue;
                 }
-                // Helpers nobody started on purpose: console hosts, and the
-                // processes wsl.exe always keeps (what runs inside WSL can't be seen).
-                if matches!(name.as_str(), "conhost" | "openconsole" | "wslhost" | "wslrelay") {
-                    continue;
-                }
-                let label = AgentKind::ALL
-                    .into_iter()
-                    .find(|k| runs(p, k.as_str()))
-                    .map(|k| k.label().to_owned())
-                    .unwrap_or_else(|| without_exe(&p.name().to_string_lossy()).to_owned());
-                if !names.contains(&label) {
-                    names.push(label);
+                let Some(p) = self.procs.get(&pid) else { continue };
+                let stem = p.stem.as_str();
+                if SHELLS.contains(&stem) || LAUNCHERS.contains(&stem) {
+                    if SHELLS.contains(&stem) {
+                        shell = &p.shown;
+                    }
+                    queue.extend(self.kids(pid));
+                } else if !HELPERS.contains(&stem) {
+                    found.push(p.agent.map(|k| k.label().to_owned()).unwrap_or_else(|| p.shown.clone()));
                 }
             }
-            out.insert(*pane, names);
+            if found.is_empty() {
+                found.push(shell.clone());
+            }
+            for name in found {
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
         }
         out
     }
@@ -755,6 +877,71 @@ mod tests {
         assert!(idle("cmd", &["/d", "/q"]));
         assert!(!idle("cmd", &["/C", "dir"]));
         assert!(!idle("cmd", &["/k", "vcvars.bat"]));
+    }
+
+    /// A process table from `(pid, parent, command line, agent)`.
+    fn procs(entries: &[(u32, u32, &str, Option<AgentKind>)]) -> Procs {
+        let mut t = Procs::default();
+        for (pid, parent, line, agent) in entries {
+            let mut words = line.split_whitespace();
+            let program = words.next().unwrap();
+            let proc = Proc {
+                stem: stem(program.as_ref()),
+                shown: without_exe(program).to_owned(),
+                args: words.map(Into::into).collect(),
+                agent: *agent,
+            };
+            t.procs.insert(*pid, proc);
+            t.children.entry(*parent).or_default().push(*pid);
+        }
+        t
+    }
+
+    /// Laid out as seen on Windows 11 with Git Bash and Claude Code (2026-11-16).
+    #[test]
+    fn programs_below_a_shell() {
+        use AgentKind::Claude;
+        let t = procs(&[
+            // The terminal's Git Bash, and the copy of itself it starts programs from.
+            (10, 1, "bash.exe -i -l", None),
+            (11, 10, "bash.exe -i -l", None),
+            (12, 11, "conhost.exe 0x4", None),
+            (13, 11, "node.exe vite", None),
+            (14, 13, "node.exe esbuild", None),
+            (20, 11, "claude.exe", Some(Claude)),
+            // Claude's own machinery, which it starts directly.
+            (21, 20, "rustup.exe", None),
+            (22, 21, "rust-analyzer.exe", None),
+            (23, 20, "node.exe mcp-server.js", None),
+            (24, 20, "bash.exe -i", None),
+            // Its commands: a dev server left running, a PowerShell command,
+            // and an MSYS tool whose process has left the tree.
+            (30, 20, "bash.exe -c npm run dev", None),
+            (31, 30, "bash.exe -c npm run dev", None),
+            (32, 31, "node.exe vite", None),
+            (40, 20, "cmd.exe /d /s /c powershell", None),
+            (41, 40, "conhost.exe 0x4", None),
+            (42, 40, "powershell.exe -NoProfile -Command Start-Sleep 9", None),
+            (50, 20, "bash.exe -c sleep 90", None),
+            (51, 50, "bash.exe -c sleep 90", None),
+        ]);
+        let p = |name: &str, agent, started_by| Program { name: name.into(), agent, started_by };
+        assert_eq!(
+            t.programs_below(10),
+            [
+                p("node", None, None),
+                p("Claude Code", Some(Claude), None),
+                p("node", None, Some(Claude)),
+                p("powershell", None, Some(Claude)),
+                p("bash", None, Some(Claude)),
+            ]
+        );
+        let idle = procs(&[(10, 1, "bash.exe -i", None), (11, 10, "bash.exe -i", None), (12, 11, "conhost.exe", None)]);
+        assert_eq!(idle.programs_below(10), []);
+        assert_eq!(t.programs_below(99), [], "a shell that is gone");
+        // Process ids reused into a loop.
+        let looped = procs(&[(10, 11, "bash.exe -i", None), (11, 10, "bash.exe -i", None)]);
+        assert_eq!(looped.programs_below(10), []);
     }
 
     fn homes(dir: &Path) -> AgentHomes {

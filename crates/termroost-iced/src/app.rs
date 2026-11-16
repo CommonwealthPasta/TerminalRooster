@@ -1655,17 +1655,20 @@ impl App {
             .core
             .running_programs()
             .into_iter()
-            .filter_map(|(pane, names)| {
+            .filter_map(|(pane, found)| {
                 let tab = s.pane(pane)?.tab;
                 let rank = s.tabs.iter().position(|t| t.id == tab).unwrap_or(usize::MAX);
                 let working = self.core.terminal(pane).is_some_and(|h| h.agent_working());
-                let is_agent = |n: &String| AgentKind::ALL.iter().any(|k| k.label() == n);
-                let programs = names
+                let programs = found
                     .iter()
-                    .map(|n| if working && is_agent(n) { format!("{n} (working)") } else { n.clone() })
+                    .map(|p| match (p.agent, p.started_by) {
+                        (Some(_), _) if working => format!("{} (working)", p.name),
+                        (None, Some(by)) => format!("{} (started by {by})", p.name),
+                        _ => p.name.clone(),
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
-                let agent = names.iter().any(is_agent);
+                let agent = found.iter().any(|p| p.agent.is_some());
                 Some((rank, RunningTerminal { pane, place: self.place_of(pane)?, programs, agent }))
             })
             .collect();

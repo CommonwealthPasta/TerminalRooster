@@ -37,7 +37,7 @@ pub use agent::{AgentKind, AgentSession};
 pub use alert::{AgentEvent, Alert};
 pub use codex_hook::CodexHookStatus;
 pub use command::{Command, Event, Outcome};
-pub use detect::{AgentHomes, ObservedAgent};
+pub use detect::{AgentHomes, ObservedAgent, Program};
 pub use error::{Error, Result};
 pub use layout::{Axis, Layout};
 pub use model::*;
@@ -305,13 +305,13 @@ impl Core {
         }
     }
 
-    /// The programs running in each terminal (below its shell), by name, for
-    /// asking before quitting. Terminals with nothing running are left out.
+    /// The programs running in each terminal (below its shell), for asking
+    /// before quitting. Terminals with nothing running are left out.
     /// Inspects every process, so it can take a moment.
-    pub fn running_programs(&self) -> Vec<(PaneId, Vec<String>)> {
+    pub fn running_programs(&self) -> Vec<(PaneId, Vec<Program>)> {
         let shells: Vec<(PaneId, u32)> =
             self.bg.sessions.lock().unwrap().values().filter_map(|h| Some((h.pane(), h.shell_pid()?))).collect();
-        let mut found: Vec<(PaneId, Vec<String>)> =
+        let mut found: Vec<(PaneId, Vec<Program>)> =
             self.bg.detector.lock().unwrap().programs(&shells).into_iter().filter(|(_, n)| !n.is_empty()).collect();
         found.sort_by_key(|(p, _)| *p);
         found

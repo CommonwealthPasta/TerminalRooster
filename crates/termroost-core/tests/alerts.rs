@@ -177,7 +177,7 @@ fn running_programs_are_listed() {
         let running = core.running_programs();
         if let [(p, names)] = running.as_slice()
             && *p == pane
-            && names.iter().any(|n| n.eq_ignore_ascii_case(name))
+            && names.iter().any(|n| n.name.eq_ignore_ascii_case(name))
         {
             break;
         }
