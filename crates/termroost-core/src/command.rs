@@ -1,0 +1,157 @@
+//! The command/event contract between the core and any front end.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::agent::AgentKind;
+use crate::detect::ObservedAgent;
+use crate::layout::{Axis, Layout};
+use crate::model::{PaneId, ProjectId, TabId, TaskId};
+
+/// A state change requested by the front end.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Command {
+    /// Creates a project with one tab (whose terminal starts immediately) and selects it.
+    CreateProject {
+        name: String,
+        working_dir: PathBuf,
+        shell: Option<String>,
+    },
+    RenameProject {
+        project: ProjectId,
+        name: String,
+    },
+    SetProjectDir {
+        project: ProjectId,
+        working_dir: PathBuf,
+    },
+    SetProjectShell {
+        project: ProjectId,
+        shell: Option<String>,
+    },
+    DeleteProject(ProjectId),
+    MoveProject {
+        project: ProjectId,
+        to_index: usize,
+    },
+    SelectProject(ProjectId),
+
+    /// Creates a tab (with one terminal) and selects it.
+    CreateTab {
+        project: ProjectId,
+        title: Option<String>,
+    },
+    RenameTab {
+        tab: TabId,
+        title: String,
+    },
+    SetTabDir {
+        tab: TabId,
+        working_dir: Option<PathBuf>,
+    },
+    DeleteTab(TabId),
+    MoveTab {
+        tab: TabId,
+        to_index: usize,
+    },
+    SelectTab(TabId),
+
+    /// Splits a pane; the new terminal goes right of (vertical) or below (horizontal) it.
+    SplitPane {
+        pane: PaneId,
+        axis: Axis,
+    },
+    /// Closes a pane. Refused for the last pane of a tab.
+    ClosePane(PaneId),
+    FocusPane(PaneId),
+    /// Replaces a tab's layout (after resizing or rearranging). Must contain the same panes.
+    SetLayout {
+        tab: TabId,
+        layout: Layout,
+    },
+    SetResumeCommand {
+        pane: PaneId,
+        command: Option<String>,
+    },
+    /// Launches a coding agent in the pane's shell with a session id TermRoost
+    /// tracks, so the exact session can be resumed after a restart.
+    StartAgent {
+        pane: PaneId,
+        kind: AgentKind,
+        args: String,
+    },
+    /// Stops tracking the pane's agent (it will not be resumed).
+    ClearAgent(PaneId),
+    /// Starts a new shell in an exited (or running) pane, keeping its scrollback.
+    RestartPane(PaneId),
+
+    CreateTask {
+        project: ProjectId,
+        title: String,
+        tab: Option<TabId>,
+    },
+    EditTask {
+        task: TaskId,
+        title: String,
+        notes: String,
+    },
+    SetTaskDone {
+        task: TaskId,
+        done: bool,
+    },
+    AssignTask {
+        task: TaskId,
+        tab: Option<TabId>,
+    },
+    MoveTask {
+        task: TaskId,
+        to_index: usize,
+    },
+    DeleteTask(TaskId),
+
+    SetDefaultShell(Option<String>),
+    /// Stores an opaque front-end value (window geometry, panel widths...).
+    SetGuiValue {
+        key: String,
+        value: String,
+    },
+}
+
+/// What a successful command created, if anything.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    None,
+    Project(ProjectId),
+    Tab(TabId),
+    Pane(PaneId),
+    Task(TaskId),
+}
+
+/// Asynchronous notifications from the core.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Event {
+    /// The terminal has new content. Sent at most once until the front end
+    /// next reads the content, so a busy terminal cannot flood the channel.
+    TerminalDirty(PaneId),
+    TitleChanged {
+        pane: PaneId,
+        title: String,
+    },
+    Bell(PaneId),
+    ProcessExited {
+        pane: PaneId,
+        code: Option<i32>,
+    },
+    /// A program asked to copy text to the clipboard (OSC 52).
+    ClipboardStore(String),
+    /// The Codex hook reported (front ends may refresh its status display).
+    CodexHookReported,
+    /// The agent running in a terminal appeared, switched session, or exited
+    /// (`None`). Front ends must pass every event to [`crate::Core::apply_event`],
+    /// which records this so the right session is resumed after a restart.
+    AgentObserved {
+        pane: PaneId,
+        agent: Option<ObservedAgent>,
+    },
+}

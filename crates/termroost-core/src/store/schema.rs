@@ -1,0 +1,87 @@
+//! Database schema and migrations, tracked with `PRAGMA user_version`.
+
+use rusqlite::Connection;
+
+const MIGRATIONS: &[&str] = &[
+    // 1: initial schema
+    r#"
+    CREATE TABLE projects (
+        id            INTEGER PRIMARY KEY,
+        name          TEXT NOT NULL,
+        working_dir   TEXT NOT NULL,
+        shell         TEXT,
+        sort_order    INTEGER NOT NULL DEFAULT 0,
+        active_tab_id INTEGER,
+        created_at    INTEGER NOT NULL
+    );
+    CREATE TABLE tabs (
+        id              INTEGER PRIMARY KEY,
+        project_id      INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        title           TEXT NOT NULL,
+        working_dir     TEXT,
+        layout          TEXT NOT NULL,
+        focused_pane_id INTEGER,
+        sort_order      INTEGER NOT NULL DEFAULT 0,
+        created_at      INTEGER NOT NULL
+    );
+    CREATE INDEX tabs_project ON tabs(project_id);
+    CREATE TABLE panes (
+        id             INTEGER PRIMARY KEY,
+        tab_id         INTEGER NOT NULL REFERENCES tabs(id) ON DELETE CASCADE,
+        resume_command TEXT,
+        agent_kind     TEXT,
+        agent_session  TEXT,
+        agent_args     TEXT,
+        created_at     INTEGER NOT NULL
+    );
+    CREATE INDEX panes_tab ON panes(tab_id);
+    CREATE TABLE pane_scrollback (
+        pane_id  INTEGER PRIMARY KEY REFERENCES panes(id) ON DELETE CASCADE,
+        data     BLOB NOT NULL,
+        saved_at INTEGER NOT NULL
+    );
+    CREATE TABLE tasks (
+        id           INTEGER PRIMARY KEY,
+        project_id   INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        tab_id       INTEGER REFERENCES tabs(id) ON DELETE SET NULL,
+        title        TEXT NOT NULL,
+        notes        TEXT NOT NULL DEFAULT '',
+        done         INTEGER NOT NULL DEFAULT 0,
+        sort_order   INTEGER NOT NULL DEFAULT 0,
+        created_at   INTEGER NOT NULL,
+        completed_at INTEGER
+    );
+    CREATE INDEX tasks_project ON tasks(project_id);
+    CREATE INDEX tasks_tab ON tasks(tab_id);
+    CREATE TABLE kv (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    "#,
+];
+
+/// Applies connection pragmas used by every connection.
+pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(())
+}
+
+/// Brings the schema up to date.
+pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+    let current: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    for (i, sql) in MIGRATIONS.iter().enumerate().skip(current.max(0) as usize) {
+        let tx = conn.transaction()?;
+        tx.execute_batch(sql)?;
+        tx.pragma_update(None, "user_version", (i + 1) as i64)?;
+        tx.commit()?;
+        tracing::info!("applied database migration {}", i + 1);
+    }
+    Ok(())
+}
+
+pub fn version() -> usize {
+    MIGRATIONS.len()
+}

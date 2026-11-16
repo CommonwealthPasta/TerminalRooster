@@ -1,0 +1,222 @@
+//! Modal dialogs.
+
+use iced::widget::{button, center, column, container, mouse_area, opaque, row, space, text, text_input};
+use iced::{Alignment, Element, Length};
+use termroost_core::AgentKind;
+use termroost_core::session::shell;
+
+use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message};
+use crate::sidebar::{BOLD, muted_text};
+use crate::theme;
+
+fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    column![text(label).size(12), input.into()].spacing(4).into()
+}
+
+fn actions<'a>(confirm: &'a str, danger: bool) -> Element<'a, Message> {
+    row![
+        space::horizontal(),
+        button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+        button(text(confirm))
+            .padding([6, 14])
+            .style(if danger { button::danger } else { button::primary })
+            .on_press(Message::DialogSubmit),
+    ]
+    .spacing(8)
+    .into()
+}
+
+fn modal<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+    opaque(
+        mouse_area(
+            center(opaque(container(content).padding(20).width(480).style(theme::modal_card)))
+                .style(theme::modal_backdrop),
+        )
+        .on_press(Message::DialogCancel),
+    )
+}
+
+impl App {
+    pub(crate) fn view_dialog<'a>(&'a self, dialog: &'a Dialog) -> Element<'a, Message> {
+        let s = self.core.state();
+        let platform_shell = {
+            let sh = shell::default_shell();
+            std::iter::once(sh.program).chain(sh.args).collect::<Vec<_>>().join(" ")
+        };
+        let content: Element<'_, Message> = match dialog {
+            Dialog::Project { editing, name, dir, shell, error } => {
+                let default_shell = s.settings.default_shell.clone().unwrap_or_else(|| platform_shell.clone());
+                let mut col = column![
+                    text(if editing.is_some() { "Edit project" } else { "New project" }).size(18).font(BOLD),
+                    field(
+                        "Name",
+                        text_input("my-service", name)
+                            .id(DIALOG_FIRST_INPUT)
+                            .on_input(Message::DialogName)
+                            .on_submit(Message::DialogSubmit)
+                            .padding(6),
+                    ),
+                    field(
+                        "Working directory",
+                        row![
+                            text_input("/path/to/project", dir)
+                                .on_input(Message::DialogDir)
+                                .on_submit(Message::DialogSubmit)
+                                .padding(6),
+                            button(text("Browse…"))
+                                .padding([6, 10])
+                                .style(button::secondary)
+                                .on_press(Message::BrowseDir),
+                        ]
+                        .spacing(6),
+                    ),
+                    field(
+                        "Shell (optional)",
+                        text_input(&format!("default: {default_shell}"), shell)
+                            .on_input(Message::DialogShell)
+                            .on_submit(Message::DialogSubmit)
+                            .padding(6),
+                    ),
+                ]
+                .spacing(12);
+                if let Some(e) = error {
+                    col = col.push(text(e).size(13).style(text::danger));
+                }
+                col.push(actions(if editing.is_some() { "Save" } else { "Create" }, false)).into()
+            }
+            Dialog::ConfirmDeleteProject(p) => {
+                let name = s.project(*p).map(|p| p.name.as_str()).unwrap_or("project");
+                let tabs = s.tabs_of(*p).count();
+                let terms: usize = s.tabs_of(*p).map(|t| t.layout.panes().len()).sum();
+                let tasks = s.tasks_of(*p).count();
+                column![
+                    text(format!("Delete project “{name}”?")).size(18).font(BOLD),
+                    text(format!(
+                        "This closes {terms} terminal(s) in {tabs} tab(s) and deletes {tasks} task(s) and all saved \
+                         scrollback. The directory on disk is not touched. This cannot be undone."
+                    ))
+                    .size(13),
+                    actions("Delete project", true),
+                ]
+                .spacing(14)
+                .into()
+            }
+            Dialog::ConfirmDeleteTab(t) => {
+                let tab = s.tab(*t);
+                let name = tab.map(|t| t.title.as_str()).unwrap_or("tab");
+                let terms = tab.map(|t| t.layout.panes().len()).unwrap_or(0);
+                let linked = s.tasks.iter().filter(|x| x.tab == Some(*t)).count();
+                column![
+                    text(format!("Delete tab “{name}”?")).size(18).font(BOLD),
+                    text(format!(
+                        "This closes {terms} terminal(s) and their saved scrollback. {linked} linked task(s) are kept \
+                         and unlinked."
+                    ))
+                    .size(13),
+                    actions("Delete tab", true),
+                ]
+                .spacing(14)
+                .into()
+            }
+            Dialog::CodexHook => column![
+                text("Track Codex conversations exactly?").size(18).font(BOLD),
+                text(
+                    "TermRoost found Codex on this computer. Codex does not say which conversation runs in which \
+                     terminal, so with several Codex terminals in one folder TermRoost has to guess which one to \
+                     resume after a restart.",
+                )
+                .size(13),
+                text(format!(
+                    "A small hook in {} can tell TermRoost exactly. It only writes to TermRoost's own data folder, \
+                     only while TermRoost is running, and your other hooks are kept.",
+                    crate::sidebar::display_dir(&self.codex_hook.hooks_file)
+                ))
+                .size(13),
+                muted_text(
+                    "Codex runs new hooks only after you trust them: after adding it, type /hooks in Codex once and \
+                     trust the TermRoost hook. If you choose Not now, you can add it later in Settings → \
+                     Integrations.",
+                ),
+                row![
+                    space::horizontal(),
+                    button(text("Not now")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text("Add hook")).padding([6, 14]).style(button::primary).on_press(Message::DialogSubmit),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::CodexHookAdded(path) => column![
+                text("Codex hook added").size(18).font(BOLD),
+                text(format!("Added to {}.", path.display())).size(13),
+                text(
+                    "One more step: Codex skips new hooks until you trust them. Open Codex, type /hooks and trust \
+                     the TermRoost hook. Settings → Integrations shows when it starts reporting.",
+                )
+                .size(13),
+                row![
+                    space::horizontal(),
+                    button(text("OK")).padding([6, 14]).style(button::primary).on_press(Message::DialogCancel),
+                ],
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::Pane { pane, resume, args } => {
+                let agent = s.pane(*pane).and_then(|p| p.agent.as_ref());
+                let status: Element<'_, Message> = match agent {
+                    Some(a) => {
+                        let session = a.session_id.clone().unwrap_or_else(|| "(no conversation yet)".into());
+                        let resume_line =
+                            a.resume_command().unwrap_or_else(|| format!("{} (no conversation yet)", a.kind.as_str()));
+                        column![
+                            text(format!("{} is running here · session {session}", a.kind.label())).size(13),
+                            muted_text(format!("On restore: {resume_line}")),
+                            button(text("Don't resume it"))
+                                .padding([4, 10])
+                                .style(button::secondary)
+                                .on_press(Message::DialogClearAgent),
+                        ]
+                        .spacing(6)
+                        .into()
+                    }
+                    None => muted_text("No coding agent is running in this terminal.").into(),
+                };
+                let start = row(AgentKind::ALL.iter().map(|k| {
+                    button(text(format!("Start {}", k.label())).size(13))
+                        .padding([5, 10])
+                        .on_press(Message::DialogStartAgent(*k))
+                        .into()
+                }))
+                .spacing(6);
+                column![
+                    text("Terminal settings").size(18).font(BOLD),
+                    status,
+                    field(
+                        "Agent arguments",
+                        text_input("e.g. --model opus", args)
+                            .id(DIALOG_FIRST_INPUT)
+                            .on_input(Message::DialogArgs)
+                            .padding(6),
+                    ),
+                    start,
+                    muted_text(
+                        "Claude Code, Codex and Grok are detected automatically, also when you start them yourself, \
+                         and TermRoost follows the session they are in (including /clear). After a restart each \
+                         terminal resumes its own conversation, not just the most recent one.",
+                    ),
+                    field(
+                        "Resume command (used when no agent is running)",
+                        text_input("e.g. npm run dev", resume)
+                            .on_input(Message::DialogResume)
+                            .on_submit(Message::DialogSubmit)
+                            .padding(6),
+                    ),
+                    actions("Save", false),
+                ]
+                .spacing(12)
+                .into()
+            }
+        };
+        modal(container(content).width(Length::Fill).align_x(Alignment::Start).into())
+    }
+}
