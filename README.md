@@ -120,7 +120,7 @@ Panics are written to the log with a backtrace. The level comes from `TERMINALRO
 
 Terminal processes cannot survive a crash, and they end when the app closes. On reopen, every terminal gets the following:
 
-- Its **saved scrollback**, with colors. It is saved every 5 seconds and on close. It stays on screen, and a "restored session" banner separates it from the new shell's prompt.
+- Its **saved scrollback**, with colors. It is saved every 5 seconds and on close. It stays on screen, and a "restored session" banner separates it from the new shell's prompt. Terminals that were running a coding agent skip this: the agent shows its own conversation again when it resumes.
 - A **fresh shell** in the directory the last one was in, if the shell reported it (see **Shell integration** under [How it knows](#how-it-knows)). Otherwise, or if that directory is gone, it starts in the session's working directory.
 - Its **resume command**, which runs automatically.
 
