@@ -96,6 +96,16 @@ pub fn short_dir(path: &std::path::Path, max: usize) -> String {
     format!("…/{out}")
 }
 
+/// Text size of a list item's name.
+const NAME_SIZE: f32 = 14.0;
+
+/// `content` centered on the first line of a list item's name, where it
+/// stays when the name wraps.
+fn on_first_line<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let line = text::LineHeight::default().to_absolute(NAME_SIZE.into());
+    container(content).height(line).align_y(Alignment::Center).into()
+}
+
 /// The text color of a list item.
 fn item_text(t: &iced::Theme, selected: bool) -> iced::Color {
     let p = t.extended_palette();
@@ -289,7 +299,7 @@ impl App {
         } else {
             space::horizontal().width(0).into()
         };
-        let mut title =
+        let mut marks =
             row![marker(self.tab_notice(tab), self.activity.contains(&tab.id))].spacing(4).align_y(Alignment::Center);
         // One logo per kind of agent, in terminal order.
         let mut kinds: Vec<AgentKind> = Vec::new();
@@ -299,13 +309,15 @@ impl App {
             }
         }
         for kind in kinds {
-            title = title.push(tooltip(
-                agent_icon(kind, 14.0, move |t| item_text(t, selected)),
+            marks = marks.push(tooltip(
+                agent_icon(kind, NAME_SIZE, move |t| item_text(t, selected)),
                 container(text(kind.label()).size(12)).padding([4, 8]).style(container::rounded_box),
                 tooltip::Position::Bottom,
             ));
         }
-        let mut label = column![title.push(text(&tab.title).size(14).width(Length::Fill)).push(badge)].spacing(1);
+        // A long name wraps, breaking inside a word too when one doesn't fit.
+        let name = text(&tab.title).size(NAME_SIZE).width(Length::Fill).wrapping(text::Wrapping::WordOrGlyph);
+        let mut label = column![row![on_first_line(marks), name, on_first_line(badge)].spacing(4)].spacing(1);
         if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
             label = label.push(branch_label(head, 11.0, 24));
         }
