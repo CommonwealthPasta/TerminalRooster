@@ -2,6 +2,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(target_os = "linux")]
+mod desktop_entry;
 mod dialogs;
 mod keymap;
 mod layout_conv;
@@ -29,6 +31,15 @@ fn main() -> iced::Result {
     // Flushes the log file when main returns.
     let _log_guard = logging::init(data_dir.as_deref());
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "TermRoost starting");
+    // Lets desktops show the icon for a build run without installing a package.
+    #[cfg(target_os = "linux")]
+    desktop_entry::ensure();
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
+        tracing::error!("no display: neither WAYLAND_DISPLAY nor DISPLAY is set");
+        eprintln!("termroost: no graphical session found (neither WAYLAND_DISPLAY nor DISPLAY is set)");
+        std::process::exit(1);
+    }
 
     // Terminals started from here must not believe they run inside another
     // Claude Code session (e.g. when TermRoost itself was launched from one).

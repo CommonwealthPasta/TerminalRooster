@@ -15,6 +15,8 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 cargo run --release -p termroost-iced
 ```
 
+Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show TermRoost's icon for its window on Wayland. Once a package is installed, TermRoost removes this entry again. Set `TERMROOST_NO_DESKTOP_ENTRY=1` to skip it.
+
 ### Windows (native build)
 
 1. Install Rust with [rustup](https://rustup.rs) (default MSVC toolchain).
