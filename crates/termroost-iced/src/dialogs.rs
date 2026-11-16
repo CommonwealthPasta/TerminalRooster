@@ -92,10 +92,16 @@ impl App {
                     ),
                     field(
                         "Shell (optional)",
-                        text_input(&format!("default: {default_shell}"), shell)
-                            .on_input(Message::DialogShell)
-                            .on_submit(Message::DialogSubmit)
-                            .padding(6),
+                        row![
+                            text_input(&format!("default: {default_shell}"), shell)
+                                .on_input(Message::DialogShell)
+                                .on_submit(Message::DialogSubmit)
+                                .padding(6),
+                            // Empty means "the default", so nothing is shown as picked.
+                            self.shell_picker(shell, "", |o| Message::DialogShell(o.command)),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
                     ),
                 ]
                 .spacing(12);

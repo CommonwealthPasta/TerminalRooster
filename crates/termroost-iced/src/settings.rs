@@ -1,8 +1,10 @@
 //! The settings page: appearance (themes), terminal options and shortcuts.
 
-use iced::widget::{Column, button, checkbox, column, container, row, scrollable, slider, space, text, text_input};
+use iced::widget::{
+    Column, button, checkbox, column, container, pick_list, row, scrollable, slider, space, text, text_input,
+};
 use iced::{Alignment, Border, Color, Element, Length};
-use termroost_core::session::shell;
+use termroost_core::session::shell::{self, ShellOption};
 
 use crate::app::{App, Message, SettingsState};
 use crate::sidebar::{BOLD, muted_text};
@@ -362,17 +364,39 @@ impl App {
                         .on_input(Message::ShellInput)
                         .on_submit(Message::ShellCommit)
                         .size(13)
-                        .padding(5),
+                        .padding(5)
+                        .width(Length::Fill),
+                    self.shell_picker(&st.shell_input, &platform, Message::PickDefaultShell),
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center),
                 muted_text(
-                    "Used for new terminals in projects without their own shell. Saved when you press Enter or \
-                     leave settings.",
+                    "Pick an installed shell, or type any command line. Used for new terminals in projects without \
+                     their own shell. Typed changes are saved when you press Enter or leave settings.",
                 ),
             ]
             .spacing(12),
         )
+    }
+
+    /// Dropdown of the installed shells, showing the one `input` (or, when it
+    /// is empty, `fallback`) runs. Hidden until detection has found some.
+    pub(crate) fn shell_picker<'a>(
+        &'a self,
+        input: &str,
+        fallback: &str,
+        on_pick: fn(ShellOption) -> Message,
+    ) -> Option<Element<'a, Message>> {
+        if self.shells.is_empty() {
+            return None;
+        }
+        let current = if input.trim().is_empty() { fallback } else { input };
+        let picker = pick_list(self.shells.as_slice(), crate::app::shell_matching(&self.shells, current), on_pick)
+            .placeholder("Installed shells…")
+            .text_size(13)
+            .padding(5)
+            .width(190);
+        Some(picker.into())
     }
 }
 

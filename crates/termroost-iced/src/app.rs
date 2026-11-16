@@ -8,6 +8,7 @@ use std::time::Duration;
 use iced::widget::{column, container, operation, pane_grid, row, stack};
 use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
+use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId};
 
 use crate::keymap::{self, Direction, Shortcut};
@@ -228,6 +229,11 @@ pub enum Message {
     ShowDone(bool),
     ThisTabOnly(bool),
 
+    /// Shells found on this machine (detected in the background).
+    ShellsDetected(Vec<ShellOption>),
+    /// A shell picked from the list in settings becomes the default.
+    PickDefaultShell(ShellOption),
+
     DismissError,
 }
 
@@ -247,6 +253,8 @@ pub struct App {
     pub(crate) themes: ThemeStore,
     themes_dirty: bool,
     pub(crate) settings: Option<SettingsState>,
+    /// Shells installed on this machine, for the shell pickers.
+    pub(crate) shells: Vec<ShellOption>,
     pub(crate) system_mode: iced::theme::Mode,
     ui_theme: iced::Theme,
     /// Cached Codex integration state (reads files, so refreshed on demand).
@@ -282,6 +290,7 @@ impl App {
             themes,
             themes_dirty: false,
             settings: None,
+            shells: Vec::new(),
             system_mode: iced::theme::Mode::None,
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
@@ -293,7 +302,7 @@ impl App {
         if app.codex_hook.codex_found && app.codex_hook.installed_in.is_none() && !app.prefs.codex_hook_asked {
             app.dialog = Some(Dialog::CodexHook);
         }
-        let task = Task::batch([app.focus_active(), iced::system::theme().map(Message::SystemTheme)]);
+        let task = Task::batch([app.focus_active(), iced::system::theme().map(Message::SystemTheme), detect_shells()]);
         (app, task)
     }
 
@@ -576,6 +585,8 @@ impl App {
                 let shell_input = self.core.state().settings.default_shell.clone().unwrap_or_default();
                 self.settings = Some(SettingsState { shell_input, ..SettingsState::default() });
                 self.codex_hook = self.core.codex_hook_status();
+                // Pick up shells installed since the last look.
+                return detect_shells();
             }
             Message::AddCodexHook => {
                 self.prefs.codex_hook_asked = true;
@@ -600,6 +611,13 @@ impl App {
                 let focus = operation::focus(terminal_view::widget_id(handle.pane()));
                 self.dialog = Some(Dialog::CodexTrust(handle));
                 return focus;
+            }
+            Message::ShellsDetected(list) => self.shells = list,
+            Message::PickDefaultShell(option) => {
+                if let Some(st) = &mut self.settings {
+                    st.shell_input = option.command.clone();
+                }
+                self.dispatch(Command::SetDefaultShell(Some(option.command)));
             }
             Message::Noop => {}
             Message::RemoveCodexHook => {
@@ -1137,6 +1155,22 @@ impl App {
             None => column![base].into(),
         }
     }
+}
+
+/// Looks for installed shells on a thread (it may wait on `wsl.exe`).
+fn detect_shells() -> Task<Message> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(shell::detect_shells());
+    });
+    Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::ShellsDetected)
+}
+
+/// The entry of `shells` whose command line is `command`, for showing the
+/// current choice in a shell picker.
+pub(crate) fn shell_matching<'a>(shells: &'a [ShellOption], command: &str) -> Option<&'a ShellOption> {
+    let wanted = shell::split_command_line(command)?;
+    shells.iter().find(|o| shell::split_command_line(&o.command).as_ref() == Some(&wanted))
 }
 
 fn cycle<T: Copy + PartialEq>(items: &[T], current: Option<T>, forward: bool) -> Option<T> {
