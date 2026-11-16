@@ -1,7 +1,8 @@
-//! The per-project task panel.
+//! The per-project task panel. A task can be dragged onto a session in the
+//! sessions list to link it to that session.
 
 use iced::widget::{checkbox, column, container, mouse_area, pick_list, row, scrollable, space, text, text_input};
-use iced::{Alignment, Element, Length};
+use iced::{Alignment, Element, Length, mouse};
 use termroost_core::Task;
 
 use crate::app::{App, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
@@ -83,6 +84,7 @@ impl App {
                         .width(Length::Fill)
                         .style(move |t: &iced::Theme| text::Style { color: done.then(|| theme::muted(t)) }),
                 )
+                .on_press(Message::TaskGrab(id))
                 .on_double_click(Message::EditTask(id))
                 .into()
             }
@@ -99,7 +101,9 @@ impl App {
         }
 
         let linked_here = task.tab.is_some() && task.tab == active_tab;
-        container(
+        // A press anywhere on the card that its controls don't take (the title
+        // included) picks the task up.
+        let card = container(
             column![
                 row![
                     checkbox(task.done).on_toggle(move |d| Message::TaskDone(id, d)).size(16),
@@ -126,7 +130,13 @@ impl App {
                 },
                 ..container::Style::default()
             }
-        })
-        .into()
+        });
+        mouse_area(card)
+            .on_press(Message::TaskGrab(id))
+            // A click puts it down again here. This doesn't wait for the app-wide
+            // listener, which only starts after the press and can miss a quick tap.
+            .on_release(Message::TaskDragEnd)
+            .interaction(mouse::Interaction::Grab)
+            .into()
     }
 }

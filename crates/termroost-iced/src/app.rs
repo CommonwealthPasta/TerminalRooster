@@ -272,6 +272,16 @@ pub enum Message {
     TaskEditCancel,
     ShowDone(bool),
     ThisTabOnly(bool),
+    /// A task was pressed: it may be dragged onto a session.
+    TaskGrab(TaskId),
+    /// The pointer moved while a task is held (window coordinates).
+    TaskDragMove(iced::Point),
+    /// The pointer went onto (`true`) or off a place a held task can be dropped.
+    TaskDragOver(DropTarget, bool),
+    /// A held task was let go over a session: link it to that session.
+    TaskDrop(DropTarget),
+    /// The button was let go (or the window lost focus): the task is put down.
+    TaskDragEnd,
 
     /// Shells found on this machine (detected in the background).
     ShellsDetected(Vec<ShellOption>),
@@ -308,8 +318,32 @@ pub struct App {
     pub(crate) codex_hook: termroost_core::CodexHookStatus,
     /// Shortcuts in effect (from `prefs.shortcuts`); shared with the terminals.
     pub(crate) keymap: Arc<Keymap>,
+    /// A task held with the mouse, to be dropped on a session.
+    pub(crate) task_drag: Option<TaskDrag>,
     closing: bool,
 }
+
+/// Where a task can be dropped to link it to a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropTarget {
+    /// A session in the sessions list.
+    Session(TabId),
+}
+
+/// A task being dragged from the task panel onto a session.
+#[derive(Clone, Copy, Debug)]
+pub struct TaskDrag {
+    pub task: TaskId,
+    /// Where the pointer was when it first moved after the press.
+    origin: Option<iced::Point>,
+    /// Far enough from where it was picked up to be a drag rather than a click.
+    pub moving: bool,
+    /// The drop target under the pointer.
+    pub over: Option<DropTarget>,
+}
+
+/// How far the pointer moves with a task held before it counts as dragging it.
+const TASK_DRAG_THRESHOLD: f32 = 5.0;
 
 /// Hashable wrapper so the event receiver can back a subscription.
 struct Events(async_channel::Receiver<Event>);
@@ -346,6 +380,7 @@ impl App {
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
             keymap,
+            task_drag: None,
             closing: false,
         };
         app.apply_theme();
@@ -437,6 +472,18 @@ impl App {
                 _ => None,
             }),
         ];
+        if self.task_drag.is_some() {
+            // Only while a task is held, so moving the mouse doesn't redraw the app otherwise.
+            // A drop on a session arrives from that widget before this end does.
+            subs.push(iced::event::listen_with(|event, _status, _id| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::TaskDragMove(position))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
+                | iced::Event::Window(window::Event::Unfocused) => Some(Message::TaskDragEnd),
+                _ => None,
+            }));
+        }
         if !self.layout_dirty.is_empty() || self.prefs_dirty || self.themes_dirty {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick));
         }
@@ -456,6 +503,18 @@ impl App {
 
     pub(crate) fn active_tab_id(&self) -> Option<TabId> {
         self.core.state().active_tab().map(|t| t.id)
+    }
+
+    /// The session a task dropped on `target` gets linked to.
+    pub(crate) fn drop_tab(&self, target: DropTarget) -> Option<TabId> {
+        match target {
+            DropTarget::Session(tab) => Some(tab),
+        }
+    }
+
+    /// Whether a task is being dragged and is over `target`.
+    pub(crate) fn is_drop_target(&self, target: DropTarget) -> bool {
+        self.task_drag.is_some_and(|d| d.moving && d.over == Some(target))
     }
 
     fn ensure_active_grid(&mut self) {
@@ -559,6 +618,9 @@ impl App {
                 return iced::exit();
             }
             Message::Escape => {
+                if self.task_drag.take().is_some() {
+                    return Task::none();
+                }
                 if matches!(self.dialog, Some(Dialog::CodexTrust(_))) {
                     return Task::none();
                 }
@@ -1127,6 +1189,33 @@ impl App {
                 self.prefs.tasks_this_tab_only = v;
                 self.mark_prefs();
             }
+            Message::TaskGrab(task) => {
+                self.task_drag = Some(TaskDrag { task, origin: None, moving: false, over: None });
+            }
+            Message::TaskDragMove(p) => {
+                if let Some(d) = &mut self.task_drag {
+                    let origin = *d.origin.get_or_insert(p);
+                    d.moving |= origin.distance(p) >= TASK_DRAG_THRESHOLD;
+                }
+            }
+            Message::TaskDragOver(target, on) => {
+                if let Some(d) = &mut self.task_drag {
+                    if on {
+                        d.over = Some(target);
+                    } else if d.over == Some(target) {
+                        d.over = None;
+                    }
+                }
+            }
+            Message::TaskDrop(target) => {
+                if let Some(drag) = self.task_drag.take().filter(|d| d.moving)
+                    && let Some(tab) = self.drop_tab(target)
+                    && self.core.state().task(drag.task).is_some_and(|t| t.tab != Some(tab))
+                {
+                    self.dispatch(Command::AssignTask { task: drag.task, tab: Some(tab) });
+                }
+            }
+            Message::TaskDragEnd => self.task_drag = None,
             Message::DismissError => self.error = None,
         }
         Task::none()

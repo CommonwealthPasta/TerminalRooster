@@ -4,7 +4,7 @@ use iced::widget::{button, column, container, mouse_area, row, scrollable, space
 use iced::{Alignment, Element, Font, Length, font};
 use termroost_core::{Project, ProjectId, Tab, TabId};
 
-use crate::app::{App, Message, RENAME_INPUT, RenameTarget};
+use crate::app::{App, DropTarget, Message, RENAME_INPUT, RenameTarget};
 use crate::keymap::Action;
 use crate::reorder::reorder;
 use crate::theme;
@@ -64,13 +64,15 @@ pub fn short_dir(path: &std::path::Path, max: usize) -> String {
     format!("…/{out}")
 }
 
-fn item_style(selected: bool) -> impl Fn(&iced::Theme) -> container::Style {
+/// A list item; `drop_target` outlines it while a task is held over it.
+fn item_style(selected: bool, drop_target: bool) -> impl Fn(&iced::Theme) -> container::Style {
     move |t| {
         let p = t.extended_palette();
+        let border = iced::Border::default().rounded(4);
         container::Style {
             background: selected.then_some(iced::Background::Color(p.primary.weak.color)),
             text_color: Some(if selected { p.primary.weak.text } else { p.background.base.text }),
-            border: iced::Border::default().rounded(4),
+            border: if drop_target { border.width(2.0).color(p.primary.base.color) } else { border },
             ..container::Style::default()
         }
     }
@@ -149,7 +151,7 @@ impl App {
             muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None),
         ]
         .spacing(1);
-        let body = mouse_area(container(label).padding([6, 8]).width(Length::Fill).style(item_style(selected)))
+        let body = mouse_area(container(label).padding([6, 8]).width(Length::Fill).style(item_style(selected, false)))
             .on_press(Message::SelectProject(p.id))
             .on_double_click(Message::StartRename(RenameTarget::Project(p.id)));
         // Same widget structure whether selected or not, so the mouse area keeps
@@ -229,7 +231,9 @@ impl App {
             muted_text(subtitle),
         ]
         .spacing(1);
-        let body = mouse_area(container(label).padding([6, 8]).width(Length::Fill).style(item_style(selected)))
+        let target = DropTarget::Session(tab.id);
+        let style = item_style(selected, self.is_drop_target(target));
+        let body = mouse_area(container(label).padding([6, 8]).width(Length::Fill).style(style))
             .on_press(Message::SelectTab(tab.id))
             .on_double_click(Message::StartRename(RenameTarget::Tab(tab.id)));
         let actions: Element<'_, Message> = if selected {
@@ -241,6 +245,14 @@ impl App {
         } else {
             space::horizontal().width(ACTIONS_WIDTH).into()
         };
-        row![body, actions].align_y(Alignment::Center).into()
+        // A task dragged from the task panel can be dropped here to link it to this session.
+        let mut item = mouse_area(row![body, actions].align_y(Alignment::Center));
+        if self.task_drag.is_some() {
+            item = item
+                .on_enter(Message::TaskDragOver(target, true))
+                .on_exit(Message::TaskDragOver(target, false))
+                .on_release(Message::TaskDrop(target));
+        }
+        item.into()
     }
 }
