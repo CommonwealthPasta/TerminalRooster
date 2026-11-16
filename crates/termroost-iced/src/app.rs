@@ -177,6 +177,8 @@ pub enum Message {
     Tick,
     WindowMoved(iced::Point),
     WindowResized(iced::Size),
+    /// The window gained (`true`) or lost focus.
+    WindowFocus(bool),
     CloseRequested,
     Key(keyboard::Event),
     /// Escape, even when a text input captured it (closes dialogs and editors).
@@ -304,6 +306,11 @@ pub struct App {
     pub(crate) codex_hook: termroost_core::CodexHookStatus,
     /// Shortcuts in effect (from `prefs.shortcuts`); shared with the terminals.
     pub(crate) keymap: Arc<Keymap>,
+    window_focused: bool,
+    /// The terminal the user is looking at: the focused one of the visible
+    /// session, while the window has focus. Programs in it are told they
+    /// have focus (if they asked to know).
+    attended: Option<PaneId>,
     closing: bool,
 }
 
@@ -342,6 +349,8 @@ impl App {
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
             keymap,
+            window_focused: true,
+            attended: None,
             closing: false,
         };
         app.apply_theme();
@@ -354,6 +363,7 @@ impl App {
         if renamed.moved_from.is_some() || renamed.codex_hook_updated {
             app.dialog = Some(Dialog::Renamed(renamed.clone()));
         }
+        app.sync_attention();
         let task = Task::batch([app.focus_active(), iced::system::theme().map(Message::SystemTheme), detect_shells()]);
         (app, task)
     }
@@ -430,6 +440,8 @@ impl App {
                 iced::Event::Window(window::Event::Moved(p)) => Some(Message::WindowMoved(p)),
                 iced::Event::Window(window::Event::Resized(s)) => Some(Message::WindowResized(s)),
                 iced::Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested),
+                iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocus(true)),
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(false)),
                 _ => None,
             }),
         ];
@@ -514,6 +526,12 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        self.sync_attention();
+        task
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         if self.closing {
             return Task::none();
         }
@@ -536,6 +554,7 @@ impl App {
                 }
             }
             Message::Tick => self.flush_pending(),
+            Message::WindowFocus(focused) => self.window_focused = focused,
             Message::WindowMoved(p) => {
                 let w = self.prefs.window.get_or_insert_with(Default::default);
                 w.x = Some(p.x);
@@ -1180,6 +1199,29 @@ impl App {
             Dialog::Renamed(_) => {}
         }
         self.focus_active()
+    }
+
+    /// Works out which terminal the user is looking at (see `attended`) and
+    /// tells the programs that asked when it changes.
+    fn sync_attention(&mut self) {
+        if self.closing {
+            return;
+        }
+        let attended = self
+            .core
+            .state()
+            .active_tab()
+            .and_then(|t| t.focused_pane)
+            .filter(|_| self.window_focused && self.settings.is_none());
+        if attended != self.attended {
+            if let Some(h) = self.attended.and_then(|p| self.core.terminal(p)) {
+                h.focus_changed(false);
+            }
+            if let Some(h) = attended.and_then(|p| self.core.terminal(p)) {
+                h.focus_changed(true);
+            }
+            self.attended = attended;
+        }
     }
 
     fn commit_shell(&mut self) {

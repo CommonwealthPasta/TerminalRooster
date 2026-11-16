@@ -255,17 +255,14 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for TerminalView<M> {
                 }
             }
             Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                // Programs are told about focus by the app, which knows which
+                // terminal the user is looking at (also across sessions and
+                // when the window loses focus).
                 let Some(p) = cursor.position_in(bounds) else {
-                    if state.focused {
-                        state.focused = false;
-                        handle.focus_changed(false);
-                    }
+                    state.focused = false;
                     return;
                 };
-                if !state.focused {
-                    state.focused = true;
-                    handle.focus_changed(true);
-                }
+                state.focused = true;
                 if !self.active {
                     shell.publish(self.on_focus.clone());
                 }
