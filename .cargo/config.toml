@@ -1,0 +1,3 @@
+[alias]
+# Project automation: `cargo xtask package [deb|rpm|all]`.
+xtask = "run --quiet --package xtask --"

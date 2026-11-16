@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/termroost-core", "crates/termroost-iced"]
+members = ["crates/termroost-core", "crates/termroost-iced", "xtask"]
+default-members = ["crates/termroost-core", "crates/termroost-iced"]
 
 [workspace.package]
 version = "0.1.0"
@@ -18,7 +19,6 @@ serde_json = "1"
 async-channel = "2"
 directories = "6"
 thiserror = "2"
-anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -27,3 +27,5 @@ rfd = "0.18"
 
 [profile.release]
 lto = "thin"
+# Smaller binaries; function names stay, so logged backtraces remain readable.
+strip = "debuginfo"

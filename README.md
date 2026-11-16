@@ -122,6 +122,27 @@ Cargo workspace with two crates:
   No iced, alacritty or rusqlite types appear in the API, so a different GUI can replace the iced one.
 - **`termroost-iced`**: the iced 0.14 GUI. It contains a custom terminal widget, the pane grid, the sidebars, the task panel, the dialogs and the settings page. It also owns the themes; it hands the terminal colors to the core with `core.set_palette`. JetBrains Mono and Noto Sans Symbols 2 are bundled (both SIL OFL 1.1; licenses in `crates/termroost-iced/fonts`).
 
+## Packaging (Linux)
+
+The `.deb` and `.rpm` packages install the `termroost` binary, a desktop entry, icons and AppStream metadata.
+
+**Locally:**
+
+```sh
+cargo install --locked cargo-deb cargo-generate-rpm   # once
+cargo xtask package                                  # or: cargo xtask package deb / rpm
+```
+
+The packages land in `dist/`. A binary only runs on systems whose glibc is at least as new as the one it was built against, so locally built packages suit your own machine. For packages to share, use the CI build.
+
+**On GitHub:** push a tag that matches the version, e.g. `git tag v0.1.0 && git push origin v0.1.0`. The *Release packages* workflow builds both packages on Ubuntu 22.04, so they also run on older distributions, and attaches them to the release. You can also run it from the Actions tab to get the packages as a download.
+
+**New version:**
+1. Bump `version` in `Cargo.toml`.
+2. Add a `<release>` entry to `packaging/linux/io.github.Davenport_Physics.TermRoost.metainfo.xml` (the build checks for it).
+
+**Icons:** they live in `packaging/icons/`. The `termroost-<size>.png` files are the hicolor icons for the packages, `termroost-64.png` is also the window icon, and `termroost.ico` is embedded in the Windows `.exe`.
+
 ## Development
 
 ```sh

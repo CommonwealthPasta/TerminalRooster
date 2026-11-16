@@ -21,6 +21,9 @@ use termroost_core::{Config, Core};
 
 use crate::app::{App, Prefs};
 
+/// Desktop application id (also the .desktop and AppStream file names).
+pub const APP_ID: &str = "io.github.Davenport_Physics.TermRoost";
+
 fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
     // Flushes the log file when main returns.
@@ -64,6 +67,13 @@ fn main() -> iced::Result {
         position,
         min_size: Some(Size::new(640.0, 400.0)),
         exit_on_close_request: false,
+        icon: window::icon::from_rgba(include_bytes!(concat!(env!("OUT_DIR"), "/icon-64.rgba")).to_vec(), 64, 64).ok(),
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            // Matches the .desktop file name, so desktops show the right icon.
+            application_id: APP_ID.to_owned(),
+            ..Default::default()
+        },
         ..window::Settings::default()
     };
 

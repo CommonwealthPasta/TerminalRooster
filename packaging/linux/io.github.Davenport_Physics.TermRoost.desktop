@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=TermRoost
+GenericName=Agent Terminal
+Comment=Project-based terminals for running coding agents side by side
+Exec=termroost
+Icon=io.github.Davenport_Physics.TermRoost
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;agent;claude;codex;grok;ai;project;
+StartupNotify=true
+StartupWMClass=io.github.Davenport_Physics.TermRoost
