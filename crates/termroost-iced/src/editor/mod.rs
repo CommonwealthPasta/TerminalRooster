@@ -2,6 +2,7 @@
 //! one of them can be shown in place of the session's terminals.
 
 mod disk;
+mod external;
 mod history;
 mod keys;
 mod text;
@@ -14,12 +15,24 @@ use std::time::Instant;
 use iced::Task;
 use iced::widget::operation;
 use iced::widget::text_editor::{self, Action, Cursor, Edit, Position};
-use termroost_core::TabId;
+use serde::{Deserialize, Serialize};
+use termroost_core::{GridSize, PaneId, TabId, TerminalHandle};
 
-use crate::app::{App, Dialog, Message};
+use crate::app::{App, Dialog, Message, RunningTerminal};
 use disk::{FileText, OnDisk, Reaction, SaveError, Stamp};
 use history::{History, Snapshot};
 pub use text::{Format, Indent};
+
+/// What files open in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileEditor {
+    /// TerminalRooster's own editor.
+    #[default]
+    Builtin,
+    /// Neovim or Vim (or the editor command set), in a terminal.
+    Terminal,
+}
 
 /// Widget id of the file editor, for focusing it.
 pub const FILE_EDITOR: &str = "file-editor";
@@ -55,6 +68,13 @@ pub enum DocKind {
     /// Being read.
     Loading,
     Text(Box<TextDoc>),
+    /// A terminal editor (Neovim, Vim) has it open.
+    Terminal {
+        handle: TerminalHandle,
+        /// The editor's name, e.g. `nvim`.
+        name: String,
+        started: Instant,
+    },
 }
 
 /// A text file in the built-in editor.
@@ -221,7 +241,79 @@ impl App {
     fn text_mut(&mut self, id: DocId) -> Option<&mut TextDoc> {
         match &mut self.doc_mut(id)?.kind {
             DocKind::Text(t) => Some(t),
-            DocKind::Loading => None,
+            DocKind::Loading | DocKind::Terminal { .. } => None,
+        }
+    }
+
+    /// The terminal of a terminal editor, or of a session (see `Core::terminal`).
+    pub(crate) fn handle_of(&self, pane: PaneId) -> Option<TerminalHandle> {
+        self.core.terminal(pane).or_else(|| {
+            self.editors.values().flat_map(|f| &f.open).find_map(|d| match &d.kind {
+                DocKind::Terminal { handle, .. } if handle.pane() == pane => Some(handle.clone()),
+                _ => None,
+            })
+        })
+    }
+
+    /// The open file a terminal editor in `pane` has.
+    fn editor_in(&self, pane: PaneId) -> Option<DocId> {
+        self.editors.values().flat_map(|f| &f.open).find_map(|d| match &d.kind {
+            DocKind::Terminal { handle, .. } if handle.pane() == pane => Some(d.id),
+            _ => None,
+        })
+    }
+
+    /// The pane of the terminal editor shown in place of the visible session's terminals.
+    pub(crate) fn shown_editor_pane(&self) -> Option<PaneId> {
+        match &self.shown_doc()?.kind {
+            DocKind::Terminal { handle, .. } => Some(handle.pane()),
+            _ => None,
+        }
+    }
+
+    /// Running terminal editors, for asking before quitting: "nvim (src/main.rs)".
+    pub(crate) fn running_editors(&self) -> Vec<RunningTerminal> {
+        let s = self.core.state();
+        s.tabs
+            .iter()
+            .filter_map(|t| Some((t, self.editors.get(&t.id)?)))
+            .flat_map(|(t, files)| {
+                files.open.iter().filter_map(move |d| match &d.kind {
+                    DocKind::Terminal { handle, name, .. } if handle.exit_status().is_none() => {
+                        let project = s.project(t.project).map_or("", |p| p.name.as_str());
+                        Some(RunningTerminal {
+                            pane: handle.pane(),
+                            place: format!("{} · {project}", t.title),
+                            programs: format!("{name} ({})", self.file_label(Some(t.id), &d.path)),
+                            agent: false,
+                        })
+                    }
+                    _ => None,
+                })
+            })
+            .collect()
+    }
+
+    /// A terminal editor ended (`:q`): its file closes. An editor that ends
+    /// at once with an error probably couldn't start; the banner says so.
+    pub(crate) fn editor_exited(&mut self, pane: PaneId, code: Option<i32>) -> Option<Task<Message>> {
+        let id = self.editor_in(pane)?;
+        if let Some(OpenFile { kind: DocKind::Terminal { name, started, .. }, .. }) = self.doc_mut(id)
+            && started.elapsed() < std::time::Duration::from_secs(3)
+            && code.is_some_and(|c| c != 0)
+        {
+            self.error = Some(format!("{name} ended right away (exit code {}).", code.unwrap_or_default()));
+        }
+        self.close_doc(id);
+        Some(self.focus_active())
+    }
+
+    /// Closes the files of a session that is going away, ending their terminal editors.
+    pub(crate) fn drop_session_files(&mut self, tab: TabId) {
+        for doc in self.editors.remove(&tab).map(|f| f.open).unwrap_or_default() {
+            if let DocKind::Terminal { handle, .. } = doc.kind {
+                self.core.close_scratch_terminal(handle.pane());
+            }
         }
     }
 
@@ -250,8 +342,9 @@ impl App {
     /// Moves the keyboard to the shown file, if there is one. `None` when
     /// the terminals are shown.
     pub(crate) fn focus_doc(&self) -> Option<Task<Message>> {
-        Some(match self.shown_doc()?.kind {
+        Some(match &self.shown_doc()?.kind {
             DocKind::Text(_) => operation::focus(FILE_EDITOR),
+            DocKind::Terminal { handle, .. } => operation::focus(crate::terminal_view::widget_id(handle.pane())),
             DocKind::Loading => Task::none(),
         })
     }
@@ -270,6 +363,10 @@ impl App {
         }
         self.next_doc += 1;
         let id = DocId(self.next_doc);
+        if self.prefs.file_editor == FileEditor::Terminal {
+            return self.open_in_terminal_editor(tab, id, path);
+        }
+        let files = self.editors.entry(tab).or_default();
         files.open.push(OpenFile { id, path: path.clone(), kind: DocKind::Loading });
         files.shown = Some(id);
         let (tx, rx) = async_channel::bounded(1);
@@ -279,6 +376,33 @@ impl App {
         Task::perform(async move { rx.recv().await.unwrap_or_else(|_| Err("reading it stopped".into())) }, move |r| {
             Message::Editor(EditorMsg::Loaded(id, r))
         })
+    }
+
+    /// Opens `path` in Neovim or Vim (or the editor command set), running in
+    /// a terminal in the session's folder.
+    fn open_in_terminal_editor(&mut self, tab: TabId, id: DocId, path: PathBuf) -> Task<Message> {
+        let s = self.core.state();
+        let Some(root) = s.tab(tab).map(|t| s.tab_working_dir(t)) else { return Task::none() };
+        let launch = match external::launch_here(&self.prefs.editor_command, &path, &root) {
+            Ok(l) => l,
+            Err(e) => {
+                self.error = Some(format!("Can't open {} in an editor: {e}.", self.file_label(Some(tab), &path)));
+                return Task::none();
+            }
+        };
+        match self.core.open_program_terminal(&root, launch.command, launch.env, GridSize::default()) {
+            Ok(handle) => {
+                let kind = DocKind::Terminal { handle, name: launch.name, started: Instant::now() };
+                let files = self.editors.entry(tab).or_default();
+                files.open.push(OpenFile { id, path, kind });
+                files.shown = Some(id);
+                self.focus_active()
+            }
+            Err(e) => {
+                self.error = Some(format!("Could not start {}: {e}", launch.name));
+                Task::none()
+            }
+        }
     }
 
     /// Reads an open file again, to show what is on disk now.
@@ -332,14 +456,19 @@ impl App {
     }
 
     /// Closes a file; its session shows the file next to it, else its terminals.
+    /// A terminal editor is ended.
     fn close_doc(&mut self, id: DocId) {
+        let mut closed = None;
         for files in self.editors.values_mut() {
             let Some(i) = files.open.iter().position(|d| d.id == id) else { continue };
-            files.open.remove(i);
+            closed = Some(files.open.remove(i));
             if files.shown == Some(id) {
                 files.shown = files.open.get(i).or_else(|| files.open.last()).map(|d| d.id);
             }
-            return;
+            break;
+        }
+        if let Some(OpenFile { kind: DocKind::Terminal { handle, .. }, .. }) = closed {
+            self.core.close_scratch_terminal(handle.pane());
         }
     }
 
@@ -388,9 +517,15 @@ impl App {
                 self.focus_active()
             }
             EditorMsg::Close(id) => {
-                if let Some((tab, doc)) = self.doc(id).filter(|(_, d)| d.modified()) {
+                // A running terminal editor may have changes it hasn't saved.
+                let running = |d: &OpenFile| match &d.kind {
+                    DocKind::Terminal { handle, name, .. } if handle.exit_status().is_none() => Some(name.clone()),
+                    _ => None,
+                };
+                if let Some((tab, doc)) = self.doc(id).filter(|(_, d)| d.modified() || running(d).is_some()) {
                     let name = self.file_label(Some(tab), &doc.path);
-                    self.dialog = Some(Dialog::CloseFile { doc: id, name });
+                    let editor = running(doc);
+                    self.dialog = Some(Dialog::CloseFile { doc: id, name, editor });
                     return Task::none();
                 }
                 self.close_doc(id);

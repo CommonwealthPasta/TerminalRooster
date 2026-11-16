@@ -246,7 +246,23 @@ impl App {
             ]
             .spacing(12)
             .into(),
-            Dialog::CloseFile { doc, name } => column![
+            Dialog::CloseFile { doc, name, editor: Some(editor) } => column![
+                text(format!("Close {name}?")).size(18).font(BOLD),
+                text(format!("{editor} still has it open. Closing ends {editor}; changes not saved in it are lost."))
+                    .size(13),
+                row![
+                    space::horizontal(),
+                    button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text(format!("End {editor}")))
+                        .padding([6, 14])
+                        .style(button::danger)
+                        .on_press(Message::Editor(EditorMsg::Discard(*doc))),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::CloseFile { doc, name, editor: None } => column![
                 text(format!("Save the changes to {name}?")).size(18).font(BOLD),
                 text("If you don't save them, they are lost.").size(13),
                 row![

@@ -7,6 +7,7 @@ use super::text::char_column;
 use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, keys};
 use crate::app::{App, Message};
 use crate::sidebar::{display_dir, icon_button, muted_text};
+use crate::terminal_view::TerminalView;
 use crate::theme::{self, MONO};
 
 impl App {
@@ -49,6 +50,21 @@ impl App {
     pub(crate) fn view_doc<'a>(&'a self, doc: &'a OpenFile) -> Element<'a, Message> {
         match &doc.kind {
             DocKind::Loading => center(muted_text("Reading…")).into(),
+            // Neovim or Vim: a terminal like the session's, with the keyboard
+            // unless a dialog is open.
+            DocKind::Terminal { handle, .. } => container(TerminalView::new(
+                handle.clone(),
+                self.keymap.clone(),
+                self.keyboard_focus.clone(),
+                self.dialog.is_none(),
+                self.prefs.font_size,
+                Message::Noop,
+                Message::Noop,
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(theme::pane(true))
+            .into(),
             DocKind::Text(t) => {
                 let id = doc.id;
                 let keymap = self.keymap.clone();

@@ -9,6 +9,7 @@ use termroost_core::session::shell::{self, ShellOption};
 
 use crate::app::{App, Message, SettingsState};
 use crate::color_picker;
+use crate::editor::FileEditor;
 use crate::keymap::{Action, Combo};
 use crate::notify::{Category, Level};
 use crate::sidebar::{BOLD, muted_text};
@@ -76,6 +77,7 @@ impl App {
         let body = column![
             self.appearance_section(st),
             self.terminal_section(st),
+            self.editor_section(st),
             self.notifications_section(),
             self.integrations_section(),
             self.shortcuts_section(st),
@@ -388,6 +390,52 @@ impl App {
                     .on_toggle(Message::ConfirmQuitPref)
                     .size(16)
                     .text_size(13),
+            ]
+            .spacing(12),
+        )
+    }
+
+    /// What files from the Files tab open in, and the terminal editor's command.
+    fn editor_section<'a>(&'a self, st: &'a SettingsState) -> Element<'a, Message> {
+        let current = self.prefs.file_editor;
+        let choice = |label: &'a str, value: FileEditor| {
+            // Always pressable: a disabled button would make the choice look faded.
+            button(text(label).size(12))
+                .padding([4, 12])
+                .style(if current == value { button::primary } else { button::secondary })
+                .on_press(Message::FileEditor(value))
+        };
+        let choices =
+            row![choice("Built-in editor", FileEditor::Builtin), choice("Neovim or Vim", FileEditor::Terminal)]
+                .spacing(4);
+        let placeholder = match &st.editor_found {
+            Some(p) => format!("Empty: {}", p.display()),
+            None => "Empty: Neovim or Vim (none found)".to_owned(),
+        };
+        section(
+            "Editor",
+            column![
+                row![
+                    column![
+                        text("Edit files with").size(13),
+                        muted_text("Files you open from the Files tab show in place of the session's terminals."),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    choices,
+                ]
+                .spacing(16)
+                .align_y(Alignment::Center),
+                crate::dialogs::field(
+                    "Terminal editor command",
+                    text_input(&placeholder, &self.prefs.editor_command).on_input(Message::EditorCommand).padding(6),
+                ),
+                muted_text(
+                    "Neovim or Vim runs in a terminal, with your own configuration; quitting it (:q) closes the \
+                     file. The file's path is added to the command. Leave it empty to use Neovim, or Vim when there \
+                     is no Neovim. Ctrl+Shift shortcuts and Alt+arrows stay with TerminalRooster; every other key \
+                     goes to the editor.",
+                ),
             ]
             .spacing(12),
         )

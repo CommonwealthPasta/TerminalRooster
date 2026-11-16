@@ -14,7 +14,7 @@ use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
-use crate::editor::{DocId, EditorMsg, SessionFiles};
+use crate::editor::{DocId, EditorMsg, FileEditor, SessionFiles};
 use crate::files::{FilesMsg, FilesState};
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
@@ -71,6 +71,11 @@ pub struct Prefs {
     pub notify_agents: Level,
     /// Ask before quitting while terminals run programs.
     pub confirm_quit: bool,
+    /// What files open in: the built-in editor, or Neovim/Vim in a terminal.
+    pub file_editor: FileEditor,
+    /// The terminal editor's command line (the file is added at the end);
+    /// empty finds Neovim or Vim.
+    pub editor_command: String,
 }
 
 impl Default for Prefs {
@@ -93,6 +98,8 @@ impl Default for Prefs {
             notify_errors: Level::Subtle,
             notify_agents: Level::Prominent,
             confirm_quit: true,
+            file_editor: FileEditor::Builtin,
+            editor_command: String::new(),
         }
     }
 }
@@ -173,10 +180,12 @@ pub enum Dialog {
         unsaved: Vec<String>,
         dont_ask: bool,
     },
-    /// Closing a file with unsaved changes.
+    /// Closing a file with unsaved changes, or open in a terminal editor
+    /// that is still running (its name).
     CloseFile {
         doc: DocId,
         name: String,
+        editor: Option<String>,
     },
     /// Saving a file that changed on disk since it was read.
     SaveConflict {
@@ -201,6 +210,9 @@ pub struct SettingsState {
     pub recording: Option<Action>,
     /// What the last shortcut change did, e.g. which action lost its keys.
     pub shortcut_note: Option<String>,
+    /// The terminal editor files open in when no command is set (looked
+    /// for when settings open).
+    pub editor_found: Option<PathBuf>,
 }
 
 /// Choice in a task's "linked session" dropdown.
@@ -348,6 +360,10 @@ pub enum Message {
     ClosePanel,
     Files(FilesMsg),
     Editor(EditorMsg),
+    /// Edit files in the built-in editor or in a terminal editor (settings).
+    FileEditor(FileEditor),
+    /// The terminal editor's command line changed (settings).
+    EditorCommand(String),
     NewTaskInput(String),
     AddTask,
     TaskDone(TaskId, bool),
@@ -808,6 +824,12 @@ impl App {
         match message {
             Message::Core(ev) => {
                 self.core.apply_event(&ev);
+                // A terminal editor quit: its file closes.
+                if let Event::ProcessExited { pane, code } = ev
+                    && let Some(task) = self.editor_exited(pane, code)
+                {
+                    return task;
+                }
                 match ev {
                     Event::TerminalDirty(pane) | Event::Bell(pane) => {
                         let tab = self.core.state().pane(pane).map(|p| p.tab);
@@ -892,7 +914,11 @@ impl App {
                 }
                 // Unsaved files are always asked about; running programs as the user chose.
                 let unsaved = self.unsaved_files();
-                let running = if self.prefs.confirm_quit { self.running_terminals() } else { Vec::new() };
+                let running = if self.prefs.confirm_quit {
+                    self.running_terminals().into_iter().chain(self.running_editors()).collect()
+                } else {
+                    Vec::new()
+                };
                 if !running.is_empty() || !unsaved.is_empty() {
                     self.rename = None;
                     self.dialog = Some(Dialog::ConfirmQuit { running, unsaved, dont_ask: false });
@@ -1032,7 +1058,8 @@ impl App {
                 self.rename = None;
                 self.task_edit = None;
                 let shell_input = self.core.state().settings.default_shell.clone().unwrap_or_default();
-                self.settings = Some(SettingsState { shell_input, ..SettingsState::default() });
+                let editor_found = shell::find_terminal_editor().map(|e| e.program);
+                self.settings = Some(SettingsState { shell_input, editor_found, ..SettingsState::default() });
                 self.codex_hook = self.core.codex_hook_status();
                 // Pick up shells installed since the last look.
                 return detect_shells();
@@ -1466,6 +1493,14 @@ impl App {
             }
             Message::Files(msg) => return self.update_files(msg),
             Message::Editor(msg) => return self.update_editor(msg),
+            Message::FileEditor(editor) => {
+                self.prefs.file_editor = editor;
+                self.mark_prefs();
+            }
+            Message::EditorCommand(command) => {
+                self.prefs.editor_command = command;
+                self.mark_prefs();
+            }
             Message::NewTaskInput(v) => self.new_task = v,
             Message::AddTask => {
                 let title = std::mem::take(&mut self.new_task);
@@ -1596,7 +1631,7 @@ impl App {
                 for t in tabs {
                     self.grids.remove(&t);
                     self.activity.remove(&t);
-                    self.editors.remove(&t);
+                    self.drop_session_files(t);
                 }
                 return self.after_select();
             }
@@ -1604,7 +1639,7 @@ impl App {
                 self.dispatch(Command::DeleteTab(tab));
                 self.grids.remove(&tab);
                 self.activity.remove(&tab);
-                self.editors.remove(&tab);
+                self.drop_session_files(tab);
                 return self.after_select();
             }
             Dialog::Pane { pane, resume, .. } => {
@@ -1621,7 +1656,10 @@ impl App {
                 self.dialog = Some(Dialog::Worktree(form));
                 return self.update_worktree(WorktreeMsg::Submit);
             }
-            Dialog::CloseFile { doc, .. } => return self.save_doc(doc, true, false),
+            Dialog::CloseFile { doc, editor: None, .. } => return self.save_doc(doc, true, false),
+            Dialog::CloseFile { doc, editor: Some(_), .. } => {
+                return self.update(Message::Editor(EditorMsg::Discard(doc)));
+            }
             Dialog::SaveConflict { doc, .. } => return self.update(Message::Editor(EditorMsg::SaveAnyway(doc))),
             Dialog::ConfirmQuit { dont_ask, .. } => {
                 if dont_ask {
@@ -1746,18 +1784,19 @@ impl App {
         if self.closing {
             return;
         }
-        // A file shown in place of the terminals hides them.
-        let attended = self
-            .core
-            .state()
-            .active_tab()
-            .and_then(|t| t.focused_pane)
-            .filter(|_| self.window_focused && self.settings.is_none() && self.shown_doc().is_none());
+        // A file shown in place of the terminals hides them; a terminal
+        // editor showing it is looked at instead (so Neovim hears of focus
+        // and can pick up changes agents made meanwhile).
+        let attended = match self.shown_doc() {
+            Some(_) => self.shown_editor_pane(),
+            None => self.core.state().active_tab().and_then(|t| t.focused_pane),
+        }
+        .filter(|_| self.window_focused && self.settings.is_none());
         if attended != self.attended {
-            if let Some(h) = self.attended.and_then(|p| self.core.terminal(p)) {
+            if let Some(h) = self.attended.and_then(|p| self.handle_of(p)) {
                 h.focus_changed(false);
             }
-            if let Some(h) = attended.and_then(|p| self.core.terminal(p)) {
+            if let Some(h) = attended.and_then(|p| self.handle_of(p)) {
                 h.focus_changed(true);
             }
             self.attended = attended;
