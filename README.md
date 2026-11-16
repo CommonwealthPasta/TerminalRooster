@@ -2,7 +2,7 @@
 
 A project-based terminal manager for running coding agents (Claude Code, Codex, Grok, …) side by side.
 
-*TR, TermRoost or Rooster for short.* It used to be called TermRoost; see [Moving from TermRoost](#moving-from-termroost).
+*TR, TermRoost or Rooster for short.*
 
 - **Projects** on the left, each with a working directory.
 - **Sessions** per project: vertical, renamable (double-click). Each session holds terminals in horizontal/vertical **splits**.
@@ -46,14 +46,6 @@ Windows 10 1809 or newer is required, for ConPTY. Terminals use `pwsh` if it is 
 | Windows | `%APPDATA%\TerminalRooster\data\terminalrooster.db` |
 
 Set `TERMINALROOSTER_DATA_DIR` to use another directory. Only one instance can run per data directory.
-
-### Moving from TermRoost
-
-The first time TerminalRooster starts, it moves TermRoost's data folder (`~/.local/share/termroost`, or `%APPDATA%\termroost\data` on Windows) into the folder above. That includes projects, sessions, tasks, scrollback, settings, themes and logs. Files named `termroost.*` become `terminalrooster.*`. Close TermRoost first. While it is still running, TerminalRooster says so and does not start.
-
-If TermRoost added its Codex hook, TerminalRooster rewrites that hook to report to the new folder, and a dialog offers to open Codex so you can trust the changed hook (`/hooks`). On Linux, the hidden desktop entry and icons that a TermRoost build wrote under its old app id are removed.
-
-Environment variables changed from `TERMROOST_*` to `TERMINALROOSTER_*`, and the binary is now `terminalrooster`. TermRoost's own older name was *agentdeck*; its data is not moved any more.
 
 ## Themes
 
