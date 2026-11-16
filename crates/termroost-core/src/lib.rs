@@ -81,6 +81,27 @@ pub struct Renamed {
     pub codex_hook_updated: bool,
 }
 
+/// What [`Core::leave_dir`] did.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LeftDir {
+    /// The tabs that worked in the directory, now deleted.
+    pub closed: Vec<TabId>,
+    /// Terminals of other tabs whose shell is in the directory and still
+    /// there, because a program or an agent runs in them.
+    pub busy: Vec<PaneId>,
+    /// The processes of the terminals that were stopped or restarted.
+    pub pids: Vec<u32>,
+}
+
+impl LeftDir {
+    /// Waits until the processes that were in the directory have exited
+    /// (stopping takes a moment), for at most `timeout`. Returns whether they
+    /// all did. Blocks, so call it off the GUI thread.
+    pub fn wait(&self, timeout: Duration) -> bool {
+        detect::wait_for_exit(&self.pids, timeout)
+    }
+}
+
 pub struct Core {
     state: AppState,
     store: Store,
@@ -291,6 +312,58 @@ impl Core {
             self.bg.detector.lock().unwrap().programs(&shells).into_iter().filter(|(_, n)| !n.is_empty()).collect();
         found.sort_by_key(|(p, _)| *p);
         found
+    }
+
+    /// Leaves a directory that is about to be deleted, such as a git worktree.
+    /// Tabs working in it (or below it), in any project, are deleted as
+    /// [`Command::DeleteTab`] does. Terminals of other tabs whose shell is in
+    /// it restart in their tab's directory when idle; ones running a program
+    /// stay, see [`LeftDir::busy`]. Wait with [`LeftDir::wait`] before
+    /// deleting the directory: Windows cannot delete a folder that a process
+    /// is still working in.
+    pub fn leave_dir(&mut self, dir: &std::path::Path) -> LeftDir {
+        let s = &self.state;
+        let closed: Vec<TabId> =
+            s.tabs.iter().filter(|t| git::is_within(&s.tab_working_dir(t), dir)).map(|t| t.id).collect();
+        let strays: Vec<PaneId> = s
+            .panes
+            .values()
+            .filter(|p| !closed.contains(&p.tab) && p.cwd.as_deref().is_some_and(|c| git::is_within(c, dir)))
+            .map(|p| p.id)
+            .collect();
+
+        let shell_of = |pane: &PaneId| self.terminal(*pane).filter(|h| h.is_running()).and_then(|h| h.shell_pid());
+        let mut stopped: Vec<u32> =
+            s.panes.values().filter(|p| closed.contains(&p.tab)).filter_map(|p| shell_of(&p.id)).collect();
+        let running_strays: Vec<(PaneId, u32)> = strays.iter().filter_map(|p| Some((*p, shell_of(p)?))).collect();
+        let idle = detect::idle_shells(&running_strays);
+        let busy: Vec<PaneId> = running_strays
+            .iter()
+            .map(|(p, _)| *p)
+            .filter(|p| !idle.contains(p) || s.pane(*p).is_some_and(|p| p.agent.is_some()))
+            .collect();
+        stopped.extend(running_strays.iter().filter(|(p, _)| !busy.contains(p)).map(|(_, pid)| *pid));
+        let pids = detect::process_trees(&stopped);
+
+        for tab in &closed {
+            if let Err(e) = self.dispatch(Command::DeleteTab(*tab)) {
+                tracing::warn!(%tab, error = %e, "could not close a session in a folder being removed");
+            }
+        }
+        // The other terminals forget the directory, and idle ones leave it now.
+        for pane in strays.iter().filter(|p| !busy.contains(p)) {
+            if let Some(p) = self.state.panes.get_mut(pane)
+                && p.cwd.take().is_some()
+            {
+                self.store.write(vec![StoreOp::UpsertPane(p.clone())]);
+            }
+            if let Some(handle) = self.terminal(*pane).filter(|h| h.is_running()) {
+                handle.print_notice(&format!("─── left {}, which is being removed ───", dir.display()));
+                self.start_process(*pane, &handle, false);
+            }
+        }
+        tracing::info!(dir = %dir.display(), closed = closed.len(), busy = busy.len(), "left a directory");
+        LeftDir { closed, busy, pids }
     }
 
     /// Blocks until all queued database writes are committed.
