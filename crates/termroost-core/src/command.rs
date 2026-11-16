@@ -218,4 +218,8 @@ pub enum Event {
         pane: PaneId,
         alert: Alert,
     },
+    /// What runs in a terminal changed: its agent started or finished
+    /// working, or programs started or stopped. Read it with
+    /// [`crate::TerminalHandle::activity`].
+    ActivityChanged(PaneId),
 }

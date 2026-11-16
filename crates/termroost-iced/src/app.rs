@@ -11,7 +11,9 @@ use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
 use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::session::{bundled_bash, bundled_nvim};
-use termroost_core::{AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git};
+use termroost_core::{
+    Activity, AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git,
+};
 
 use crate::color_picker::{ColorPicker, Hsl};
 use crate::editor::{DocId, EditorMsg, FileEditor, SessionFiles};
@@ -461,6 +463,8 @@ pub struct App {
     pub(crate) disk_polling: bool,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
+    /// What goes on in the terminals that are not idle (see [`Activity`]).
+    pub(crate) busy: HashMap<PaneId, Activity>,
     pub(crate) error: Option<String>,
     /// Information worth a banner that is not an error.
     pub(crate) notice: Option<String>,
@@ -573,6 +577,7 @@ impl App {
             open_files_dirty: false,
             disk_polling: false,
             activity: HashSet::new(),
+            busy: HashMap::new(),
             error: None,
             notice: None,
             git: HashMap::new(),
@@ -897,6 +902,12 @@ impl App {
                         if let Some(tab) = tab.filter(|t| Some(*t) != self.active_tab_id()) {
                             self.activity.insert(tab);
                         }
+                    }
+                    Event::ActivityChanged(pane) => {
+                        match self.core.terminal(pane).map(|h| h.activity()).filter(|a| !a.is_idle()) {
+                            Some(activity) => self.busy.insert(pane, activity),
+                            None => self.busy.remove(&pane),
+                        };
                     }
                     Event::ClipboardStore(text) => return iced::clipboard::write(text),
                     Event::Alert { pane, alert } => return self.on_notice(pane, Notice::from_alert(&alert)),
@@ -1815,17 +1826,20 @@ impl App {
             .core
             .running_programs()
             .into_iter()
-            .filter_map(|(pane, names)| {
+            .filter_map(|(pane, found)| {
                 let tab = s.pane(pane)?.tab;
                 let rank = s.tabs.iter().position(|t| t.id == tab).unwrap_or(usize::MAX);
                 let working = self.core.terminal(pane).is_some_and(|h| h.agent_working());
-                let is_agent = |n: &String| AgentKind::ALL.iter().any(|k| k.label() == n);
-                let programs = names
+                let programs = found
                     .iter()
-                    .map(|n| if working && is_agent(n) { format!("{n} (working)") } else { n.clone() })
+                    .map(|p| match (p.agent, p.started_by) {
+                        (Some(_), _) if working => format!("{} (working)", p.name),
+                        (None, Some(by)) => format!("{} (started by {by})", p.name),
+                        _ => p.name.clone(),
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
-                let agent = names.iter().any(is_agent);
+                let agent = found.iter().any(|p| p.agent.is_some());
                 Some((rank, RunningTerminal { pane, place: self.place_of(pane)?, programs, agent }))
             })
             .collect();

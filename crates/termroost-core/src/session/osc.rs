@@ -1,9 +1,9 @@
 //! Finds the escape sequences alacritty ignores but notifications need, in
 //! the raw output of a terminal:
 //!
-//! * `OSC 133 ; D ; <exit code>` (and VS Code's `OSC 633 ; D`): a shell
-//!   integration reports that a command finished; `OSC 633 ; E ; <command>`
-//!   names the command.
+//! * `OSC 133 ; C` and `OSC 133 ; D ; <exit code>` (and VS Code's `OSC 633`):
+//!   a shell integration reports that a command started and finished;
+//!   `OSC 633 ; E ; <command>` names the command.
 //! * `OSC 9 ; 4 ; <state> ; <percent>`: a progress indicator (ConEmu, Windows
 //!   Terminal). Agents such as Grok show one while they work.
 //! * `OSC 7501 ; state=<state>:app=<name>[:kind=<why>]`: a program's
@@ -23,9 +23,11 @@ use std::path::PathBuf;
 /// A sequence of interest found in the output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Signal {
+    /// A shell command started.
+    CommandStart,
     /// A shell command finished, with its exit status when the shell sent one.
     CommandDone(Option<i32>),
-    /// The command line of the command that is finishing (`OSC 633 ; E`).
+    /// The command line of the command that is starting or finishing (`OSC 633 ; E`).
     CommandLine(String),
     /// `OSC 9;4` progress: 0 clears it, 1–4 show it (normal, error, busy, paused).
     Progress(u8),
@@ -169,6 +171,7 @@ impl OscScanner {
             "133" | "633" => {
                 let (kind, args) = rest.split_once(';').unwrap_or((rest, ""));
                 match kind {
+                    "C" => out.push(Signal::CommandStart),
                     "D" => out.push(Signal::CommandDone(args.split(';').next().and_then(|c| c.trim().parse().ok()))),
                     "E" if code == "633" => {
                         let line = unescape(args.split(';').next().unwrap_or_default());
@@ -385,7 +388,8 @@ mod tests {
         assert_eq!(scan(&[b"\x1b]133;D;0\x1b\\"]), vec![Signal::CommandDone(Some(0))]);
         assert_eq!(scan(&[b"\x1b]133;D\x07"]), vec![Signal::CommandDone(None)]);
         assert_eq!(scan(&[b"\x1b]633;D;127\x07"]), vec![Signal::CommandDone(Some(127))]);
-        assert!(scan(&[b"\x1b]133;A\x07\x1b]133;C\x07"]).is_empty());
+        assert_eq!(scan(&[b"\x1b]133;A\x07\x1b]133;C\x07"]), vec![Signal::CommandStart]);
+        assert_eq!(scan(&[b"\x1b]633;C\x07"]), vec![Signal::CommandStart]);
         assert_eq!(scan(&[b"\x1b]633;E;echo a\\x3bb \\\\ c\x07"]), vec![Signal::CommandLine(r"echo a;b \ c".into())]);
     }
 

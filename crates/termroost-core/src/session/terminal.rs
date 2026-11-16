@@ -19,6 +19,7 @@ use alacritty_terminal::vte::ansi::Rgb as ARgb;
 use crate::agent::AgentKind;
 use crate::alert::{Alert, Tracker};
 use crate::command::Event;
+use crate::detect::Program;
 use crate::model::PaneId;
 use crate::session::input::{self, KeyInput, MouseInput};
 use crate::session::osc::Signal;
@@ -113,6 +114,8 @@ pub(crate) struct Shared {
     palette: SharedPalette,
     /// Turns what the program sends into alerts (failed commands, finished agents).
     tracker: Mutex<Tracker>,
+    /// What runs below the shell, as the background scan last saw it.
+    programs: Mutex<Vec<Program>>,
     /// The directory the shell last reported (shells report it at every prompt).
     cwd: Mutex<Option<PathBuf>>,
     /// Locked after the term, never before.
@@ -145,9 +148,33 @@ impl Shared {
             }
             Signal::Cleared => self.pin.lock().unwrap().screen_cleared(),
             signal => {
-                let alert = self.tracker.lock().unwrap().signal(signal);
+                let alert = self.track(|t| t.signal(signal));
                 self.alert(alert);
             }
+        }
+    }
+
+    /// Runs `f` on the tracker, and tells the front end when that started or
+    /// ended an agent's turn or a command typed at the prompt.
+    fn track<R>(&self, f: impl FnOnce(&mut Tracker) -> R) -> R {
+        let mut tracker = self.tracker.lock().unwrap();
+        let was = (tracker.busy(), tracker.running().map(str::to_owned));
+        let out = f(&mut tracker);
+        let changed = (tracker.busy(), tracker.running()) != (was.0, was.1.as_deref());
+        drop(tracker);
+        if changed {
+            self.send(Event::ActivityChanged(self.pane));
+        }
+        out
+    }
+
+    /// Records what runs below the shell; tells the front end if that changed.
+    fn set_programs(&self, programs: Vec<Program>) {
+        let mut current = self.programs.lock().unwrap();
+        if *current != programs {
+            *current = programs;
+            drop(current);
+            self.send(Event::ActivityChanged(self.pane));
         }
     }
 
@@ -186,6 +213,9 @@ impl Shared {
         self.shell_pid.store(0, Ordering::Release);
         tracing::info!(pane = %self.pane, ?code, "process exited");
         self.send(Event::ProcessExited { pane: self.pane, code });
+        // Nothing runs in it any more (see `TerminalHandle::activity`).
+        self.programs.lock().unwrap().clear();
+        self.send(Event::ActivityChanged(self.pane));
         self.wake();
     }
 }
@@ -204,13 +234,13 @@ impl EventListener for Proxy {
             AEvent::Wakeup => s.wake(),
             AEvent::Title(t) => {
                 *s.title.lock().unwrap() = Some(t.clone());
-                let alert = s.tracker.lock().unwrap().title(&t);
+                let alert = s.track(|tracker| tracker.title(&t));
                 s.send(Event::TitleChanged { pane: s.pane, title: t });
                 s.alert(alert);
             }
             AEvent::ResetTitle => {
                 *s.title.lock().unwrap() = None;
-                s.tracker.lock().unwrap().title("");
+                s.track(|tracker| tracker.title(""));
                 s.send(Event::TitleChanged { pane: s.pane, title: String::new() });
             }
             AEvent::Bell => {
@@ -240,6 +270,30 @@ pub(crate) struct Session {
     pub(crate) shared: Arc<Shared>,
     term: Arc<FairMutex<Term<Proxy>>>,
     render: Mutex<(u64, RenderContent)>,
+}
+
+/// What runs in a terminal now, besides its shell.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// The coding agent in it is in the middle of a turn.
+    pub agent_working: bool,
+    /// The programs below the shell, coding agents included, as the last
+    /// scan saw them (every few seconds). When it saw none, the command typed
+    /// at the prompt if one is running (bash reports it).
+    pub programs: Vec<Program>,
+}
+
+impl Activity {
+    /// The programs that keep the terminal busy: all but the coding agents,
+    /// which count only while working.
+    pub fn busy_programs(&self) -> impl Iterator<Item = &Program> {
+        self.programs.iter().filter(|p| p.agent.is_none())
+    }
+
+    /// Nothing goes on: the shell, or an agent, waits for the user.
+    pub fn is_idle(&self) -> bool {
+        !self.agent_working && self.busy_programs().next().is_none()
+    }
 }
 
 /// Cheap, cloneable, thread-safe handle to one terminal.
@@ -275,6 +329,7 @@ impl TerminalHandle {
             size: Mutex::new(size),
             palette,
             tracker: Mutex::new(Tracker::default()),
+            programs: Mutex::new(Vec::new()),
             cwd: Mutex::new(None),
             pin: Mutex::new(Pin::Off),
         });
@@ -339,7 +394,8 @@ impl TerminalHandle {
         #[cfg(windows)]
         let shell_pid = pty.child_watcher().pid().map_or(0, |p| p.get());
         shared.shell_pid.store(shell_pid, Ordering::Release);
-        shared.tracker.lock().unwrap().reset();
+        shared.track(Tracker::reset);
+        shared.set_programs(Vec::new());
         let pty = TapPty::new(pty, shared.clone());
         let run = shared.run_counter.fetch_add(1, Ordering::AcqRel) + 1;
         let proxy = Proxy { shared: shared.clone(), run: Some(run) };
@@ -408,6 +464,29 @@ impl TerminalHandle {
     /// signals tell (Claude Code's title, a progress indicator).
     pub fn agent_working(&self) -> bool {
         self.0.shared.tracker.lock().unwrap().busy()
+    }
+
+    /// What runs in the terminal now. [`Event::ActivityChanged`] tells when
+    /// this changes.
+    pub fn activity(&self) -> Activity {
+        if !self.is_running() {
+            return Activity::default();
+        }
+        let tracker = self.0.shared.tracker.lock().unwrap();
+        let mut programs = self.0.shared.programs.lock().unwrap().clone();
+        // What the scan can't see: Git Bash's own tools (vim, less, ssh) leave
+        // the Windows process tree, but the shell integration names them.
+        if programs.is_empty()
+            && let Some(name) = tracker.running()
+        {
+            programs.push(Program { name: name.to_owned(), agent: None, started_by: None });
+        }
+        Activity { agent_working: tracker.busy(), programs }
+    }
+
+    /// Records what the background scan found below the shell.
+    pub(crate) fn set_programs(&self, programs: Vec<Program>) {
+        self.0.shared.set_programs(programs);
     }
 
     /// Title set by the running program (OSC 0/2), if any.

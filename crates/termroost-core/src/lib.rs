@@ -37,13 +37,13 @@ pub use agent::{AgentKind, AgentSession};
 pub use alert::{AgentEvent, Alert};
 pub use codex_hook::CodexHookStatus;
 pub use command::{Command, Event, Outcome};
-pub use detect::{AgentHomes, ObservedAgent};
+pub use detect::{AgentHomes, ObservedAgent, Program};
 pub use error::{Error, Result};
 pub use layout::{Axis, Layout};
 pub use model::*;
 pub use session::input::{Key, KeyInput, Modifiers, MouseButton, MouseEventKind, MouseInput, NamedKey};
 pub use session::render::{CellStyle, CursorInfo, CursorShape, Palette, RenderCell, RenderContent, Rgb};
-pub use session::{GridSize, SelectionKind, TerminalHandle};
+pub use session::{Activity, GridSize, SelectionKind, TerminalHandle};
 
 use paths::InstanceLock;
 use session::{Background, SpawnSpec};
@@ -58,7 +58,8 @@ pub struct Config {
     /// Where the database lives; `None` uses [`paths::default_data_dir`].
     pub data_dir: Option<PathBuf>,
     pub palette: Palette,
-    /// How often changed scrollback is saved and terminals are checked for agents.
+    /// How often changed scrollback is saved and terminals are checked for
+    /// agents and other programs.
     pub autosave_interval: Duration,
     /// Where Claude Code, Codex and Grok keep their session records.
     pub agent_homes: AgentHomes,
@@ -305,13 +306,13 @@ impl Core {
         }
     }
 
-    /// The programs running in each terminal (below its shell), by name, for
-    /// asking before quitting. Terminals with nothing running are left out.
+    /// The programs running in each terminal (below its shell), for asking
+    /// before quitting. Terminals with nothing running are left out.
     /// Inspects every process, so it can take a moment.
-    pub fn running_programs(&self) -> Vec<(PaneId, Vec<String>)> {
+    pub fn running_programs(&self) -> Vec<(PaneId, Vec<Program>)> {
         let shells: Vec<(PaneId, u32)> =
             self.bg.sessions.lock().unwrap().values().filter_map(|h| Some((h.pane(), h.shell_pid()?))).collect();
-        let mut found: Vec<(PaneId, Vec<String>)> =
+        let mut found: Vec<(PaneId, Vec<Program>)> =
             self.bg.detector.lock().unwrap().programs(&shells).into_iter().filter(|(_, n)| !n.is_empty()).collect();
         found.sort_by_key(|(p, _)| *p);
         found
@@ -1148,7 +1149,7 @@ impl Core {
         let _ = stop.send(());
         let _ = thread.join();
         // Last look at what runs where, while the agents are still alive.
-        for (pane, agent) in self.bg.detect_agents() {
+        for (pane, agent) in self.bg.scan_terminals() {
             self.record_agent(pane, agent.as_ref());
         }
         codex_hook::set_running(&self.data_dir, false);

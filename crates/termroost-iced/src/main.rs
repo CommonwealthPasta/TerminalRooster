@@ -3,6 +3,7 @@
 
 mod agent_icon;
 mod app;
+mod busy;
 mod color_picker;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
