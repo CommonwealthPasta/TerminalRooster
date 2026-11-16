@@ -1,5 +1,5 @@
 //! `tracing` setup: logs go to stderr and to a daily-rotated file in the data
-//! directory (`<data dir>/logs/termroost.YYYY-MM-DD.log`, last 7 days kept).
+//! directory (`<data dir>/logs/terminalrooster.YYYY-MM-DD.log`, last 7 days kept).
 //! The file matters on Windows, where release builds have no console.
 //!
 //! The level is taken from `TERMINALROOSTER_LOG`, then `RUST_LOG`, e.g.
@@ -38,7 +38,7 @@ pub fn init(data_dir: Option<&Path>) -> Option<WorkerGuard> {
         let appender = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| {
             RollingFileAppender::builder()
                 .rotation(Rotation::DAILY)
-                .filename_prefix("termroost")
+                .filename_prefix("terminalrooster")
                 .filename_suffix("log")
                 .max_log_files(7)
                 .build(&dir)

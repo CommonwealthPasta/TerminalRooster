@@ -69,6 +69,13 @@ impl Default for Config {
     }
 }
 
+/// What [`Core::open`] carried over from TermRoost, the app's previous name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Renamed {
+    /// TermRoost's data directory, whose contents were moved into the data directory.
+    pub moved_from: Option<PathBuf>,
+}
+
 pub struct Core {
     state: AppState,
     store: Store,
@@ -84,28 +91,32 @@ pub struct Core {
     autosave: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
     data_dir: PathBuf,
     homes: AgentHomes,
+    renamed: Renamed,
     _lock: InstanceLock,
 }
 
 impl Core {
     /// Opens the database (creating it if needed), restores the previous state
-    /// and starts the terminals of the visible tab.
+    /// and starts the terminals of the visible tab. With the default data
+    /// directory, TermRoost's data is moved over first.
     pub fn open(config: Config) -> Result<Core> {
+        let mut renamed = Renamed::default();
         let data_dir = match config.data_dir {
             Some(d) => d,
             None => {
                 let dir = paths::default_data_dir()?;
                 if std::env::var_os(paths::DATA_DIR_ENV).is_none()
                     && let Some(legacy) = paths::legacy_data_dir()
+                    && paths::migrate_legacy(&legacy, &dir)?
                 {
-                    paths::migrate_legacy(&legacy, &dir)?;
+                    renamed.moved_from = Some(legacy);
                 }
                 dir
             }
         };
         std::fs::create_dir_all(&data_dir)?;
         let lock = InstanceLock::acquire(&data_dir)?;
-        let (store, mut state) = Store::open(&data_dir.join("termroost.db"))?;
+        let (store, mut state) = Store::open(&data_dir.join(paths::DB_FILE))?;
 
         let mut next_id = max_id(&state) + 1;
         let repairs = repair(&mut state, &mut next_id);
@@ -143,6 +154,7 @@ impl Core {
             autosave: Some((stop_tx, autosave)),
             data_dir,
             homes: config.agent_homes,
+            renamed,
             _lock: lock,
         };
         tracing::info!(
@@ -165,6 +177,11 @@ impl Core {
 
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// What this start carried over from TermRoost (usually nothing).
+    pub fn renamed(&self) -> &Renamed {
+        &self.renamed
     }
 
     /// Receiver of asynchronous events (clone it freely).

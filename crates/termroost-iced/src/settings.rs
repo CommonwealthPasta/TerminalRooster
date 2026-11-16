@@ -74,7 +74,7 @@ impl App {
             shortcuts_section(),
             muted_text(format!(
                 "Everything is stored in {}. Logs are in {}.",
-                self.core.data_dir().join("termroost.db").display(),
+                self.core.data_dir().join(termroost_core::paths::DB_FILE).display(),
                 crate::logging::log_dir(self.core.data_dir()).display()
             )),
         ]

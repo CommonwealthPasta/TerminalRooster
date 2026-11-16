@@ -8,8 +8,9 @@
 ;
 ; Installs for the current user only (no administrator rights needed), into
 ; %LOCALAPPDATA%\Programs\TerminalRooster. The app's data in
-; %APPDATA%\termroost is never touched, so uninstalling keeps projects and
-; settings.
+; %APPDATA%\TerminalRooster is never touched, so uninstalling keeps projects
+; and settings. On its first start the app moves TermRoost's data from
+; %APPDATA%\termroost there.
 
 Unicode true
 SetCompressor /SOLID lzma

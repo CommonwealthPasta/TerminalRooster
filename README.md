@@ -2,7 +2,7 @@
 
 A project-based terminal manager for running coding agents (Claude Code, Codex, Grok, …) side by side.
 
-*TR, TermRoost or Rooster for short.* It used to be called TermRoost.
+*TR, TermRoost or Rooster for short.* It used to be called TermRoost; see [Moving from TermRoost](#moving-from-termroost).
 
 - **Projects** on the left, each with a working directory.
 - **Tabs** per project: vertical, renamable (double-click). Each tab holds terminals in horizontal/vertical **splits**.
@@ -40,12 +40,16 @@ Windows 10 1809 or newer is required, for ConPTY. Terminals use `pwsh` if it is 
 
 | Platform | Location |
 |---|---|
-| Linux | `~/.local/share/termroost/termroost.db` |
-| Windows | `%APPDATA%\termroost\data\termroost.db` |
+| Linux | `~/.local/share/terminalrooster/terminalrooster.db` |
+| Windows | `%APPDATA%\TerminalRooster\data\terminalrooster.db` |
 
 Set `TERMINALROOSTER_DATA_DIR` to use another directory. Only one instance can run per data directory.
 
-Before TermRoost, the app was called *agentdeck*. On first start it moves the old `agentdeck` data folder's database into the folder above. Close the old app first; TerminalRooster waits and says so if it is still running.
+### Moving from TermRoost
+
+The first time TerminalRooster starts, it moves TermRoost's data folder (`~/.local/share/termroost`, or `%APPDATA%\termroost\data` on Windows) into the folder above. That includes projects, tabs, tasks, scrollback, settings, themes and logs. Files named `termroost.*` become `terminalrooster.*`. Close TermRoost first. While it is still running, TerminalRooster says so and does not start.
+
+Environment variables changed from `TERMROOST_*` to `TERMINALROOSTER_*`, and the binary is now `terminalrooster`. TermRoost's own older name was *agentdeck*; its data is not moved any more.
 
 ## Themes
 
@@ -66,8 +70,8 @@ TerminalRooster logs with `tracing`, to stderr and to a daily file that keeps th
 
 | Platform | Log location |
 |---|---|
-| Linux | `~/.local/share/termroost/logs/` |
-| Windows | `%APPDATA%\termroost\data\logs\` |
+| Linux | `~/.local/share/terminalrooster/logs/` |
+| Windows | `%APPDATA%\TerminalRooster\data\logs\` |
 
 Panics are written to the log with a backtrace. The level comes from `TERMINALROOSTER_LOG`, then `RUST_LOG`; the default is `info`. For example, `TERMINALROOSTER_LOG=debug` logs every command, and `TERMINALROOSTER_LOG=terminalrooster=trace` logs every UI message. Keystrokes are never logged.
 

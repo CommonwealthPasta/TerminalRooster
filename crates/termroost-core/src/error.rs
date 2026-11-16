@@ -6,8 +6,8 @@ pub enum Error {
     #[error("TerminalRooster is already running (lock held on {0})")]
     AlreadyRunning(PathBuf),
     #[error(
-        "agentdeck (TerminalRooster's old name) is still running and using {0}. Close it, then start TerminalRooster again \
-         to move your projects over."
+        "TermRoost (TerminalRooster's old name) is still running and using {0}. Close it, then start TerminalRooster \
+         again to move your projects over."
     )]
     LegacyRunning(PathBuf),
     #[error("database error: {0}")]
