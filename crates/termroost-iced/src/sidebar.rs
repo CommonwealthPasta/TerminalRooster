@@ -3,8 +3,9 @@
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text, text_input, tooltip};
 use iced::{Alignment, Element, Font, Length, font};
 use termroost_core::git::Head;
-use termroost_core::{PaneId, Project, ProjectId, Tab, TabId};
+use termroost_core::{AgentKind, PaneId, Project, ProjectId, Tab, TabId};
 
+use crate::agent_icon::agent_icon;
 use crate::app::{App, DropTarget, Message, RENAME_INPUT, RenameTarget};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
@@ -89,6 +90,12 @@ pub fn short_dir(path: &std::path::Path, max: usize) -> String {
     format!("…/{out}")
 }
 
+/// The text color of a list item.
+fn item_text(t: &iced::Theme, selected: bool) -> iced::Color {
+    let p = t.extended_palette();
+    if selected { p.primary.weak.text } else { p.background.base.text }
+}
+
 /// A list item; `drop_target` outlines it while a task is held over it.
 fn item_style(selected: bool, drop_target: bool) -> impl Fn(&iced::Theme) -> container::Style {
     move |t| {
@@ -96,7 +103,7 @@ fn item_style(selected: bool, drop_target: bool) -> impl Fn(&iced::Theme) -> con
         let border = iced::Border::default().rounded(4);
         container::Style {
             background: selected.then_some(iced::Background::Color(p.primary.weak.color)),
-            text_color: Some(if selected { p.primary.weak.text } else { p.background.base.text }),
+            text_color: Some(item_text(t, selected)),
             border: if drop_target { border.width(2.0).color(p.primary.base.color) } else { border },
             ..container::Style::default()
         }
@@ -276,16 +283,23 @@ impl App {
         } else {
             space::horizontal().width(0).into()
         };
-        let mut label = column![
-            row![
-                marker(self.tab_notice(tab), self.activity.contains(&tab.id)),
-                text(&tab.title).size(14).width(Length::Fill),
-                badge
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(1);
+        let mut title =
+            row![marker(self.tab_notice(tab), self.activity.contains(&tab.id))].spacing(4).align_y(Alignment::Center);
+        // One logo per kind of agent, in terminal order.
+        let mut kinds: Vec<AgentKind> = Vec::new();
+        for kind in panes.iter().filter_map(|p| Some(s.pane(*p)?.agent.as_ref()?.kind)) {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        for kind in kinds {
+            title = title.push(tooltip(
+                agent_icon(kind, 14.0, move |t| item_text(t, selected)),
+                container(text(kind.label()).size(12)).padding([4, 8]).style(container::rounded_box),
+                tooltip::Position::Bottom,
+            ));
+        }
+        let mut label = column![title.push(text(&tab.title).size(14).width(Length::Fill)).push(badge)].spacing(1);
         if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
             label = label.push(branch_label(head, 11.0, 24));
         }
