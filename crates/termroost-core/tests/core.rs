@@ -21,12 +21,14 @@ fn open(dir: &Path) -> Core {
     .expect("open core")
 }
 
-/// A shell command line that prints `text`, then stays alive (or exits with `code`).
+/// A shell command line that prints `text`, then stays alive (or exits with
+/// `code`). Staying alive, it reads what is typed, so that shows on screen.
 fn printer(text: &str, exit_code: Option<i32>) -> String {
     if cfg!(windows) {
         match exit_code {
             Some(c) => format!("cmd /c \"echo {text} & exit {c}\""),
-            None => format!("cmd /c \"echo {text} & ping -n 60 127.0.0.1 >nul\""),
+            // The console echoes typed lines only to a program that reads them.
+            None => format!("cmd /c \"echo {text} & more\""),
         }
     } else {
         match exit_code {
@@ -59,7 +61,12 @@ fn screen_text(core: &Core, pane: PaneId) -> String {
 }
 
 fn wait_for_text(core: &mut Core, pane: PaneId, needle: &str) {
-    wait_for(core, Duration::from_secs(15), |c, _| screen_text(c, pane).contains(needle));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    wait_for(core, Duration::from_secs(20), |c, _| {
+        let text = screen_text(c, pane);
+        assert!(Instant::now() < deadline, "timed out waiting for {needle:?} on the screen:\n{text}");
+        text.contains(needle)
+    });
 }
 
 fn only_pane(core: &Core) -> PaneId {
