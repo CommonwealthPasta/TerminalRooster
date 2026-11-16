@@ -63,7 +63,7 @@ TermRoost logs with `tracing`, to stderr and to a daily file that keeps the last
 | Linux | `~/.local/share/termroost/logs/` |
 | Windows | `%APPDATA%\termroost\data\logs\` |
 
-Panics are written to the log with a backtrace. The level comes from `TERMROOST_LOG`, then `RUST_LOG`; the default is `info`. For example, `TERMROOST_LOG=debug` logs every command, and `TERMROOST_LOG=TermRoost=trace` logs every UI message. Keystrokes are never logged.
+Panics are written to the log with a backtrace. The level comes from `TERMROOST_LOG`, then `RUST_LOG`; the default is `info`. For example, `TERMROOST_LOG=debug` logs every command, and `TERMROOST_LOG=termroost=trace` logs every UI message. Keystrokes are never logged.
 
 ## Restoring after a restart or crash
 
