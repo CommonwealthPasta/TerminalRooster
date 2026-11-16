@@ -557,6 +557,9 @@ fn relocating_moves_an_idle_git_bash() {
     let pane = only_pane(&core);
     core.terminal(pane).unwrap().write("echo re\"\"ady\r");
     wait_for_text(&mut core, pane, "ready");
+    // Git Bash's prompt runs git after each command; under load that child
+    // can still be alive just after the output, which is busy, not idle.
+    std::thread::sleep(Duration::from_millis(1500));
 
     let outcome = core.dispatch(Command::RelocateTab { tab, working_dir: moved }).unwrap();
     assert_eq!(outcome, Outcome::Relocated { left_running: 0 });
