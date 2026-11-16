@@ -74,6 +74,8 @@ impl Default for Config {
 pub struct Renamed {
     /// TermRoost's data directory, whose contents were moved into the data directory.
     pub moved_from: Option<PathBuf>,
+    /// TermRoost's Codex hook was rewritten, so Codex needs it trusted again.
+    pub codex_hook_updated: bool,
 }
 
 pub struct Core {
@@ -116,6 +118,11 @@ impl Core {
         };
         std::fs::create_dir_all(&data_dir)?;
         let lock = InstanceLock::acquire(&data_dir)?;
+        // Checked on every start, so a failed rewrite is retried next time.
+        match codex_hook::migrate(&config.agent_homes.codex, &data_dir) {
+            Ok(updated) => renamed.codex_hook_updated = updated,
+            Err(e) => tracing::warn!(error = %e, "could not update TermRoost's Codex hook"),
+        }
         let (store, mut state) = Store::open(&data_dir.join(paths::DB_FILE))?;
 
         let mut next_id = max_id(&state) + 1;

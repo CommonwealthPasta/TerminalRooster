@@ -24,7 +24,9 @@ use serde_json::{Value, json};
 use crate::model::PaneId;
 
 /// Marks TerminalRooster's hook entries so they can be found and removed.
-pub const MARKER: &str = "termroost-codex-hook";
+pub const MARKER: &str = "terminalrooster-codex-hook";
+/// Marks hooks added while the app was called TermRoost; [`migrate`] rewrites them.
+const LEGACY_MARKER: &str = "termroost-codex-hook";
 const EVENTS: [&str; 2] = ["SessionStart", "UserPromptSubmit"];
 const RUNNING: &str = ".running";
 
@@ -143,9 +145,13 @@ fn handler(dir: &Path) -> Value {
 }
 
 fn is_ours(group: &Value) -> bool {
+    has_marker(group, MARKER) || has_marker(group, LEGACY_MARKER)
+}
+
+fn has_marker(group: &Value, marker: &str) -> bool {
     group["hooks"]
         .as_array()
-        .is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains(MARKER))))
+        .is_some_and(|hs| hs.iter().any(|h| h["command"].as_str().is_some_and(|c| c.contains(marker))))
 }
 
 fn invalid(msg: String) -> io::Error {
@@ -182,6 +188,39 @@ pub(crate) fn install(codex_home: &Path, data_dir: &Path) -> io::Result<PathBuf>
     std::fs::write(&file, serde_json::to_string_pretty(&root).expect("json") + "\n")?;
     tracing::info!(file = %file.display(), "installed Codex hook");
     Ok(file)
+}
+
+/// Rewrites a hook added while the app was called TermRoost so it reports to
+/// `data_dir` and reads the new pane variable. It stays at the same position,
+/// so other hooks keep theirs. Returns whether anything changed; Codex then
+/// needs the user to trust the changed hook again.
+pub(crate) fn migrate(codex_home: &Path, data_dir: &Path) -> io::Result<bool> {
+    let file = hooks_json(codex_home);
+    let text = match std::fs::read_to_string(&file) {
+        Ok(t) if t.contains(LEGACY_MARKER) => t,
+        Ok(_) => return Ok(false),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let mut root: Value =
+        serde_json::from_str(&text).map_err(|e| invalid(format!("{} is not valid JSON: {e}", file.display())))?;
+    let dir = reports_dir(data_dir);
+    let mut changed = false;
+    if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
+        for event in EVENTS {
+            let Some(groups) = hooks.get_mut(event).and_then(Value::as_array_mut) else { continue };
+            for group in groups.iter_mut().filter(|g| has_marker(g, LEGACY_MARKER)) {
+                *group = json!({ "hooks": [handler(&dir)] });
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&file, serde_json::to_string_pretty(&root).expect("json") + "\n")?;
+        tracing::info!(file = %file.display(), "updated the Codex hook for the new name");
+    }
+    Ok(changed)
 }
 
 /// Removes TerminalRooster's hook entries; deletes `hooks.json` if nothing else is left.
@@ -348,6 +387,40 @@ mod tests {
         std::fs::write(codex.join("config.toml"), config + &entry("user_prompt_submit")).unwrap();
         assert!(status(&codex).trusted);
         assert_eq!(snake_case("UserPromptSubmit"), "user_prompt_submit");
+    }
+
+    #[test]
+    fn termroost_hook_is_rewritten_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path().join("codex");
+        let data = tmp.path().join("TerminalRooster/data");
+        std::fs::create_dir_all(&codex).unwrap();
+        assert!(!migrate(&codex, &data).unwrap(), "no hooks.json");
+
+        // What TermRoost wrote, after a user hook that must keep its place.
+        let old = || {
+            json!({"hooks": [{
+                "type": "command",
+                "command": "sh -c 'd=\"$1\"; ...' termroost-codex-hook '/home/me/.local/share/termroost/codex-hooks'",
+                "commandWindows": "powershell.exe -NoProfile -EncodedCommand AAAA",
+                "timeout": 10,
+                "async": true
+            }]})
+        };
+        let mine = json!({"matcher": "startup", "hooks": [{"type": "command", "command": "echo hi"}]});
+        let before = json!({"hooks": {"SessionStart": [mine.clone(), old()], "UserPromptSubmit": [old()]}});
+        std::fs::write(codex.join("hooks.json"), before.to_string()).unwrap();
+        assert!(status(&codex).installed_in.is_some(), "TermRoost's hook counts as installed");
+
+        assert!(migrate(&codex, &data).unwrap());
+        let text = std::fs::read_to_string(codex.join("hooks.json")).unwrap();
+        assert!(text.contains(MARKER) && !text.contains(LEGACY_MARKER));
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let ours = json!({ "hooks": [handler(&reports_dir(&data))] });
+        assert_eq!(v["hooks"]["SessionStart"], json!([mine, ours]));
+        assert_eq!(v["hooks"]["UserPromptSubmit"], json!([ours]));
+        assert!(reports_dir(&data).is_dir());
+        assert!(!migrate(&codex, &data).unwrap(), "only once");
     }
 
     #[test]
