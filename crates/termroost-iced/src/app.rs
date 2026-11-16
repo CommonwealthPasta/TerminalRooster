@@ -328,6 +328,8 @@ pub struct App {
 pub enum DropTarget {
     /// A session in the sessions list.
     Session(TabId),
+    /// The terminals of the session on screen.
+    Terminals,
 }
 
 /// A task being dragged from the task panel onto a session.
@@ -511,6 +513,7 @@ impl App {
     pub(crate) fn drop_tab(&self, target: DropTarget) -> Option<TabId> {
         match target {
             DropTarget::Session(tab) => Some(tab),
+            DropTarget::Terminals => self.active_tab_id(),
         }
     }
 
@@ -1471,7 +1474,8 @@ impl App {
         let base: Element<'_, Message> = if self.settings.is_some() {
             self.view_settings()
         } else {
-            let mut main = row![self.view_projects(), self.view_tabs(), self.view_main()].height(Length::Fill);
+            let terminals = self.drop_zone(self.view_main());
+            let mut main = row![self.view_projects(), self.view_tabs(), terminals].height(Length::Fill);
             if self.prefs.tasks_open && self.core.state().selected_project.is_some() {
                 main = main.push(self.view_tasks());
             }

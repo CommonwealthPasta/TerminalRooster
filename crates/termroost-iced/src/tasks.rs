@@ -1,11 +1,13 @@
-//! The per-project task panel. A task can be dragged onto a session in the
-//! sessions list to link it to that session.
+//! The per-project task panel. A task can be dragged onto a session (in the
+//! sessions list, or the terminals on screen) to link it to that session.
 
-use iced::widget::{checkbox, column, container, mouse_area, pick_list, pin, row, scrollable, space, text, text_input};
+use iced::widget::{
+    checkbox, column, container, mouse_area, pick_list, pin, row, scrollable, space, stack, text, text_input,
+};
 use iced::{Alignment, Element, Length, Point, mouse};
 use termroost_core::Task;
 
-use crate::app::{App, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
+use crate::app::{App, DropTarget, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
 use crate::keymap::Action;
 use crate::sidebar::{BOLD, icon_button, muted_text, section_title};
 use crate::theme;
@@ -44,6 +46,47 @@ impl App {
         pin(container(label).padding([6, 10]).width(DRAG_LABEL_WIDTH).clip(true).style(theme::drag_label))
             .position(Point::new(x, cursor.y + 12.0))
             .into()
+    }
+
+    /// The terminals area: a task dropped on it is linked to the session on screen.
+    pub(crate) fn drop_zone<'a>(&'a self, content: Element<'a, Message>) -> Element<'a, Message> {
+        let target = DropTarget::Terminals;
+        let s = self.core.state();
+        let hint = if self.is_drop_target(target)
+            && let Some(task) = self.task_drag.and_then(|d| s.task(d.task))
+            && let Some(tab) = s.active_tab()
+        {
+            Some(if task.tab == Some(tab.id) {
+                format!("“{}” is already linked to {}", task.title, tab.title)
+            } else {
+                format!("Link “{}” to {}", task.title, tab.title)
+            })
+        } else {
+            None
+        };
+        // The same widgets with or without a drag, so the terminals keep their state.
+        let (label, style): (Element<'_, Message>, fn(&iced::Theme) -> container::Style) = match hint {
+            Some(hint) => (
+                container(text(hint).size(15).font(BOLD)).padding([8, 14]).style(theme::drag_label).into(),
+                theme::drop_target,
+            ),
+            None => (space::horizontal().width(0).into(), |_| container::Style::default()),
+        };
+        // While a task is dragged, the cover takes the pointer so the terminals don't react to it.
+        let dragging = self.task_drag.is_some_and(|d| d.moving);
+        let cover = mouse_area(container(label).center(Length::Fill).style(style)).interaction(if dragging {
+            mouse::Interaction::Grabbing
+        } else {
+            mouse::Interaction::None
+        });
+        let mut area = mouse_area(stack![content, cover]);
+        if self.task_drag.is_some() {
+            area = area
+                .on_enter(Message::TaskDragOver(target, true))
+                .on_exit(Message::TaskDragOver(target, false))
+                .on_release(Message::TaskDrop(target));
+        }
+        area.into()
     }
 
     pub(crate) fn view_tasks(&self) -> Element<'_, Message> {

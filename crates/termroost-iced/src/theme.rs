@@ -171,6 +171,17 @@ pub fn error_banner(theme: &Theme) -> container::Style {
     }
 }
 
+/// The terminals of the shown session while a task is held over them.
+pub fn drop_target(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.primary.base.color.scale_alpha(0.18))),
+        text_color: Some(p.background.base.text),
+        border: Border { width: 2.0, color: p.primary.base.color, radius: 6.0.into() },
+        ..container::Style::default()
+    }
+}
+
 /// The label that follows the pointer while a task is dragged.
 pub fn drag_label(theme: &Theme) -> container::Style {
     let p = theme.extended_palette();
