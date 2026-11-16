@@ -2,6 +2,7 @@
 #
 # After each command typed at the prompt, tells the terminal how it ended:
 # OSC 633;E with the command line, then OSC 133;D with the exit status.
+# When the working directory changes, reports it with OSC 633;P;Cwd=<dir>.
 # TerminalRooster starts bash with PROMPT_COMMAND set to source this file on
 # the first prompt (after ~/.bashrc has run); it then takes that entry out of
 # PROMPT_COMMAND again and runs whatever else ~/.bashrc put there.
@@ -29,6 +30,7 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
     __terminalrooster_running=
     __terminalrooster_command=
     __terminalrooster_histcmd="${HISTCMD-}"
+    __terminalrooster_pwd=
 
     __terminalrooster_escape() {
         local s="$1"
@@ -69,6 +71,17 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
             builtin printf '\e]633;E;%s\a\e]133;D;%s\a' "$(__terminalrooster_escape "$line")" "$status"
         fi
         __terminalrooster_histcmd="${HISTCMD-}"
+        # Where the shell is, so the terminal starts there after a restart.
+        if [[ "$PWD" != "$__terminalrooster_pwd" ]]; then
+            __terminalrooster_pwd="$PWD"
+            local dir="$PWD"
+            # Git Bash and MSYS2 name drives /c/...; `pwd -W` gives the
+            # Windows path (it costs a subshell, hence only on a change).
+            if [[ "$OSTYPE" == msys* || "$OSTYPE" == cygwin* ]]; then
+                dir="$(builtin pwd -W 2>/dev/null)" || dir="$PWD"
+            fi
+            builtin printf '\e]633;P;Cwd=%s\a' "$(__terminalrooster_escape "$dir")"
+        fi
         if [[ -n "$__terminalrooster_original" ]]; then
             (exit "$status")
             builtin eval "$__terminalrooster_original"

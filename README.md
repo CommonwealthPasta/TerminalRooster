@@ -88,7 +88,7 @@ No agent needs any setup.
 | Grok and other programs | Desktop notification requests (`OSC 9`, `OSC 777`, `OSC 99`), progress indicators (`OSC 9;4`), and the bell in a terminal running an agent |
 | Failed commands | The exit status the shell reports after each command (`OSC 133;D`) |
 
-**Shell integration:** bash and PowerShell (`pwsh`, `powershell`) don't report exit statuses by themselves, so TerminalRooster loads a small script into them when a terminal starts. The scripts live in the data directory, in `shell-integration/`, and your startup files are not changed:
+**Shell integration:** bash and PowerShell (`pwsh`, `powershell`) don't report exit statuses or their working directory by themselves, so TerminalRooster loads a small script into them when a terminal starts. The scripts live in the data directory, in `shell-integration/`, and your startup files are not changed:
 
 - **bash** gets `PROMPT_COMMAND` in its environment. That sources the script at the first prompt, after `~/.bashrc`. If your `~/.bashrc` replaces `PROMPT_COMMAND` instead of adding to it, there is no integration.
 - **PowerShell** runs the script after your profile, with `-NoExit -Command`. This is skipped when the shell's command line already runs a command or a file.
