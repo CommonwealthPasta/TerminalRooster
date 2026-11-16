@@ -7,6 +7,7 @@ use termroost_core::{AgentKind, Axis, PaneId, Tab};
 use crate::app::{App, Message};
 use crate::keymap::Action;
 use crate::notify::Category;
+use crate::side_panel::SideTab;
 use crate::sidebar::{BOLD, branch_label, icon_button, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
 use crate::theme;
@@ -40,13 +41,15 @@ impl App {
         };
 
         let open: usize = s.tasks_of(project.id).filter(|t| !t.done).count();
-        let tasks_toggle: Element<'_, Message> = if self.prefs.tasks_open {
+        // While the right panel is hidden, buttons bring it back on either tab.
+        let panel_buttons: Element<'_, Message> = if self.prefs.panel_open {
             space::horizontal().width(0).into()
         } else {
-            button(text(format!("Tasks ({open})")).size(12))
-                .padding([3, 10])
-                .style(button::secondary)
-                .on_press(Message::ToggleTasks)
+            let show = |label: String, tab: SideTab| {
+                button(text(label).size(12)).padding([3, 10]).style(button::secondary).on_press(Message::ShowPanel(tab))
+            };
+            row![show(format!("Tasks ({open})"), SideTab::Tasks), show("Files".into(), SideTab::Files)]
+                .spacing(6)
                 .into()
         };
         let git = self.git_of(tab);
@@ -69,7 +72,7 @@ impl App {
                 tooltip::Position::Bottom,
             ));
         }
-        let header = header.push(tasks_toggle).spacing(10).align_y(Alignment::Center).padding([4, 10]);
+        let header = header.push(panel_buttons).spacing(10).align_y(Alignment::Center).padding([4, 10]);
 
         let mut content = column![header];
         let banners = [

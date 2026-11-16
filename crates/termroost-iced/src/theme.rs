@@ -98,6 +98,36 @@ pub fn add_item_button(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A tab of the right panel's header.
+pub fn panel_tab(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let p = theme.extended_palette();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: if selected {
+                Some(Background::Color(p.primary.weak.color))
+            } else {
+                hovered.then_some(Background::Color(p.background.strong.color))
+            },
+            text_color: if selected { p.primary.weak.text } else { p.background.base.text },
+            border: Border::default().rounded(4),
+            ..button::Style::default()
+        }
+    }
+}
+
+/// A line of the file tree: plain until hovered.
+pub fn tree_row(theme: &Theme, status: button::Status) -> button::Style {
+    let p = theme.extended_palette();
+    button::Style {
+        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+            .then_some(Background::Color(p.background.strong.color)),
+        text_color: p.background.base.text,
+        border: Border::default().rounded(3),
+        ..button::Style::default()
+    }
+}
+
 pub fn badge(theme: &Theme) -> container::Style {
     let p = theme.extended_palette();
     container::Style {

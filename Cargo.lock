@@ -3435,6 +3435,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tauri-winrt-notification",
+ "tempfile",
  "termroost-core",
  "tracing",
  "tracing-appender",

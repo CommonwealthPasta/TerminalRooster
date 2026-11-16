@@ -14,9 +14,11 @@ use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
+use crate::files::{FilesMsg, FilesState};
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
+use crate::side_panel::SideTab;
 use crate::terminal_view::{self, KeyboardFocus};
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
@@ -37,7 +39,11 @@ pub const DIALOG_FIRST_INPUT: &str = "dialog-first-input";
 #[serde(default)]
 pub struct Prefs {
     pub font_size: f32,
-    pub tasks_open: bool,
+    /// The right panel is shown (its old name is from when it only held tasks).
+    #[serde(rename = "tasks_open")]
+    pub panel_open: bool,
+    /// What the right panel shows.
+    pub side_tab: SideTab,
     pub show_done: bool,
     pub tasks_this_tab_only: bool,
     pub window: Option<WindowGeom>,
@@ -70,7 +76,8 @@ impl Default for Prefs {
     fn default() -> Self {
         Self {
             font_size: theme::DEFAULT_FONT_SIZE,
-            tasks_open: true,
+            panel_open: true,
+            side_tab: SideTab::Tasks,
             show_done: true,
             tasks_this_tab_only: false,
             window: None,
@@ -321,7 +328,12 @@ pub enum Message {
     RestartPane(PaneId),
     StartAgent(PaneId, AgentKind),
 
-    ToggleTasks,
+    /// Show the right panel on this tab, or hide it if it already shows it.
+    TogglePanel(SideTab),
+    /// Show the right panel on this tab.
+    ShowPanel(SideTab),
+    ClosePanel,
+    Files(FilesMsg),
     NewTaskInput(String),
     AddTask,
     TaskDone(TaskId, bool),
@@ -373,6 +385,8 @@ pub struct App {
     pub(crate) dialog: Option<Dialog>,
     pub(crate) new_task: String,
     pub(crate) task_edit: Option<(TaskId, String)>,
+    /// The folders read for the Files tab.
+    pub(crate) files: FilesState,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     pub(crate) error: Option<String>,
@@ -473,6 +487,7 @@ impl App {
             dialog: None,
             new_task: String::new(),
             task_edit: None,
+            files: FilesState::default(),
             activity: HashSet::new(),
             error: None,
             notice: None,
@@ -733,7 +748,10 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
         self.sync_attention();
-        task
+        match self.ensure_files_root() {
+            Some(read) => Task::batch([task, read]),
+            None => task,
+        }
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -1374,14 +1392,28 @@ impl App {
                 return self.focus_active();
             }
 
-            Message::ToggleTasks => {
-                self.prefs.tasks_open = !self.prefs.tasks_open;
-                self.mark_prefs();
-                if self.prefs.tasks_open {
-                    return operation::focus(TASK_INPUT);
+            Message::TogglePanel(tab) => {
+                if self.prefs.panel_open && self.prefs.side_tab == tab {
+                    return self.update(Message::ClosePanel);
                 }
+                return self.update(Message::ShowPanel(tab));
+            }
+            Message::ShowPanel(tab) => {
+                self.prefs.panel_open = true;
+                self.prefs.side_tab = tab;
+                self.mark_prefs();
+                return match tab {
+                    SideTab::Tasks => operation::focus(TASK_INPUT),
+                    // Looking at files doesn't take the keyboard from the terminal.
+                    SideTab::Files => self.focus_active(),
+                };
+            }
+            Message::ClosePanel => {
+                self.prefs.panel_open = false;
+                self.mark_prefs();
                 return self.focus_active();
             }
+            Message::Files(msg) => return self.update_files(msg),
             Message::NewTaskInput(v) => self.new_task = v,
             Message::AddTask => {
                 let title = std::mem::take(&mut self.new_task);
@@ -1850,7 +1882,8 @@ impl App {
                     return self.update(Message::FocusPane(target));
                 }
             }
-            Action::ToggleTasks => return self.update(Message::ToggleTasks),
+            Action::ToggleTasks => return self.update(Message::TogglePanel(SideTab::Tasks)),
+            Action::ToggleFiles => return self.update(Message::TogglePanel(SideTab::Files)),
             Action::FontBigger | Action::FontSmaller | Action::FontReset => {
                 self.prefs.font_size = match action {
                     Action::FontBigger => (self.prefs.font_size + 1.0).min(32.0),
@@ -1876,8 +1909,8 @@ impl App {
         } else {
             let terminals = self.drop_zone(self.view_main());
             let mut main = row![self.view_projects(), self.view_tabs(), terminals].height(Length::Fill);
-            if self.prefs.tasks_open && self.core.state().selected_project.is_some() {
-                main = main.push(self.view_tasks());
+            if self.prefs.panel_open && self.core.state().selected_project.is_some() {
+                main = main.push(self.view_side_panel());
             }
             // The second layer shows a dragged task next to the pointer.
             container(stack![main, self.view_task_drag()]).width(Length::Fill).height(Length::Fill).into()

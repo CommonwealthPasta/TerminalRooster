@@ -6,6 +6,7 @@ mod color_picker;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod dialogs;
+mod files;
 mod keymap;
 mod layout_conv;
 mod logging;
@@ -14,6 +15,7 @@ mod on_escape;
 mod panes;
 mod reorder;
 mod settings;
+mod side_panel;
 mod sidebar;
 mod tasks;
 mod terminal_view;
