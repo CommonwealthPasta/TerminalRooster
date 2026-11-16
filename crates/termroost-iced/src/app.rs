@@ -126,7 +126,7 @@ pub enum Dialog {
     CodexTrust(termroost_core::TerminalHandle),
     /// Says once what was carried over from TermRoost, the app's old name.
     Renamed(termroost_core::Renamed),
-    /// Make a git worktree and move the session into it.
+    /// Switch the session to another git worktree, or make one.
     Worktree(Box<WorktreeForm>),
 }
 

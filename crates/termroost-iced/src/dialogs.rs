@@ -30,10 +30,10 @@ fn actions<'a>(confirm: &'a str, danger: bool) -> Element<'a, Message> {
     .into()
 }
 
-fn modal<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+fn modal<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {
     opaque(
         mouse_area(
-            center(opaque(container(content).padding(20).width(480).style(theme::modal_card)))
+            center(opaque(container(content).padding(20).width(width).style(theme::modal_card)))
                 .style(theme::modal_backdrop),
         )
         .on_press(Message::DialogCancel),
@@ -261,6 +261,8 @@ impl App {
                 .into()
             }
         };
-        modal(container(content).width(Length::Fill).align_x(Alignment::Start).into())
+        // The worktree list needs room for a path and its buttons.
+        let width = if matches!(dialog, Dialog::Worktree(_)) { 600.0 } else { 480.0 };
+        modal(container(content).width(Length::Fill).align_x(Alignment::Start).into(), width)
     }
 }

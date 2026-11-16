@@ -56,13 +56,13 @@ impl App {
         header = header.push(muted_text(short_dir(&s.tab_working_dir(tab), 70)).wrapping(text::Wrapping::None));
         header = header.push(space::horizontal());
         if git.is_some() {
-            let new_worktree = button(text("New worktree").size(12))
+            let worktrees = button(text("Worktrees").size(12))
                 .padding([3, 10])
                 .style(button::secondary)
                 .on_press(Message::Worktree(WorktreeMsg::Open));
             header = header.push(tooltip(
-                new_worktree,
-                container(text("Make a git worktree beside this repository and move this session into it").size(12))
+                worktrees,
+                container(text("Switch this session to another git worktree, or make a new one").size(12))
                     .padding([4, 8])
                     .style(container::rounded_box),
                 tooltip::Position::Bottom,
