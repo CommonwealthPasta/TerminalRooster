@@ -16,7 +16,7 @@
 //!
 //! The detector walks each terminal's process tree (the shell and everything
 //! below it) and looks every process up in those records. So agents are found
-//! whether they were started from TermRoost or typed by hand, and a new
+//! whether they were started from TerminalRooster or typed by hand, and a new
 //! session (`/clear`, `/new`, `/resume …`) is picked up on the next scan.
 
 use std::collections::{HashMap, HashSet, VecDeque};

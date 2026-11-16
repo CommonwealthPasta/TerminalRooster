@@ -4,7 +4,7 @@ version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Build automation for TermRoost (packaging)"
+description = "Build automation for TerminalRooster (packaging)"
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

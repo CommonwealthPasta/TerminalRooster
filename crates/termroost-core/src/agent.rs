@@ -2,7 +2,7 @@
 //!
 //! `--continue` / `resume --last` resume the most recent session in a
 //! directory, which is wrong when several agents work in the same project. So
-//! TermRoost owns the session id instead:
+//! TerminalRooster owns the session id instead:
 //!
 //! * Claude Code and Grok accept `--session-id <uuid>` at launch, so the id is
 //!   generated up front and resumed with `--resume <uuid>`.

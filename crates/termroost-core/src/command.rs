@@ -74,7 +74,7 @@ pub enum Command {
         pane: PaneId,
         command: Option<String>,
     },
-    /// Launches a coding agent in the pane's shell with a session id TermRoost
+    /// Launches a coding agent in the pane's shell with a session id TerminalRooster
     /// tracks, so the exact session can be resumed after a restart.
     StartAgent {
         pane: PaneId,

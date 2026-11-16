@@ -1,20 +1,25 @@
-//! Build automation for TermRoost.
+//! Build automation for TerminalRooster.
 //!
 //! ```text
-//! cargo xtask package [deb|rpm|all]   build release packages into dist/
+//! cargo xtask package [deb|rpm|all|windows]   build release packages into dist/
 //! ```
 //!
-//! Packaging builds the release binary, stages every installed file under
+//! With no format, Windows builds the installer and other systems build the
+//! `.deb` and `.rpm` (`all`).
+//!
+//! Linux packaging builds the release binary, stages every installed file under
 //! `target/release/packaging-root/` (binary, desktop entry, AppStream metadata and the
 //! hicolor icons from `packaging/icons/`), then runs `cargo deb`
 //! and `cargo generate-rpm`, whose file lists live in
 //! `crates/termroost-iced/Cargo.toml`.
+//!
+//! The Windows installer is built by NSIS from `packaging/windows/terminalrooster.nsi`.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-const APP_ID: &str = "io.github.Davenport_Physics.TermRoost";
-/// hicolor sizes shipped; each comes from `packaging/icons/termroost-<size>.png`.
+const APP_ID: &str = "io.github.Davenport_Physics.TerminalRooster";
+/// hicolor sizes shipped; each comes from `packaging/icons/terminalrooster-<size>.png`.
 const ICON_SIZES: [u32; 10] = [16, 24, 32, 48, 64, 96, 128, 192, 256, 512];
 
 type Result<T> = std::result::Result<T, String>;
@@ -22,11 +27,13 @@ type Result<T> = std::result::Result<T, String>;
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["package"] if cfg!(windows) => package_windows(),
         ["package"] | ["package", "all"] => package(true, true),
         ["package", "deb"] => package(true, false),
         ["package", "rpm"] => package(false, true),
+        ["package", "windows"] => package_windows(),
         _ => {
-            eprintln!("usage: cargo xtask package [deb|rpm|all]");
+            eprintln!("usage: cargo xtask package [deb|rpm|all|windows]");
             return ExitCode::from(2);
         }
     };
@@ -115,6 +122,63 @@ fn package(deb: bool, rpm: bool) -> Result<()> {
     Ok(())
 }
 
+/// Builds `dist/TerminalRooster-<version>-<arch>-setup.exe` with NSIS.
+fn package_windows() -> Result<()> {
+    if !cfg!(windows) {
+        return Err("the Windows installer packages the native terminalrooster.exe; build it on Windows".into());
+    }
+    let makensis = find_makensis()?;
+    let root = root();
+    let version = version()?;
+    let quad = version_quad(&version)?;
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+
+    run(cargo().args(["build", "--release", "--locked", "-p", "termroost-iced"]))?;
+
+    let dist = root.join("dist");
+    std::fs::create_dir_all(&dist).map_err(|e| e.to_string())?;
+    let out = dist.join(format!("TerminalRooster-{version}-{arch}-setup.exe"));
+    run(Command::new(&makensis)
+        .arg("/V2")
+        .arg(format!("/DVERSION={version}"))
+        .arg(format!("/DVERSION_QUAD={quad}"))
+        .arg(format!("/DROOT={}", root.display()))
+        .arg(format!("/DOUTFILE={}", out.display()))
+        .arg(root.join("packaging/windows/terminalrooster.nsi")))?;
+    eprintln!("\ninstaller: {}", out.display());
+    Ok(())
+}
+
+/// `makensis` from `MAKENSIS`, `PATH` or the default NSIS install folders.
+fn find_makensis() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("MAKENSIS") {
+        return Ok(path.into());
+    }
+    if Command::new("makensis").arg("/VERSION").output().is_ok_and(|o| o.status.success()) {
+        return Ok("makensis".into());
+    }
+    ["ProgramFiles(x86)", "ProgramFiles"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|dir| Path::new(&dir).join("NSIS").join("makensis.exe"))
+        .find(|p| p.is_file())
+        .ok_or_else(|| "NSIS is not installed; run `winget install NSIS.NSIS` or set MAKENSIS to makensis.exe".into())
+}
+
+/// Windows version resources need four numbers: `0.2.0-beta.1` becomes `0.2.0.0`.
+fn version_quad(version: &str) -> Result<String> {
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.len() != 3 || parts.iter().any(|p| p.parse::<u16>().is_err()) {
+        return Err(format!("version {version} is not MAJOR.MINOR.PATCH"));
+    }
+    Ok(format!("{core}.0"))
+}
+
 /// Lays out every installed file under `target/release/packaging-root`.
 fn stage(root: &Path) -> Result<()> {
     let stage = root.join("target/release/packaging-root");
@@ -127,8 +191,8 @@ fn stage(root: &Path) -> Result<()> {
         std::fs::copy(&from, &to).map_err(|e| format!("copying {}: {e}", from.display()))?;
         Ok(())
     };
-    let exe = if cfg!(windows) { "termroost.exe" } else { "termroost" };
-    copy(root.join("target/release").join(exe), "usr/bin/termroost")?;
+    let exe = if cfg!(windows) { "terminalrooster.exe" } else { "terminalrooster" };
+    copy(root.join("target/release").join(exe), "usr/bin/terminalrooster")?;
     copy(root.join(format!("packaging/linux/{APP_ID}.desktop")), &format!("usr/share/applications/{APP_ID}.desktop"))?;
     copy(
         root.join(format!("packaging/linux/{APP_ID}.metainfo.xml")),
@@ -136,7 +200,7 @@ fn stage(root: &Path) -> Result<()> {
     )?;
 
     for size in ICON_SIZES {
-        let src = root.join(format!("packaging/icons/termroost-{size}.png"));
+        let src = root.join(format!("packaging/icons/terminalrooster-{size}.png"));
         let icon = image::open(&src).map_err(|e| format!("{}: {e}", src.display()))?;
         if (icon.width(), icon.height()) != (size, size) {
             return Err(format!("{} is {}x{}, expected {size}x{size}", src.display(), icon.width(), icon.height()));

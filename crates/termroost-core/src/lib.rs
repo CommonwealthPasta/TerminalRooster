@@ -1,4 +1,4 @@
-//! GUI-agnostic core of TermRoost.
+//! GUI-agnostic core of TerminalRooster.
 //!
 //! A front end talks to [`Core`] only:
 //!
@@ -69,6 +69,15 @@ impl Default for Config {
     }
 }
 
+/// What [`Core::open`] carried over from TermRoost, the app's previous name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Renamed {
+    /// TermRoost's data directory, whose contents were moved into the data directory.
+    pub moved_from: Option<PathBuf>,
+    /// TermRoost's Codex hook was rewritten, so Codex needs it trusted again.
+    pub codex_hook_updated: bool,
+}
+
 pub struct Core {
     state: AppState,
     store: Store,
@@ -84,28 +93,37 @@ pub struct Core {
     autosave: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
     data_dir: PathBuf,
     homes: AgentHomes,
+    renamed: Renamed,
     _lock: InstanceLock,
 }
 
 impl Core {
     /// Opens the database (creating it if needed), restores the previous state
-    /// and starts the terminals of the visible tab.
+    /// and starts the terminals of the visible tab. With the default data
+    /// directory, TermRoost's data is moved over first.
     pub fn open(config: Config) -> Result<Core> {
+        let mut renamed = Renamed::default();
         let data_dir = match config.data_dir {
             Some(d) => d,
             None => {
                 let dir = paths::default_data_dir()?;
                 if std::env::var_os(paths::DATA_DIR_ENV).is_none()
                     && let Some(legacy) = paths::legacy_data_dir()
+                    && paths::migrate_legacy(&legacy, &dir)?
                 {
-                    paths::migrate_legacy(&legacy, &dir)?;
+                    renamed.moved_from = Some(legacy);
                 }
                 dir
             }
         };
         std::fs::create_dir_all(&data_dir)?;
         let lock = InstanceLock::acquire(&data_dir)?;
-        let (store, mut state) = Store::open(&data_dir.join("termroost.db"))?;
+        // Checked on every start, so a failed rewrite is retried next time.
+        match codex_hook::migrate(&config.agent_homes.codex, &data_dir) {
+            Ok(updated) => renamed.codex_hook_updated = updated,
+            Err(e) => tracing::warn!(error = %e, "could not update TermRoost's Codex hook"),
+        }
+        let (store, mut state) = Store::open(&data_dir.join(paths::DB_FILE))?;
 
         let mut next_id = max_id(&state) + 1;
         let repairs = repair(&mut state, &mut next_id);
@@ -143,6 +161,7 @@ impl Core {
             autosave: Some((stop_tx, autosave)),
             data_dir,
             homes: config.agent_homes,
+            renamed,
             _lock: lock,
         };
         tracing::info!(
@@ -167,6 +186,11 @@ impl Core {
         &self.data_dir
     }
 
+    /// What this start carried over from TermRoost (usually nothing).
+    pub fn renamed(&self) -> &Renamed {
+        &self.renamed
+    }
+
     /// Receiver of asynchronous events (clone it freely).
     pub fn events(&self) -> async_channel::Receiver<Event> {
         self.events_rx.clone()
@@ -183,24 +207,24 @@ impl Core {
         }
     }
 
-    /// Whether Codex is installed and TermRoost's Codex hook is set up.
+    /// Whether Codex is installed and TerminalRooster's Codex hook is set up.
     pub fn codex_hook_status(&self) -> CodexHookStatus {
         codex_hook::status(&self.homes.codex)
     }
 
-    /// When the Codex hook last reported (since TermRoost started).
+    /// When the Codex hook last reported (since TerminalRooster started).
     pub fn codex_hook_last_report(&self) -> Option<SystemTime> {
         *self.bg.last_codex_report.lock().unwrap()
     }
 
-    /// Adds TermRoost's hook to Codex (`~/.codex/hooks.json`) so Codex
+    /// Adds TerminalRooster's hook to Codex (`~/.codex/hooks.json`) so Codex
     /// sessions are tracked exactly. Codex asks the user to trust it once
     /// (`/hooks`). Returns the file that was changed.
     pub fn install_codex_hook(&self) -> Result<PathBuf> {
         Ok(codex_hook::install(&self.homes.codex, &self.data_dir)?)
     }
 
-    /// Removes TermRoost's Codex hook, leaving any other hooks in place.
+    /// Removes TerminalRooster's Codex hook, leaving any other hooks in place.
     pub fn remove_codex_hook(&self) -> Result<()> {
         Ok(codex_hook::remove(&self.homes.codex)?)
     }
@@ -704,8 +728,8 @@ impl Core {
         let shell = session::shell::resolve(project.shell.as_deref(), self.state.settings.default_shell.as_deref());
         let cwd = self.state.tab_working_dir(tab);
         let mut env = base_env();
-        env.insert("TERMROOST_PANE_ID".to_owned(), pane.to_string());
-        env.insert("TERMROOST_PROJECT".to_owned(), project.name.clone());
+        env.insert("TERMINALROOSTER_PANE_ID".to_owned(), pane.to_string());
+        env.insert("TERMINALROOSTER_PROJECT".to_owned(), project.name.clone());
         Some(SpawnSpec { shell, cwd, env })
     }
 
@@ -834,7 +858,7 @@ fn base_env() -> HashMap<String, String> {
     #[cfg(not(windows))]
     env.insert("TERM".to_owned(), "xterm-256color".to_owned());
     env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
-    env.insert("TERM_PROGRAM".to_owned(), "termroost".to_owned());
+    env.insert("TERM_PROGRAM".to_owned(), "terminalrooster".to_owned());
     env
 }
 

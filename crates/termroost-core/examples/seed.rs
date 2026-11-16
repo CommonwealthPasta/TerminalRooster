@@ -1,6 +1,6 @@
 //! Fills a data directory with demo projects, tabs, splits and tasks.
 //!
-//! Usage: `TERMROOST_DATA_DIR=/tmp/termroost-demo cargo run -p termroost-core --example seed -- <dir>...`
+//! Usage: `TERMINALROOSTER_DATA_DIR=/tmp/terminalrooster-demo cargo run -p termroost-core --example seed -- <dir>...`
 //! Each given directory becomes a project (at least one is required).
 
 use std::time::Duration;

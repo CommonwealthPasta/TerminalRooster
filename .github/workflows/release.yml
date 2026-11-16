@@ -45,7 +45,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: termroost-linux-packages
+          name: terminalrooster-linux-packages
           path: |
             dist/*.deb
             dist/*.rpm

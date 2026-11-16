@@ -1,4 +1,4 @@
-//! Plain data types describing everything TermRoost persists.
+//! Plain data types describing everything TerminalRooster persists.
 //!
 //! These are the read model handed to a GUI via [`crate::Core::state`]. They
 //! contain no terminal or database handles, so any front end can render them.

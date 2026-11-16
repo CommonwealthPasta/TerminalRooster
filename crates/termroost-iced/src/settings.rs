@@ -79,7 +79,7 @@ impl App {
             self.shortcuts_section(st),
             muted_text(format!(
                 "Everything is stored in {}. Logs are in {}.",
-                self.core.data_dir().join("termroost.db").display(),
+                self.core.data_dir().join(termroost_core::paths::DB_FILE).display(),
                 crate::logging::log_dir(self.core.data_dir()).display()
             )),
         ]
@@ -342,7 +342,15 @@ impl App {
                     let at: chrono::DateTime<chrono::Local> = at.into();
                     (format!("Active · last report at {}.", at.format("%H:%M:%S")), vec![remove])
                 }
-                (true, None) => ("Added and trusted.".to_owned(), vec![remove]),
+                // The trust entry may be for an earlier version of the hook (e.g.
+                // TermRoost's), so offer to trust it again until a report shows it runs.
+                (true, None) => (
+                    "Added and trusted.".to_owned(),
+                    vec![
+                        small("Trust again…").style(button::secondary).on_press(Message::TrustCodexHook).into(),
+                        remove,
+                    ],
+                ),
                 (false, None) => (
                     "Added, but not trusted in Codex yet.".to_owned(),
                     vec![
@@ -356,7 +364,7 @@ impl App {
             "Integrations",
             column![
                 text("Codex session hook").size(14).font(BOLD),
-                muted_text("Lets TermRoost resume the right Codex conversation in each terminal."),
+                muted_text("Lets TerminalRooster resume the right Codex conversation in each terminal."),
                 text(status).size(13),
                 row(actions).spacing(8),
             ]
