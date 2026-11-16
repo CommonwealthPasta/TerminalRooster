@@ -4,6 +4,7 @@ use iced::widget::{button, center, column, container, pane_grid, pick_list, row,
 use iced::{Alignment, Element, Length};
 use termroost_core::{AgentKind, Axis, PaneId, Tab};
 
+use crate::agent_icon::agent_icon;
 use crate::app::{App, Message};
 use crate::keymap::Action;
 use crate::notify::Category;
@@ -120,9 +121,12 @@ impl App {
         };
 
         let title = handle.as_ref().and_then(|h| h.title()).unwrap_or_else(|| "Terminal".to_owned());
-        let agent = s.pane(pane).and_then(|p| p.agent.as_ref()).map(|a| match &a.session_id {
-            Some(id) => format!("{} · {}", a.kind.label(), &id[..id.len().min(8)]),
-            None => format!("{} · new session", a.kind.label()),
+        let agent = s.pane(pane).and_then(|p| p.agent.as_ref()).map(|a| {
+            let label = match &a.session_id {
+                Some(id) => format!("{} · {}", a.kind.label(), &id[..id.len().min(8)]),
+                None => format!("{} · new session", a.kind.label()),
+            };
+            (a.kind, label)
         });
         let mut title_row = row![].spacing(8).align_y(Alignment::Center);
         // An alert the user hasn't seen, first so a long title can't hide it.
@@ -140,8 +144,11 @@ impl App {
             );
         }
         title_row = title_row.push(text(title).size(12).wrapping(text::Wrapping::None));
-        if let Some(agent) = agent {
-            title_row = title_row.push(container(text(agent).size(11)).padding([1, 6]).style(theme::badge));
+        if let Some((kind, label)) = agent {
+            // Drawn on `theme::badge`, so one-color logos take its text color.
+            let icon = agent_icon(kind, 12.0, |t| t.extended_palette().secondary.base.text);
+            let badge = row![icon, text(label).size(11)].spacing(4).align_y(Alignment::Center);
+            title_row = title_row.push(container(badge).padding([1, 6]).style(theme::badge));
         }
 
         let k = &self.keymap;
