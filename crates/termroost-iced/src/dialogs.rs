@@ -13,7 +13,7 @@ use crate::sidebar::{BOLD, muted_text};
 use crate::terminal_view::TerminalView;
 use crate::theme;
 
-fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+pub(crate) fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![text(label).size(12), input.into()].spacing(4).into()
 }
 
@@ -152,6 +152,7 @@ impl App {
                 .into()
             }
             Dialog::CodexTrust(handle) => return codex_window(handle, &self.keymap, self.prefs.font_size),
+            Dialog::Worktree(form) => self.view_worktree(form),
             Dialog::CodexHook => column![
                 text("Track Codex sessions?").size(18).font(BOLD),
                 text("Add a small hook to Codex so TerminalRooster always resumes the right conversation in each terminal.",)

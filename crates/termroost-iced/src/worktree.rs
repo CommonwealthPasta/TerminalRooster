@@ -1,0 +1,345 @@
+//! Making a git worktree from a session and moving the session into it.
+//!
+//! The worktree goes beside the repository (so on the same drive), named
+//! `<repository>-<branch>`. Typing a branch that another worktree has checked
+//! out moves the session there instead.
+
+use std::path::PathBuf;
+
+use iced::widget::{button, column, operation, row, space, text, text_input};
+use iced::{Element, Task};
+use termroost_core::git::{self, Branches, Head, Plan, Repo};
+use termroost_core::{Command, Outcome, TabId};
+
+use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message, expand_home};
+use crate::dialogs::field;
+use crate::sidebar::{BOLD, display_dir, muted_text};
+
+/// State of the "New worktree" dialog.
+#[derive(Clone, Debug)]
+pub struct WorktreeForm {
+    pub tab: TabId,
+    /// The session's directory when the dialog opened.
+    pub from: PathBuf,
+    pub repo: Repo,
+    pub head: Option<Head>,
+    pub branch: String,
+    /// Where a new branch starts; empty: the session's current commit.
+    pub base: String,
+    pub path: String,
+    /// The location was typed in, so it no longer follows the branch name.
+    pub path_edited: bool,
+    /// Read in the background when the dialog opens.
+    pub branches: Option<Result<Branches, String>>,
+    /// git is making the worktree.
+    pub creating: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum WorktreeMsg {
+    /// Open the dialog for the visible session.
+    Open,
+    Loaded(TabId, Result<Branches, String>),
+    Branch(String),
+    Base(String),
+    Path(String),
+    Submit,
+    Created {
+        tab: TabId,
+        path: PathBuf,
+        result: Result<(), String>,
+    },
+}
+
+impl WorktreeForm {
+    /// What submitting would do; `None` until there is a branch name and the
+    /// branches are known.
+    fn plan(&self) -> Option<Plan> {
+        let name = self.branch.trim();
+        match &self.branches {
+            Some(Ok(b)) if !name.is_empty() => Some(b.plan(name)),
+            _ => None,
+        }
+    }
+
+    /// The typed location; a relative one is taken beside the working tree.
+    fn target(&self) -> Option<PathBuf> {
+        let typed = self.path.trim();
+        if typed.is_empty() {
+            return None;
+        }
+        let path = expand_home(typed);
+        if path.is_absolute() { Some(path) } else { self.repo.worktree.parent().map(|p| p.join(path)) }
+    }
+
+    /// Whether the session is on `branch` already. A branch is checked out in
+    /// one working tree at most, so no paths need comparing.
+    fn on_branch(&self, branch: &str) -> bool {
+        matches!(&self.head, Some(Head::Branch(b)) if b == branch)
+    }
+
+    /// The commit a new branch starts from, as shown to the user.
+    fn base_label(&self) -> String {
+        match (self.base.trim(), &self.head) {
+            ("", Some(Head::Branch(b))) => b.clone(),
+            ("", Some(Head::Detached(c))) => c.clone(),
+            ("", None) => "HEAD".into(),
+            (base, _) => base.to_owned(),
+        }
+    }
+
+    fn can_submit(&self) -> bool {
+        match self.plan() {
+            _ if self.creating => false,
+            None => false,
+            Some(Plan::CheckedOut(_)) => !self.on_branch(self.branch.trim()),
+            Some(_) => self.target().is_some(),
+        }
+    }
+}
+
+fn msg(m: WorktreeMsg) -> Message {
+    Message::Worktree(m)
+}
+
+impl App {
+    pub(crate) fn update_worktree(&mut self, m: WorktreeMsg) -> Task<Message> {
+        match m {
+            WorktreeMsg::Open => return self.open_worktree_dialog(),
+            WorktreeMsg::Loaded(tab, result) => {
+                if let Some(f) = self.worktree_form().filter(|f| f.tab == tab) {
+                    f.branches = Some(result);
+                }
+            }
+            WorktreeMsg::Branch(v) => {
+                if let Some(f) = self.worktree_form() {
+                    if !f.path_edited {
+                        let name = v.trim();
+                        let suggested = (!name.is_empty()).then(|| f.repo.suggest_worktree_path(name)).flatten();
+                        f.path = suggested.map(|p| p.display().to_string()).unwrap_or_default();
+                    }
+                    f.branch = v;
+                    f.error = None;
+                }
+            }
+            WorktreeMsg::Base(v) => {
+                if let Some(f) = self.worktree_form() {
+                    f.base = v;
+                }
+            }
+            WorktreeMsg::Path(v) => {
+                if let Some(f) = self.worktree_form() {
+                    f.path_edited = !v.trim().is_empty();
+                    f.path = v;
+                    f.error = None;
+                }
+            }
+            WorktreeMsg::Submit => return self.submit_worktree(),
+            WorktreeMsg::Created { tab, path, result } => {
+                let Some(f) = self.worktree_form().filter(|f| f.tab == tab) else { return Task::none() };
+                f.creating = false;
+                match result {
+                    Ok(()) => {
+                        let dir = f.repo.same_place_in(&f.from, &path);
+                        tracing::info!(%tab, path = %path.display(), "worktree created");
+                        return self.move_session(tab, dir);
+                    }
+                    Err(e) => {
+                        tracing::warn!(%tab, path = %path.display(), error = %e, "creating a worktree failed");
+                        f.error = Some(e);
+                    }
+                }
+            }
+        }
+        Task::none()
+    }
+
+    fn worktree_form(&mut self) -> Option<&mut WorktreeForm> {
+        match &mut self.dialog {
+            Some(Dialog::Worktree(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    fn open_worktree_dialog(&mut self) -> Task<Message> {
+        let s = self.core.state();
+        let Some(tab) = s.active_tab() else { return Task::none() };
+        let from = s.tab_working_dir(tab);
+        let Some(status) = git::Status::of(&from) else {
+            self.error = Some(format!("{} is not in a git repository.", display_dir(&from)));
+            return Task::none();
+        };
+        let tab = tab.id;
+        let repo = status.repo.clone();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(repo.branches());
+        });
+        self.dialog = Some(Dialog::Worktree(Box::new(WorktreeForm {
+            tab,
+            from,
+            repo: status.repo,
+            head: status.head,
+            branch: String::new(),
+            base: String::new(),
+            path: String::new(),
+            path_edited: false,
+            branches: None,
+            creating: false,
+            error: None,
+        })));
+        let loaded = Task::perform(async move { rx.recv().await.unwrap_or_else(|e| Err(e.to_string())) }, move |r| {
+            msg(WorktreeMsg::Loaded(tab, r))
+        });
+        Task::batch([loaded, operation::focus(DIALOG_FIRST_INPUT)])
+    }
+
+    fn submit_worktree(&mut self) -> Task<Message> {
+        let Some(f) = self.worktree_form() else { return Task::none() };
+        if !f.can_submit() {
+            return Task::none();
+        }
+        let tab = f.tab;
+        let branch = f.branch.trim().to_owned();
+        let plan = f.plan().expect("checked by can_submit");
+        if let Plan::CheckedOut(dir) = &plan {
+            let dir = f.repo.same_place_in(&f.from, dir);
+            return self.move_session(tab, dir);
+        }
+        let path = f.target().expect("checked by can_submit");
+        let base = (plan == Plan::NewBranch).then(|| f.base.trim().to_owned()).filter(|b| !b.is_empty());
+        f.creating = true;
+        f.error = None;
+        let repo = f.repo.clone();
+        let (tx, rx) = async_channel::bounded(1);
+        let target = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(repo.add_worktree(&target, &branch, &plan, base.as_deref()));
+        });
+        Task::perform(async move { rx.recv().await.unwrap_or_else(|e| Err(e.to_string())) }, move |result| {
+            msg(WorktreeMsg::Created { tab, path: path.clone(), result })
+        })
+    }
+
+    /// Moves the session to `dir`, closes the dialog and says which terminals
+    /// stayed behind.
+    fn move_session(&mut self, tab: TabId, dir: PathBuf) -> Task<Message> {
+        self.dialog = None;
+        if let Some(Outcome::Relocated { left_running }) =
+            self.dispatch(Command::RelocateTab { tab, working_dir: dir.clone() })
+        {
+            self.notice = match left_running {
+                0 => None,
+                1 => Some(format!(
+                    "Moved to {}. One terminal is still running a program, so it stays in the old directory; restart \
+                     it to move it.",
+                    display_dir(&dir)
+                )),
+                n => Some(format!(
+                    "Moved to {}. {n} terminals are still running programs, so they stay in the old directory; \
+                     restart them to move them.",
+                    display_dir(&dir)
+                )),
+            };
+        }
+        Task::batch([self.read_git(), self.focus_active()])
+    }
+
+    pub(crate) fn view_worktree<'a>(&'a self, f: &'a WorktreeForm) -> Element<'a, Message> {
+        let s = self.core.state();
+        let session = s.tab(f.tab).map(|t| t.title.as_str()).unwrap_or("This session");
+        let on = f.head.as_ref().map(|h| h.to_string()).unwrap_or_else(|| "an unknown commit".into());
+        let name = f.branch.trim();
+        let plan = f.plan();
+
+        let (hint, problem) = match (&f.branches, &plan) {
+            (None, _) => ("Looking up branches…".to_owned(), false),
+            (Some(Err(e)), _) => (e.clone(), true),
+            (_, None) => ("A new branch, or one that already exists.".to_owned(), false),
+            (_, Some(Plan::NewBranch)) => (format!("Creates the branch {name} from {}.", f.base_label()), false),
+            (_, Some(Plan::Existing)) => (format!("Checks out the existing branch {name}."), false),
+            (_, Some(Plan::Track(remote))) => (format!("Creates {name} tracking {remote}."), false),
+            (_, Some(Plan::CheckedOut(_))) if f.on_branch(name) => (format!("{session} is already on {name}."), true),
+            (_, Some(Plan::CheckedOut(dir))) => {
+                (format!("{name} is already checked out in {}. The session moves there.", display_dir(dir)), false)
+            }
+        };
+        let hint: Element<'_, Message> =
+            if problem { text(hint).size(12).style(text::danger).into() } else { muted_text(hint).size(12).into() };
+
+        let mut col = column![
+            text("New worktree").size(18).font(BOLD),
+            text(format!("{session} is on {on} in {}.", display_dir(&f.repo.worktree))).size(13),
+            column![
+                field(
+                    "Branch",
+                    text_input("feature/my-change", &f.branch)
+                        .id(DIALOG_FIRST_INPUT)
+                        .on_input(|v| msg(WorktreeMsg::Branch(v)))
+                        .on_submit(msg(WorktreeMsg::Submit))
+                        .padding(6),
+                ),
+                hint,
+            ]
+            .spacing(4),
+        ]
+        .spacing(12);
+
+        if plan == Some(Plan::NewBranch) {
+            col = col.push(field(
+                "Start from",
+                text_input(&f.base_label(), &f.base)
+                    .on_input(|v| msg(WorktreeMsg::Base(v)))
+                    .on_submit(msg(WorktreeMsg::Submit))
+                    .padding(6),
+            ));
+        }
+        let moving = matches!(plan, Some(Plan::CheckedOut(_)));
+        if !moving {
+            let beside = f.repo.worktree.parent().map(display_dir).unwrap_or_default();
+            col = col.push(
+                column![
+                    field(
+                        "Location",
+                        text_input(&format!("{beside}/…"), &f.path)
+                            .on_input(|v| msg(WorktreeMsg::Path(v)))
+                            .on_submit(msg(WorktreeMsg::Submit))
+                            .padding(6),
+                    ),
+                    muted_text("Beside the repository, so on the same drive. A relative path is taken from there.")
+                        .size(12),
+                ]
+                .spacing(4),
+            );
+        }
+        col = col.push(muted_text(
+            "The session then works there: idle terminals restart in it (keeping their scrollback); terminals \
+             running a program or an agent are left as they are.",
+        ));
+        if let Some(e) = &f.error {
+            col = col.push(text(e).size(13).style(text::danger));
+        }
+
+        let confirm = if f.creating {
+            "Creating…"
+        } else if moving {
+            "Move session"
+        } else {
+            "Create worktree"
+        };
+        let cancel = button(text("Cancel")).padding([6, 14]).style(button::secondary);
+        col.push(
+            row![
+                space::horizontal(),
+                if f.creating { cancel } else { cancel.on_press(Message::DialogCancel) },
+                button(text(confirm))
+                    .padding([6, 14])
+                    .style(button::primary)
+                    .on_press_maybe(f.can_submit().then(|| msg(WorktreeMsg::Submit))),
+            ]
+            .spacing(8),
+        )
+        .into()
+    }
+}

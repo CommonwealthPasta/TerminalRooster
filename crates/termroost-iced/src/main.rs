@@ -16,6 +16,7 @@ mod tasks;
 mod terminal_view;
 mod theme;
 mod themes;
+mod worktree;
 
 use std::sync::Mutex;
 

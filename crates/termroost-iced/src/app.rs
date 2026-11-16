@@ -19,6 +19,7 @@ use crate::layout_conv;
 use crate::terminal_view;
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
+use crate::worktree::{WorktreeForm, WorktreeMsg};
 
 /// How often the branches of the visible sessions are read again.
 const GIT_POLL: Duration = Duration::from_secs(3);
@@ -125,6 +126,8 @@ pub enum Dialog {
     CodexTrust(termroost_core::TerminalHandle),
     /// Says once what was carried over from TermRoost, the app's old name.
     Renamed(termroost_core::Renamed),
+    /// Make a git worktree and move the session into it.
+    Worktree(Box<WorktreeForm>),
 }
 
 /// State of the settings page while it is open.
@@ -283,8 +286,10 @@ pub enum Message {
     GitPoll,
     /// Where each session directory stands in git (`None`: not in a repository).
     GitStatus(Vec<(PathBuf, Option<git::Status>)>),
+    Worktree(WorktreeMsg),
 
     DismissError,
+    DismissNotice,
 }
 
 pub struct App {
@@ -300,6 +305,8 @@ pub struct App {
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     pub(crate) error: Option<String>,
+    /// Information worth a banner that is not an error.
+    pub(crate) notice: Option<String>,
     /// Git status of session directories, read in the background.
     pub(crate) git: HashMap<PathBuf, Option<git::Status>>,
     /// A periodic git read is running.
@@ -345,6 +352,7 @@ impl App {
             task_edit: None,
             activity: HashSet::new(),
             error: None,
+            notice: None,
             git: HashMap::new(),
             git_polling: false,
             themes,
@@ -459,7 +467,7 @@ impl App {
         Subscription::batch(subs)
     }
 
-    fn dispatch(&mut self, cmd: Command) -> Option<Outcome> {
+    pub(crate) fn dispatch(&mut self, cmd: Command) -> Option<Outcome> {
         match self.core.dispatch(cmd) {
             Ok(o) => Some(o),
             Err(e) => {
@@ -514,7 +522,7 @@ impl App {
     }
 
     /// Moves keyboard focus to the focused terminal of the visible tab.
-    fn focus_active(&self) -> Task<Message> {
+    pub(crate) fn focus_active(&self) -> Task<Message> {
         if self.dialog.is_some() || self.rename.is_some() || self.task_edit.is_some() {
             return Task::none();
         }
@@ -989,6 +997,8 @@ impl App {
             Message::DialogSubmit => return self.submit_dialog(),
             Message::DialogCancel => {
                 match &self.dialog {
+                    // git is making the worktree; the result moves the session.
+                    Some(Dialog::Worktree(f)) if f.creating => return Task::none(),
                     Some(Dialog::CodexHook) => {
                         // "Not now": don't ask again; Settings → Integrations offers it.
                         self.prefs.codex_hook_asked = true;
@@ -1174,7 +1184,9 @@ impl App {
                 self.git_polling = false;
                 self.git.extend(statuses);
             }
+            Message::Worktree(msg) => return self.update_worktree(msg),
             Message::DismissError => self.error = None,
+            Message::DismissNotice => self.notice = None,
         }
         Task::none()
     }
@@ -1235,6 +1247,10 @@ impl App {
             }
             Dialog::Renamed(renamed) if renamed.codex_hook_updated => return self.update(Message::TrustCodexHook),
             Dialog::Renamed(_) => {}
+            Dialog::Worktree(form) => {
+                self.dialog = Some(Dialog::Worktree(form));
+                return self.update_worktree(WorktreeMsg::Submit);
+            }
         }
         self.focus_active()
     }
@@ -1446,7 +1462,7 @@ fn cycle<T: Copy + PartialEq>(items: &[T], current: Option<T>, forward: bool) ->
     Some(items[if forward { (i + 1) % n } else { (i + n - 1) % n }])
 }
 
-fn expand_home(p: &str) -> PathBuf {
+pub(crate) fn expand_home(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~")
         && (rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
         && let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
