@@ -42,10 +42,16 @@ pub fn branch_label<'a>(head: &Head, size: f32, max: usize) -> Element<'a, Messa
     .into()
 }
 
+/// Width of the glyph in an [`icon_button`], and the padding on either side of it.
+const ICON_GLYPH_WIDTH: f32 = 18.0;
+const ICON_PADDING: f32 = 4.0;
+/// Width of an [`icon_button`].
+pub const ICON_BUTTON_WIDTH: f32 = ICON_GLYPH_WIDTH + 2.0 * ICON_PADDING;
+
 pub fn icon_button<'a>(label: &'a str, msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     tooltip(
-        button(text(label).size(14).align_x(Alignment::Center).width(18))
-            .padding([2, 4])
+        button(text(label).size(14).align_x(Alignment::Center).width(ICON_GLYPH_WIDTH))
+            .padding([2.0, ICON_PADDING])
             .style(theme::icon_button)
             .on_press(msg),
         container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),

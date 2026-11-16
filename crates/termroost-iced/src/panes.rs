@@ -1,17 +1,25 @@
 //! The terminal area: header plus the split pane grid of the visible tab.
 
 use iced::widget::{button, center, column, container, pane_grid, pick_list, row, space, text, tooltip};
-use iced::{Alignment, Element, Length};
+use iced::{Alignment, Element, Length, Padding};
 use termroost_core::{AgentKind, Axis, PaneId, Tab};
 
 use crate::agent_icon::agent_icon;
 use crate::app::{App, Message};
 use crate::keymap::Action;
+use crate::leave_room::leave_room;
 use crate::notify::Category;
-use crate::sidebar::{BOLD, branch_label, icon_button, muted_text, short_dir};
+use crate::sidebar::{BOLD, ICON_BUTTON_WIDTH, branch_label, icon_button, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
 use crate::theme;
 use crate::worktree::WorktreeMsg;
+
+/// Space between the buttons of a terminal's title bar.
+const CONTROL_SPACING: f32 = 2.0;
+/// Width of the two buttons narrow terminals get, which the title leaves room for.
+const COMPACT_CONTROLS_WIDTH: f32 = 2.0 * ICON_BUTTON_WIDTH + CONTROL_SPACING;
+/// Space between a terminal's title and its buttons.
+const TITLE_GAP: f32 = 8.0;
 
 impl App {
     pub(crate) fn view_main(&self) -> Element<'_, Message> {
@@ -128,9 +136,11 @@ impl App {
             };
             (a.kind, label)
         });
-        let mut title_row = row![].spacing(8).align_y(Alignment::Center);
-        // An alert the user hasn't seen, first so a long title can't hide it.
-        // It goes away when the user focuses this terminal.
+        // Nothing wraps; when space runs out the last item is cut off first, so
+        // they go in order of importance. The gap on the right keeps the title
+        // off the buttons.
+        let mut title_row = row![].spacing(8).align_y(Alignment::Center).padding(Padding::ZERO.right(TITLE_GAP));
+        // An alert the user hasn't seen. It goes away when the user focuses this terminal.
         let notice = self.notices.get(&pane).and_then(|n| n.first());
         if let Some(n) = notice {
             let label = match &n.detail {
@@ -140,16 +150,19 @@ impl App {
             title_row = title_row.push(
                 container(text(label).size(11).wrapping(text::Wrapping::None))
                     .padding([1, 6])
-                    .style(theme::notice_chip(n.category)),
+                    .style(theme::notice_chip(n.category))
+                    .clip(true),
             );
         }
-        title_row = title_row.push(text(title).size(12).wrapping(text::Wrapping::None));
         if let Some((kind, label)) = agent {
             // Drawn on `theme::badge`, so one-color logos take its text color.
             let icon = agent_icon(kind, 12.0, |t| t.extended_palette().secondary.base.text);
-            let badge = row![icon, text(label).size(11)].spacing(4).align_y(Alignment::Center);
-            title_row = title_row.push(container(badge).padding([1, 6]).style(theme::badge));
+            // The label is cut inside the badge's padding, so a short badge keeps its rounded end.
+            let label = container(text(label).size(11).wrapping(text::Wrapping::None)).clip(true);
+            let badge = row![icon, label].spacing(4).align_y(Alignment::Center);
+            title_row = title_row.push(container(badge).padding([1, 6]).style(theme::badge).clip(true));
         }
+        title_row = title_row.push(container(text(title).size(12).wrapping(text::Wrapping::None)).clip(true));
 
         let k = &self.keymap;
         let full = row![
@@ -162,17 +175,17 @@ impl App {
             icon_button("⊟", Message::Split(pane, Axis::Horizontal), k.hint("Split down", Action::SplitDown)),
             icon_button("✕", Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
         ]
-        .spacing(2)
+        .spacing(CONTROL_SPACING)
         .align_y(Alignment::Center);
-        // Narrow panes get only the essentials.
+        // Narrow panes get only the essentials. Keep `COMPACT_CONTROLS_WIDTH` in step.
         let compact = row![
             icon_button("⚙", Message::PaneSettings(pane), "Terminal settings, agents & resume command"),
             icon_button("✕", Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
         ]
-        .spacing(2)
+        .spacing(CONTROL_SPACING)
         .align_y(Alignment::Center);
 
-        let title_bar = pane_grid::TitleBar::new(title_row)
+        let title_bar = pane_grid::TitleBar::new(leave_room(title_row, COMPACT_CONTROLS_WIDTH))
             .controls(pane_grid::Controls::dynamic(full, compact))
             .always_show_controls()
             .padding([2, 6])

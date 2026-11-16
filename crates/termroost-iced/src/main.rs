@@ -9,6 +9,7 @@ mod desktop_entry;
 mod dialogs;
 mod keymap;
 mod layout_conv;
+mod leave_room;
 mod logging;
 mod notify;
 mod panes;
