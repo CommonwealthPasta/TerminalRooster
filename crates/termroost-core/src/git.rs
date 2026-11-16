@@ -497,11 +497,16 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     if out.status.success() {
         return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // The last lines say what failed ("fatal: …"); progress comes before.
-    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-    let message = lines[lines.len().saturating_sub(3)..].join("\n");
+    let message = error_message(&String::from_utf8_lossy(&out.stderr));
     Err(if message.is_empty() { format!("git {} failed ({})", args.join(" "), out.status) } else { message })
+}
+
+/// What went wrong, from git's error output: its last lines ("error: …",
+/// "fatal: …"; progress comes before), without the "hint:" advice git
+/// appends, which would push the error itself out of view.
+fn error_message(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("hint:")).collect();
+    lines[lines.len().saturating_sub(3)..].join("\n")
 }
 
 #[cfg(test)]
@@ -604,6 +609,24 @@ mod tests {
         if cfg!(windows) {
             assert!(is_within(Path::new(r"d:\Src\APP-X\lib"), Path::new("D:/src/app-x")));
         }
+    }
+
+    #[test]
+    fn error_messages_leave_out_hints() {
+        let rejected = "To ../remote.git\n ! [rejected]        main -> main (fetch first)\n\
+                        error: failed to push some refs to '../remote.git'\n\
+                        hint: Updates were rejected because the remote contains work that you do not\n\
+                        hint: have locally.\n";
+        assert_eq!(
+            error_message(rejected),
+            "To ../remote.git\n! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to \
+             '../remote.git'"
+        );
+        assert_eq!(
+            error_message("Counting objects: 1\nfatal: not a git repository\n"),
+            "Counting objects: 1\nfatal: not a git repository"
+        );
+        assert_eq!(error_message("hint: only advice\n"), "");
     }
 
     #[test]
