@@ -6,7 +6,7 @@ use termroost_core::{AgentKind, Axis, PaneId, Tab};
 
 use crate::app::{App, Message};
 use crate::keymap::Action;
-use crate::sidebar::{BOLD, icon_button, muted_text, short_dir};
+use crate::sidebar::{BOLD, branch_label, icon_button, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
 use crate::theme;
 
@@ -47,15 +47,14 @@ impl App {
                 .on_press(Message::ToggleTasks)
                 .into()
         };
-        let header = row![
-            text(&tab.title).size(14).font(BOLD),
-            muted_text(short_dir(&s.tab_working_dir(tab), 70)).wrapping(text::Wrapping::None),
-            space::horizontal(),
-            tasks_toggle,
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .padding([4, 10]);
+        let git = self.git_of(tab);
+        let mut header = row![text(&tab.title).size(14).font(BOLD)];
+        if let Some(head) = git.and_then(|g| g.head.as_ref()) {
+            header = header.push(branch_label(head, 12.0, 40));
+        }
+        header = header.push(muted_text(short_dir(&s.tab_working_dir(tab), 70)).wrapping(text::Wrapping::None));
+        header = header.push(space::horizontal());
+        let header = header.push(tasks_toggle).spacing(10).align_y(Alignment::Center).padding([4, 10]);
 
         let mut content = column![header];
         if let Some(err) = &self.error {

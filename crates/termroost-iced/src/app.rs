@@ -11,7 +11,7 @@ use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
 use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
-use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId};
+use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
 use crate::keymap::{Action, Combo, Keymap};
@@ -19,6 +19,9 @@ use crate::layout_conv;
 use crate::terminal_view;
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
+
+/// How often the branches of the visible sessions are read again.
+const GIT_POLL: Duration = Duration::from_secs(3);
 
 const PREFS_KEY: &str = "iced.prefs";
 pub const RENAME_INPUT: &str = "rename-input";
@@ -276,6 +279,11 @@ pub enum Message {
     InstallBash,
     BashInstall(BashInstallEvent),
 
+    /// Time to read the visible sessions' branches again.
+    GitPoll,
+    /// Where each session directory stands in git (`None`: not in a repository).
+    GitStatus(Vec<(PathBuf, Option<git::Status>)>),
+
     DismissError,
 }
 
@@ -292,6 +300,10 @@ pub struct App {
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     pub(crate) error: Option<String>,
+    /// Git status of session directories, read in the background.
+    pub(crate) git: HashMap<PathBuf, Option<git::Status>>,
+    /// A periodic git read is running.
+    git_polling: bool,
     pub(crate) themes: ThemeStore,
     themes_dirty: bool,
     pub(crate) settings: Option<SettingsState>,
@@ -333,6 +345,8 @@ impl App {
             task_edit: None,
             activity: HashSet::new(),
             error: None,
+            git: HashMap::new(),
+            git_polling: false,
             themes,
             themes_dirty: false,
             settings: None,
@@ -354,7 +368,12 @@ impl App {
         if renamed.moved_from.is_some() || renamed.codex_hook_updated {
             app.dialog = Some(Dialog::Renamed(renamed.clone()));
         }
-        let task = Task::batch([app.focus_active(), iced::system::theme().map(Message::SystemTheme), detect_shells()]);
+        let task = Task::batch([
+            app.focus_active(),
+            iced::system::theme().map(Message::SystemTheme),
+            detect_shells(),
+            app.read_git(),
+        ]);
         (app, task)
     }
 
@@ -432,6 +451,7 @@ impl App {
                 iced::Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested),
                 _ => None,
             }),
+            iced::time::every(GIT_POLL).map(|_| Message::GitPoll),
         ];
         if !self.layout_dirty.is_empty() || self.prefs_dirty || self.themes_dirty {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick));
@@ -464,6 +484,33 @@ impl App {
         if let Some(t) = self.core.state().tab(tab) {
             self.grids.insert(tab, layout_conv::grid_state(&t.layout));
         }
+    }
+
+    /// Git status of a tab's working directory, from the last background read.
+    pub(crate) fn git_of(&self, tab: &termroost_core::Tab) -> Option<&git::Status> {
+        self.git.get(&self.core.state().tab_working_dir(tab))?.as_ref()
+    }
+
+    /// Reads the git status of the selected project's sessions on a thread
+    /// (directories may be on a slow network drive).
+    pub(crate) fn read_git(&self) -> Task<Message> {
+        let s = self.core.state();
+        let Some(project) = s.selected_project else { return Task::none() };
+        let mut dirs: Vec<PathBuf> = s.tabs_of(project).map(|t| s.tab_working_dir(t)).collect();
+        dirs.sort();
+        dirs.dedup();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let statuses = dirs
+                .into_iter()
+                .map(|d| {
+                    let status = git::Status::of(&d);
+                    (d, status)
+                })
+                .collect();
+            let _ = tx.send_blocking(statuses);
+        });
+        Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::GitStatus)
     }
 
     /// Moves keyboard focus to the focused terminal of the visible tab.
@@ -504,7 +551,7 @@ impl App {
             self.activity.remove(&tab);
         }
         self.ensure_active_grid();
-        self.focus_active()
+        Task::batch([self.focus_active(), self.read_git()])
     }
 
     fn grid_pane(&self, pane: pane_grid::Pane) -> Option<(TabId, PaneId)> {
@@ -1116,6 +1163,16 @@ impl App {
             Message::ThisTabOnly(v) => {
                 self.prefs.tasks_this_tab_only = v;
                 self.mark_prefs();
+            }
+            Message::GitPoll => {
+                if !self.git_polling {
+                    self.git_polling = true;
+                    return self.read_git();
+                }
+            }
+            Message::GitStatus(statuses) => {
+                self.git_polling = false;
+                self.git.extend(statuses);
             }
             Message::DismissError => self.error = None,
         }

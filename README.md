@@ -7,6 +7,7 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 - **Projects** on the left, each with a working directory.
 - **Sessions** per project: vertical, renamable (double-click). Each session holds terminals in horizontal/vertical **splits**.
 - **Tasks** per project in the right panel. You can mark them done and link each one to a session; sessions show a badge with their open-task count.
+- **Git:** each session shows the branch its directory is on, in the session list and above its terminals.
 - **Everything is persisted in SQLite** as it changes: projects, sessions, split layouts, focus, tasks, window geometry and terminal scrollback. After a crash or a normal close, the app reopens as you left it.
 
 ## Running
