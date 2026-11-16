@@ -30,6 +30,8 @@ Running a build straight from `target/` (not from a package) writes a hidden des
 
 Windows 10 1809 or newer is required, for ConPTY. Terminals use `pwsh` if it is installed, otherwise Windows PowerShell, otherwise `cmd`. Release builds do not open a console window.
 
+**Bash on Windows:** Settings → Terminal lists the shells it finds (Git Bash, MSYS2, each WSL distribution, PowerShell, cmd), for the default shell and for each project. Without any bash installed, **TermRoost bash → Install and use** downloads a pinned Git for Windows release (bash with coreutils, vim, less, ssh and git), checks its SHA-256, and unpacks it with Windows' own `curl.exe` and `tar.exe` into `%LOCALAPPDATA%\termroost\data\bash`. Nothing outside that folder changes. Delete the folder to remove it.
+
 ### Where data lives
 
 | Platform | Location |

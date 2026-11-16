@@ -465,3 +465,25 @@ fn codex_hook_reports_pin_threads_to_the_right_terminal() {
     core.remove_codex_hook().unwrap();
     assert!(!hooks_file.exists());
 }
+
+/// Windows builds the command line by joining the program and its arguments:
+/// a program under `C:\Program Files` and an argument with spaces must both
+/// arrive intact. Uses Git Bash, so it is skipped where that is not installed.
+#[cfg(windows)]
+#[test]
+fn windows_shell_paths_and_arguments_keep_their_spaces() {
+    use termroost_core::session::shell;
+    let Some(git_bash) = shell::detect_shells().into_iter().find(|o| o.name == "Git Bash") else {
+        eprintln!("Git Bash is not installed; skipping");
+        return;
+    };
+    let bash = shell::split_command_line(&git_bash.command).unwrap().program;
+    // Before arguments were quoted, bash got `-c echo` and printed an empty line.
+    let command = shell::join_command_line(&[bash.as_str(), "-c", "echo spaced  args-ok; exec cat"]);
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(command))).unwrap();
+    core.dispatch(Command::CreateProject { name: "p".into(), working_dir: dir.path().into(), shell: None }).unwrap();
+    let pane = only_pane(&core);
+    wait_for_text(&mut core, pane, "spaced args-ok");
+}
