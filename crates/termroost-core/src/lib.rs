@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 pub use agent::{AgentKind, AgentSession};
 pub use alert::{AgentEvent, Alert};
@@ -171,6 +171,7 @@ impl Core {
             store: store.writer(),
             events: events_tx,
             saved_lines: Arc::new(AtomicUsize::new(state.settings.saved_scrollback_lines)),
+            ptys: Arc::new(AtomicUsize::new(0)),
         };
         codex_hook::set_running(&data_dir, true);
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -885,6 +886,7 @@ impl Core {
             self.palette.clone(),
             self.state.settings.scrollback_lines,
             size,
+            self.bg.ptys.clone(),
         );
         let restored = self.restored.remove(&pane);
         // A coding agent shows its conversation again when it resumes, so its
@@ -936,6 +938,7 @@ impl Core {
             self.palette.clone(),
             self.state.settings.scrollback_lines,
             GridSize::default(),
+            self.bg.ptys.clone(),
         );
         let spec = SpawnSpec {
             shell: session::shell::resolve(None, self.state.settings.default_shell.as_deref()),
@@ -1034,8 +1037,22 @@ impl Core {
         for (_, h) in self.scratch.drain() {
             h.shutdown();
         }
+        // Their threads close the terminals, and end shells closing left
+        // running; this process may exit right after.
+        let deadline = Instant::now() + PTY_CLOSE_WAIT;
+        while self.bg.ptys.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            if Instant::now() >= deadline {
+                tracing::warn!("terminals still closing at shutdown");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
+
+/// How long [`Core::shutdown`] waits for the terminals to close, longer
+/// than a closed terminal's shell gets to exit.
+const PTY_CLOSE_WAIT: Duration = Duration::from_secs(7);
 
 impl Drop for Core {
     fn drop(&mut self) {

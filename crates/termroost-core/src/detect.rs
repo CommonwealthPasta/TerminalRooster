@@ -478,6 +478,34 @@ pub(crate) fn wait_for_exit(pids: &[u32], timeout: Duration) -> bool {
     }
 }
 
+/// Waits up to `grace` for the process `pid` (which `process` is a handle
+/// to) to exit. If it does not, ends it and every process below it, and
+/// returns true.
+#[cfg(windows)]
+pub(crate) fn end_unless_exited(pid: u32, process: &std::os::windows::io::OwnedHandle, grace: Duration) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+
+    let handle = process.as_raw_handle();
+    let millis = u32::try_from(grace.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: `process` is an open process handle.
+    if unsafe { WaitForSingleObject(handle, millis) } != WAIT_TIMEOUT {
+        return false;
+    }
+    // While the handle is open, `pid` is still this process.
+    if let Ok(mut sys) = System::new() {
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
+        let below = tree(&children_of(&sys), pid);
+        for p in below.iter().skip(1).filter_map(|p| sys.process(*p)) {
+            p.kill();
+        }
+    }
+    // SAFETY: as above.
+    unsafe { TerminateProcess(handle, 1) };
+    true
+}
+
 /// Lowercased file stem of a program path (`/usr/bin/Codex.exe` -> `codex`).
 fn stem(s: &std::ffi::OsStr) -> String {
     Path::new(s).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
