@@ -22,6 +22,7 @@ use crate::terminal_view::{self, KeyboardFocus};
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
 use crate::worktree::{WorktreeForm, WorktreeMsg};
+use crate::worktree_remove::{RemoveForm, RemoveMsg};
 
 /// How often the branches of the visible sessions, and the git log when it
 /// shows, are checked again.
@@ -166,6 +167,8 @@ pub enum Dialog {
     Renamed(termroost_core::Renamed),
     /// Switch the session to another git worktree, or make one.
     Worktree(Box<WorktreeForm>),
+    /// Ask before removing a worktree, which closes its sessions.
+    RemoveWorktree(Box<RemoveForm>),
     /// Quitting while terminals still run programs.
     ConfirmQuit {
         running: Vec<RunningTerminal>,
@@ -364,6 +367,7 @@ pub enum Message {
     /// Where each session directory stands in git (`None`: not in a repository).
     GitStatus(Vec<(PathBuf, Option<git::Status>)>),
     Worktree(WorktreeMsg),
+    RemoveWorktree(RemoveMsg),
     /// Show a tab of the side panel.
     SideTab(SideTab),
     LogRead(LogRead),
@@ -1273,6 +1277,11 @@ impl App {
                 match &self.dialog {
                     // git is making the worktree; the result moves the session.
                     Some(Dialog::Worktree(f)) if f.creating => return Task::none(),
+                    Some(Dialog::RemoveWorktree(f)) if f.removing => return Task::none(),
+                    Some(Dialog::RemoveWorktree(_)) => {
+                        self.cancel_remove();
+                        return self.focus_active();
+                    }
                     Some(Dialog::CodexHook) => {
                         // "Not now": don't ask again; Settings → Integrations offers it.
                         self.prefs.codex_hook_asked = true;
@@ -1492,6 +1501,7 @@ impl App {
                 return self.refresh_log();
             }
             Message::Worktree(msg) => return self.update_worktree(msg),
+            Message::RemoveWorktree(msg) => return self.update_remove(msg),
             Message::SideTab(tab) => {
                 self.prefs.side_tab = tab;
                 self.mark_prefs();
@@ -1569,6 +1579,10 @@ impl App {
                 self.dialog = Some(Dialog::Worktree(form));
                 return self.update_worktree(WorktreeMsg::Submit);
             }
+            Dialog::RemoveWorktree(form) => {
+                self.dialog = Some(Dialog::RemoveWorktree(form));
+                return self.update_remove(RemoveMsg::Confirm);
+            }
             Dialog::ConfirmQuit { dont_ask, .. } => {
                 if dont_ask {
                     self.prefs.confirm_quit = false;
@@ -1589,7 +1603,7 @@ impl App {
     }
 
     /// Terminals running programs, in sidebar order, for asking before quitting.
-    fn running_terminals(&self) -> Vec<RunningTerminal> {
+    pub(crate) fn running_terminals(&self) -> Vec<RunningTerminal> {
         let s = self.core.state();
         let mut out: Vec<(usize, RunningTerminal)> = self
             .core

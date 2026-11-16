@@ -24,6 +24,7 @@ mod theme;
 mod themes;
 mod toasts;
 mod worktree;
+mod worktree_remove;
 
 use std::sync::Mutex;
 

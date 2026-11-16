@@ -700,3 +700,62 @@ fn new_sessions_can_start_in_another_directory() {
     core.terminal(pane).unwrap().write(format!("{show_dir}\r"));
     wait_for_text(&mut core, pane, "app-other]");
 }
+
+/// Leaving a folder (before deleting a git worktree) closes the sessions in
+/// it and moves idle shells of other sessions out, so that once their
+/// processes have exited the folder can be deleted, even on Windows.
+#[test]
+fn leaving_a_folder_frees_it_for_deletion() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("app");
+    let worktree = dir.path().join("app-wt");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(worktree.join("sub")).unwrap();
+    let (shell, busy_line) = if cfg!(windows) {
+        ("cmd.exe", "powershell -NoProfile -Command \"Write-Output ('busy'+'-now'); Start-Sleep 60\"")
+    } else {
+        ("sh", "sh -c 'echo bu\"\"sy-now; read x'")
+    };
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(shell.into()))).unwrap();
+    let Outcome::Project(project) = core
+        .dispatch(Command::CreateProject { name: "p".into(), working_dir: project_dir.clone(), shell: None })
+        .unwrap()
+    else {
+        panic!()
+    };
+    let home = core.state().active_tab().unwrap().id;
+    let idle = only_pane(&core);
+    let Outcome::Pane(busy) = core.dispatch(Command::SplitPane { pane: idle, axis: Axis::Vertical }).unwrap() else {
+        panic!()
+    };
+    core.terminal(busy).unwrap().write(format!("{busy_line}\r"));
+    wait_for_text(&mut core, busy, "busy-now");
+    let mut new = |working_dir: std::path::PathBuf| {
+        let cmd = Command::CreateTab { project, title: None, working_dir: Some(working_dir) };
+        let Outcome::Tab(tab) = core.dispatch(cmd).unwrap() else { panic!() };
+        tab
+    };
+    let in_worktree = new(worktree.clone());
+    let in_sub = new(worktree.join("sub"));
+    // Both home terminals say they `cd`ed into the worktree (they did not:
+    // only the closed sessions' shells really work there).
+    for pane in [idle, busy] {
+        core.apply_event(&Event::CwdChanged { pane, dir: worktree.join("sub") });
+    }
+    std::thread::sleep(Duration::from_millis(500));
+
+    let left = core.leave_dir(&worktree);
+    assert_eq!(left.closed, vec![in_worktree, in_sub]);
+    assert_eq!(left.busy, vec![busy]);
+    assert!(!left.pids.is_empty());
+    let s = core.state();
+    assert!(s.tab(in_worktree).is_none() && s.tab(in_sub).is_none());
+    assert!(s.tab(home).is_some());
+    assert_eq!(s.pane(idle).unwrap().cwd, None, "the idle terminal left");
+    assert!(s.pane(busy).unwrap().cwd.is_some(), "the busy one stays");
+    wait_for_text(&mut core, idle, "being removed");
+
+    assert!(left.wait(Duration::from_secs(10)), "the stopped shells exit");
+    std::fs::remove_dir_all(&worktree).unwrap();
+}

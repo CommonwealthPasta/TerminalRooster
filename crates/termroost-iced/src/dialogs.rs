@@ -197,6 +197,7 @@ impl App {
                 return codex_window(handle, &self.keymap, &self.keyboard_focus, self.prefs.font_size);
             }
             Dialog::Worktree(form) => self.view_worktree(form),
+            Dialog::RemoveWorktree(form) => self.view_remove(form),
             Dialog::CodexHook => column![
                 text("Track Codex sessions?").size(18).font(BOLD),
                 text("Add a small hook to Codex so TerminalRooster always resumes the right conversation in each terminal.",)

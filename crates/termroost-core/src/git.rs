@@ -176,6 +176,28 @@ impl Repo {
         git(&self.worktree, &args).map(drop)
     }
 
+    /// The uncommitted changes in the working tree at `path`: changed files,
+    /// and new ones git does not ignore. `git worktree remove` keeps a working
+    /// tree with any of these unless forced. (A new folder counts once.)
+    pub fn changes(path: &Path) -> Result<usize, String> {
+        Ok(git(path, &["status", "--porcelain"])?.lines().filter(|l| !l.trim().is_empty()).count())
+    }
+
+    /// Removes the linked working tree at `path`, deleting its folder; `force`
+    /// deletes uncommitted changes too. Branches are kept. git runs from the
+    /// main working tree, so its own working directory is not in the folder
+    /// it deletes (Windows cannot delete a folder a process is working in).
+    pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<(), String> {
+        let from = self.main_worktree().unwrap_or_else(|| self.common_dir.clone());
+        let path = path.to_string_lossy();
+        let mut args = vec!["worktree", "remove"];
+        if force {
+            args.push("--force");
+        }
+        args.push(&path);
+        git(&from, &args).map(drop)
+    }
+
     /// The latest `limit` commits of this working tree's HEAD, or of every
     /// branch and tag when `all`, newest first.
     pub fn log(&self, all: bool, limit: usize) -> Result<Vec<Commit>, String> {
@@ -393,15 +415,23 @@ impl Branches {
     }
 }
 
+/// Whether `path` is `dir` or inside it, compared like [`same_path`].
+pub fn is_within(path: &Path, dir: &Path) -> bool {
+    let (path, dir) = (path_key(path), path_key(dir));
+    path == dir || path.strip_prefix(&dir).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// A path as a string that compares equal for the same directory.
+fn path_key(p: &Path) -> String {
+    let s = normalize(p).to_string_lossy().replace('\\', "/");
+    let s = s.trim_end_matches('/');
+    if cfg!(windows) { s.to_lowercase() } else { s.to_owned() }
+}
+
 /// Whether two paths are the same without asking the disk: git writes
 /// `D:/src/app`, Windows `d:\src\app\`.
 pub fn same_path(a: &Path, b: &Path) -> bool {
-    let key = |p: &Path| {
-        let s = normalize(p).to_string_lossy().replace('\\', "/");
-        let s = s.trim_end_matches('/');
-        if cfg!(windows) { s.to_lowercase() } else { s.to_owned() }
-    };
-    key(a) == key(b)
+    path_key(a) == path_key(b)
 }
 
 /// A branch name made safe for a folder name: `feature/login` -> `feature-login`.
@@ -565,6 +595,18 @@ mod tests {
     }
 
     #[test]
+    fn within() {
+        let dir = Path::new("/src/app-x");
+        assert!(is_within(Path::new("/src/app-x"), dir));
+        assert!(is_within(Path::new("/src/app-x/crates/core/"), dir));
+        assert!(!is_within(Path::new("/src/app-xy"), dir), "a sibling with a longer name");
+        assert!(!is_within(Path::new("/src"), dir));
+        if cfg!(windows) {
+            assert!(is_within(Path::new(r"d:\Src\APP-X\lib"), Path::new("D:/src/app-x")));
+        }
+    }
+
+    #[test]
     fn slugs() {
         assert_eq!(slug("feature/login"), "feature-login");
         assert_eq!(slug("  fix: the  thing "), "fix-the-thing");
@@ -698,5 +740,37 @@ mod tests {
         // Packed refs still resolve.
         run(&["pack-refs", "--all"]).unwrap();
         assert_eq!(repo.head_commit(), Some(find("second").id.clone()));
+    }
+
+    /// Removing a worktree keeps its changes unless forced, with git installed.
+    #[test]
+    fn removes_worktrees_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        std::fs::create_dir(&root).unwrap();
+        let run = |args: &[&str]| git(&root, args);
+        if run(&["init", "-q", "-b", "main"]).is_err() {
+            eprintln!("git not available; skipping");
+            return;
+        }
+        let who = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"];
+        run(&[&who[..], &["commit", "-q", "--allow-empty", "-m", "first"]].concat()).unwrap();
+        let repo = Repo::discover(&root).unwrap();
+        let path = repo.suggest_worktree_path("fix").unwrap();
+        repo.add_worktree(&path, "fix", &Plan::NewBranch, None).unwrap();
+        assert_eq!(Repo::changes(&path), Ok(0));
+
+        // Removing from the worktree's own Repo works too: git runs in the main one.
+        let inside = Repo::discover(&path).unwrap();
+        std::fs::write(path.join("notes.txt"), "draft").unwrap();
+        assert_eq!(Repo::changes(&path), Ok(1));
+        assert!(inside.remove_worktree(&path, false).is_err(), "a new file keeps it");
+        assert!(path.join("notes.txt").is_file());
+
+        inside.remove_worktree(&path, true).unwrap();
+        assert!(!path.exists());
+        let branches = repo.branches().unwrap();
+        assert_eq!(branches.worktrees.len(), 1);
+        assert!(branches.local.contains(&"fix".to_owned()), "the branch is kept");
     }
 }

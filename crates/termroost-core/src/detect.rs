@@ -391,29 +391,8 @@ pub(crate) fn idle_shells(shells: &[(PaneId, u32)]) -> HashSet<PaneId> {
     }
     let Ok(mut sys) = System::new() else { return HashSet::new() };
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
-    let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
-    for (pid, p) in sys.processes() {
-        if let Some(parent) = p.parent() {
-            children.entry(parent).or_default().push(*pid);
-        }
-    }
-    // Each terminal's process tree, without looping on reused process ids.
-    let trees: Vec<(PaneId, Vec<Pid>)> = shells
-        .iter()
-        .map(|(pane, shell)| {
-            let mut seen = vec![Pid::from_u32(*shell)];
-            let mut i = 0;
-            while let Some(pid) = seen.get(i).copied() {
-                for kid in children.get(&pid).into_iter().flatten() {
-                    if !seen.contains(kid) {
-                        seen.push(*kid);
-                    }
-                }
-                i += 1;
-            }
-            (*pane, seen)
-        })
-        .collect();
+    let children = children_of(&sys);
+    let trees: Vec<(PaneId, Vec<Pid>)> = shells.iter().map(|(pane, shell)| (*pane, tree(&children, *shell))).collect();
     // Command lines are slow to read on Windows: only for these processes.
     let pids: Vec<Pid> = trees.iter().flat_map(|(_, t)| t.iter().copied()).collect();
     sys.refresh_processes_specifics(
@@ -431,6 +410,72 @@ pub(crate) fn idle_shells(shells: &[(PaneId, u32)]) -> HashSet<PaneId> {
         })
     };
     trees.iter().filter(|(_, tree)| idle(tree)).map(|(pane, _)| *pane).collect()
+}
+
+/// Each process's children.
+fn children_of(sys: &System) -> HashMap<Pid, Vec<Pid>> {
+    let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+    for (pid, p) in sys.processes() {
+        if let Some(parent) = p.parent() {
+            children.entry(parent).or_default().push(*pid);
+        }
+    }
+    children
+}
+
+/// A process and everything below it, without looping on reused process ids.
+fn tree(children: &HashMap<Pid, Vec<Pid>>, root: u32) -> Vec<Pid> {
+    let mut seen = vec![Pid::from_u32(root)];
+    let mut i = 0;
+    while let Some(pid) = seen.get(i).copied() {
+        for kid in children.get(&pid).into_iter().flatten() {
+            if !seen.contains(kid) {
+                seen.push(*kid);
+            }
+        }
+        i += 1;
+    }
+    seen
+}
+
+/// The given shells and every process below them that is running now.
+pub(crate) fn process_trees(shells: &[u32]) -> Vec<u32> {
+    let Ok(mut sys) = System::new() else { return shells.to_vec() };
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
+    let children = children_of(&sys);
+    let mut out: Vec<u32> = shells.iter().flat_map(|s| tree(&children, *s)).map(|p| p.as_u32()).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Waits until none of `pids` runs any more, for at most `timeout`; returns
+/// whether they all exited. A process id taken over by a new process counts
+/// as exited.
+pub(crate) fn wait_for_exit(pids: &[u32], timeout: Duration) -> bool {
+    let Ok(mut sys) = System::new() else { return false };
+    let pids: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(*p)).collect();
+    let refresh = |sys: &mut System| {
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pids),
+            true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
+    };
+    refresh(&mut sys);
+    let started: HashMap<Pid, u64> = pids.iter().filter_map(|p| Some((*p, sys.process(*p)?.start_time()))).collect();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let alive = started.iter().any(|(pid, start)| sys.process(*pid).is_some_and(|p| p.start_time() == *start));
+        if !alive {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        refresh(&mut sys);
+    }
 }
 
 /// Lowercased file stem of a program path (`/usr/bin/Codex.exe` -> `codex`).
