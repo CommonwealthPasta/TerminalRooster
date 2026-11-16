@@ -296,9 +296,11 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for TerminalView<M> {
                 shell.request_redraw();
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                // A terminal can be laid out with no width or height (see `layout`);
+                // `clamp` panics when its upper bound is below the lower one.
                 let rel = Point::new(
-                    (position.x - bounds.x).clamp(0.0, bounds.width - 1.0),
-                    (position.y - bounds.y).clamp(0.0, bounds.height - 1.0),
+                    (position.x - bounds.x).clamp(0.0, (bounds.width - 1.0).max(0.0)),
+                    (position.y - bounds.y).clamp(0.0, (bounds.height - 1.0).max(0.0)),
                 );
                 let (col, row, right) = Self::cell_at(&m, rel);
                 if state.selecting {
