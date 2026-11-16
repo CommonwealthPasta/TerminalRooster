@@ -72,6 +72,20 @@ fn item_style(selected: bool) -> impl Fn(&iced::Theme) -> container::Style {
     }
 }
 
+/// A "+" under the last item of a list, as wide as the list.
+fn add_item<'a>(msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    tooltip(
+        button(text("+").size(18).width(Length::Fill).align_x(Alignment::Center))
+            .width(Length::Fill)
+            .padding([2, 8])
+            .style(theme::add_item_button)
+            .on_press(msg),
+        container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),
+        tooltip::Position::Bottom,
+    )
+    .into()
+}
+
 fn activity_dot<'a>(on: bool) -> Element<'a, Message> {
     if on {
         text("●").size(10).style(|t: &iced::Theme| text::Style { color: Some(theme::accent(t)) }).into()
@@ -105,7 +119,10 @@ impl App {
         .align_y(Alignment::Center)
         .padding([8, 10]);
 
-        let items = column(s.projects.iter().map(|p| self.project_item(p))).spacing(2).padding([0, 6]);
+        let items = column(s.projects.iter().map(|p| self.project_item(p)))
+            .push(add_item(Message::NewProject, "New project"))
+            .spacing(2)
+            .padding([0, 6]);
         container(column![header, scrollable(items).height(Length::Fill)])
             .width(190)
             .height(Length::Fill)
@@ -157,7 +174,10 @@ impl App {
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
-        let items = column(s.tabs_of(project.id).map(|t| self.tab_item(project, t))).spacing(2).padding([0, 6]);
+        let items = column(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
+            .push(add_item(Message::NewTab, "New tab (Ctrl+Shift+T)"))
+            .spacing(2)
+            .padding([0, 6]);
         container(
             column![header, section_title("TABS").width(Length::Fill).center(), scrollable(items).height(Length::Fill)]
                 .spacing(4),

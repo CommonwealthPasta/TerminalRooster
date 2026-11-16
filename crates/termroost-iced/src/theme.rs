@@ -86,6 +86,18 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// The "+" at the end of the project and tab lists: quiet until hovered.
+pub fn add_item_button(theme: &Theme, status: button::Status) -> button::Style {
+    let p = theme.extended_palette();
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: hovered.then_some(Background::Color(p.background.strong.color)),
+        text_color: if hovered { p.background.base.text } else { muted(theme) },
+        border: Border::default().rounded(4),
+        ..button::Style::default()
+    }
+}
+
 pub fn badge(theme: &Theme) -> container::Style {
     let p = theme.extended_palette();
     container::Style {
