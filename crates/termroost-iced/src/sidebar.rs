@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Font, Length, Padding, font};
 use termroost_core::git::Head;
 use termroost_core::{AgentKind, PaneId, Project, ProjectId, Tab, TabId};
 
-use crate::agent_icon::agent_icon;
+use crate::agent_icon::{agent_icon, terminal_icon};
 use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget, place};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
@@ -354,6 +354,14 @@ impl App {
             if !kinds.contains(&kind) {
                 kinds.push(kind);
             }
+        }
+        // A session without an agent is plain terminals: TerminalRooster's own icon.
+        if kinds.is_empty() {
+            marks = marks.push(tooltip(
+                terminal_icon(NAME_SIZE),
+                container(text("Terminal").size(12)).padding([4, 8]).style(container::rounded_box),
+                tooltip::Position::Bottom,
+            ));
         }
         for kind in kinds {
             marks = marks.push(tooltip(
