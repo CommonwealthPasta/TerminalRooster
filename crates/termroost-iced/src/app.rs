@@ -1805,7 +1805,8 @@ impl App {
                 }
             }
             Action::NextProject | Action::PrevProject => {
-                let projects: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
+                // Through the projects the list shows, while searching.
+                let projects: Vec<ProjectId> = self.listed_projects().map(|p| p.id).collect();
                 if let Some(next) = cycle(&projects, s.selected_project, action == Action::NextProject) {
                     return self.update(Message::SelectProject(next));
                 }
@@ -1827,9 +1828,11 @@ impl App {
             }
             Action::MoveProjectUp | Action::MoveProjectDown => {
                 if let Some(project) = s.selected_project {
-                    let projects: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
-                    if let Some(to) = step(&projects, project, action == Action::MoveProjectDown) {
-                        return self.update(Message::MoveProject(project, to));
+                    // One place up or down in the list as shown, while searching.
+                    let all: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
+                    let shown: Vec<ProjectId> = self.listed_projects().map(|p| p.id).collect();
+                    if let Some(to) = step(&shown, project, action == Action::MoveProjectDown) {
+                        return self.update(Message::MoveProject(project, place(&all, &shown, project, to)));
                     }
                 }
             }
@@ -1904,13 +1907,17 @@ pub(crate) fn shell_matching<'a>(shells: &'a [ShellOption], command: &str) -> Op
     shells.iter().find(|o| shell::split_command_line(&o.command).as_ref() == Some(&wanted))
 }
 
+/// The item after (or before) `current`, wrapping around. When `current` isn't
+/// in the list (say, a project the search hides), the first (or last) one.
 fn cycle<T: Copy + PartialEq>(items: &[T], current: Option<T>, forward: bool) -> Option<T> {
-    if items.is_empty() {
-        return None;
-    }
-    let i = current.and_then(|c| items.iter().position(|x| *x == c)).unwrap_or(0);
     let n = items.len();
-    Some(items[if forward { (i + 1) % n } else { (i + n - 1) % n }])
+    let i = match current.and_then(|c| items.iter().position(|x| *x == c)) {
+        Some(i) if forward => (i + 1) % n,
+        Some(i) => (i + n - 1) % n,
+        None if forward => 0,
+        None => n.checked_sub(1)?,
+    };
+    items.get(i).copied()
 }
 
 /// The index `item` gets when moved one place down (or up); `None` at the end
@@ -1918,6 +1925,22 @@ fn cycle<T: Copy + PartialEq>(items: &[T], current: Option<T>, forward: bool) ->
 fn step<T: PartialEq>(items: &[T], item: T, down: bool) -> Option<usize> {
     let i = items.iter().position(|x| *x == item)?;
     if down { (i + 1 < items.len()).then_some(i + 1) } else { i.checked_sub(1) }
+}
+
+/// Where `item` goes among `all` when it is moved to index `to` of `shown`
+/// without it, `shown` being some of `all` in the same order: just above the
+/// item that follows it in `shown`, or just below the last one. The result is
+/// an index of `all` without `item`, like `to`.
+pub(crate) fn place<T: Copy + PartialEq>(all: &[T], shown: &[T], item: T, to: usize) -> usize {
+    let rest: Vec<T> = all.iter().copied().filter(|x| *x != item).collect();
+    let others: Vec<T> = shown.iter().copied().filter(|x| *x != item).collect();
+    let index = |x: T| rest.iter().position(|r| *r == x);
+    let placed = match others.get(to) {
+        Some(&below) => index(below),
+        None => others.last().and_then(|&last| index(last)).map(|i| i + 1),
+    };
+    // Nothing else shown to go by: it stays where it is.
+    placed.or_else(|| all.iter().position(|x| *x == item)).unwrap_or(to)
 }
 
 pub(crate) fn expand_home(p: &str) -> PathBuf {
@@ -1952,5 +1975,42 @@ mod tests {
         assert_eq!(step(&items, 'c', false), Some(1));
         assert_eq!(step(&items, 'a', false), None);
         assert_eq!(step(&items, 'x', false), None);
+    }
+
+    #[test]
+    fn cycling_wraps_and_starts_at_an_end() {
+        let items = ['a', 'b', 'c'];
+        assert_eq!(cycle(&items, Some('a'), true), Some('b'));
+        assert_eq!(cycle(&items, Some('c'), true), Some('a'));
+        assert_eq!(cycle(&items, Some('a'), false), Some('c'));
+        assert_eq!(cycle(&items, Some('x'), true), Some('a'), "not listed: the first");
+        assert_eq!(cycle(&items, None, false), Some('c'), "not listed: the last");
+        assert_eq!(cycle(&[] as &[char], None, true), None);
+        assert_eq!(cycle(&[] as &[char], None, false), None);
+    }
+
+    /// `all` after moving `item` to index `to` of `shown` without it.
+    fn moved(all: &str, shown: &str, item: char, to: usize) -> String {
+        let all: Vec<char> = all.chars().collect();
+        let shown: Vec<char> = shown.chars().collect();
+        let mut out: Vec<char> = all.iter().copied().filter(|c| *c != item).collect();
+        out.insert(place(&all, &shown, item, to), item);
+        out.into_iter().collect()
+    }
+
+    #[test]
+    fn moves_in_a_filtered_list_land_among_the_shown_items() {
+        // Everything shown: `to` is the place.
+        for to in 0..3 {
+            let mut expected: Vec<char> = "bc".chars().collect();
+            expected.insert(to, 'a');
+            assert_eq!(moved("abc", "abc", 'a', to), expected.into_iter().collect::<String>());
+        }
+        // `h` is hidden: a, b, c are shown.
+        assert_eq!(moved("ahbc", "abc", 'b', 0), "bahc", "up past a");
+        assert_eq!(moved("ahbc", "abc", 'a', 1), "hbac", "down past b, which was below h");
+        assert_eq!(moved("ahbc", "abc", 'b', 2), "ahcb", "to the end of the shown items");
+        assert_eq!(moved("ahbcz", "abc", 'a', 2), "hbcaz", "just below the last one shown");
+        assert_eq!(moved("ahb", "b", 'b', 0), "ahb", "alone in the list: stays");
     }
 }

@@ -8,7 +8,7 @@ use iced::{Alignment, Element, Font, Length, Padding, font};
 use termroost_core::git::Head;
 use termroost_core::{PaneId, Project, ProjectId, Tab, TabId};
 
-use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget};
+use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget, place};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
 use crate::on_escape::on_escape;
@@ -195,11 +195,12 @@ impl App {
 
         let shown: Vec<&Project> = self.listed_projects().collect();
         let ids: Vec<ProjectId> = shown.iter().map(|p| p.id).collect();
-        // While searching, places in the list aren't places among all projects.
-        let searching = !self.project_search.trim().is_empty();
-        let list = reorder(shown.iter().map(|p| self.project_item(p)))
-            .spacing(LIST_SPACING)
-            .on_move_if(self.rename.is_none() && !searching, move |from, to| Message::MoveProject(ids[from], to));
+        let all: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
+        let list = reorder(shown.iter().map(|p| self.project_item(p))).spacing(LIST_SPACING).on_move_if(
+            self.rename.is_none(),
+            // While searching, a place in the list isn't the same place among all projects.
+            move |from, to| Message::MoveProject(ids[from], place(&all, &ids, ids[from], to)),
+        );
         let mut items = column![list].spacing(LIST_SPACING).padding([0, 6]);
         if shown.is_empty() && !s.projects.is_empty() {
             items = items.push(container(muted_text("No projects match")).padding([6, 8]));
