@@ -86,7 +86,7 @@ Restored tabs start their shells the first time you open them, so dozens of agen
 - **How agents are found:** it works whether you start the agent with **Start agent** or type `claude` yourself. It follows `/clear`, `/new` and `/resume`, and it forgets the agent when you quit it.
 - **Missing sessions:** if a session never got a message, so nothing is saved to resume, the agent is started fresh instead.
 - **Extra arguments:** arguments set in terminal settings (e.g. `--model opus`) are reused on resume.
-- **Codex accuracy:** Codex 0.169 runs every terminal through one shared daemon and keeps no per-process record. Its session is therefore inferred. This is exact when one Codex runs per folder. With several Codex in the same folder, threads are matched by start time.
+- **Codex accuracy:** Codex runs every terminal through one shared daemon and keeps no per-process record, so by default its session is inferred. That is exact with one Codex per folder. For exact tracking, add the optional **Codex hook**. TermRoost offers it once at startup, and you can also add it from Settings → Integrations. Codex only runs hooks you trust, so TermRoost then opens a small Codex window: type `/hooks` there and trust it. The hook goes in `~/.codex/hooks.json`, your other hooks are kept, and it only writes while TermRoost runs.
 - **Debugging detection:** `cargo run -p termroost-core --example detect_agents -- <shell pid>…` prints what is detected under any shell.
 
 ## Shortcuts

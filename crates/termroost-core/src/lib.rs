@@ -78,6 +78,9 @@ pub struct Core {
     next_id: i64,
     /// Panes loaded from the database whose terminal has not been started yet.
     restored: HashSet<PaneId>,
+    /// Temporary terminals outside any project (negative ids), never saved.
+    scratch: HashMap<PaneId, TerminalHandle>,
+    next_scratch: i64,
     autosave: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
     data_dir: PathBuf,
     homes: AgentHomes,
@@ -135,6 +138,8 @@ impl Core {
             palette: Arc::new(std::sync::RwLock::new(config.palette)),
             next_id,
             restored,
+            scratch: HashMap::new(),
+            next_scratch: 1,
             autosave: Some((stop_tx, autosave)),
             data_dir,
             homes: config.agent_homes,
@@ -696,14 +701,47 @@ impl Core {
         let project = self.state.project(tab.project)?;
         let shell = session::shell::resolve(project.shell.as_deref(), self.state.settings.default_shell.as_deref());
         let cwd = self.state.tab_working_dir(tab);
-        let mut env = HashMap::new();
-        #[cfg(not(windows))]
-        env.insert("TERM".to_owned(), "xterm-256color".to_owned());
-        env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
-        env.insert("TERM_PROGRAM".to_owned(), "termroost".to_owned());
+        let mut env = base_env();
         env.insert("TERMROOST_PANE_ID".to_owned(), pane.to_string());
         env.insert("TERMROOST_PROJECT".to_owned(), project.name.clone());
         Some(SpawnSpec { shell, cwd, env })
+    }
+
+    /// Opens a terminal that belongs to no project: it is not saved, not
+    /// restored and not checked for agents. `command` is typed into its shell
+    /// once it has started (e.g. `codex`). Close it with [`Core::close_scratch_terminal`].
+    pub fn open_scratch_terminal(&mut self, cwd: &std::path::Path, command: Option<&str>) -> TerminalHandle {
+        let pane = PaneId(-self.next_scratch);
+        self.next_scratch += 1;
+        let handle = TerminalHandle::new(
+            pane,
+            self.bg.events.clone(),
+            self.palette.clone(),
+            self.state.settings.scrollback_lines,
+            GridSize::default(),
+        );
+        let spec = SpawnSpec {
+            shell: session::shell::resolve(None, self.state.settings.default_shell.as_deref()),
+            cwd: cwd.to_path_buf(),
+            env: base_env(),
+        };
+        match handle.spawn(&spec) {
+            Ok(()) => {
+                if let Some(command) = command {
+                    type_later(&handle, command.to_owned());
+                }
+            }
+            Err(e) => handle.print_notice(&format!("failed to start {}: {e}", spec.shell.program)),
+        }
+        self.scratch.insert(pane, handle.clone());
+        handle
+    }
+
+    /// Stops a terminal opened with [`Core::open_scratch_terminal`].
+    pub fn close_scratch_terminal(&mut self, pane: PaneId) {
+        if let Some(h) = self.scratch.remove(&pane) {
+            h.shutdown();
+        }
     }
 
     fn start_process(&mut self, pane: PaneId, handle: &TerminalHandle, resume: bool) {
@@ -776,6 +814,9 @@ impl Core {
         for h in self.bg.sessions.lock().unwrap().drain().map(|(_, h)| h) {
             h.shutdown();
         }
+        for (_, h) in self.scratch.drain() {
+            h.shutdown();
+        }
     }
 }
 
@@ -783,6 +824,16 @@ impl Drop for Core {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// Environment every terminal gets.
+fn base_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    #[cfg(not(windows))]
+    env.insert("TERM".to_owned(), "xterm-256color".to_owned());
+    env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
+    env.insert("TERM_PROGRAM".to_owned(), "termroost".to_owned());
+    env
 }
 
 /// Types a line into a freshly started shell once it had a moment to start.

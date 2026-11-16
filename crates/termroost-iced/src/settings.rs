@@ -304,57 +304,41 @@ impl App {
 
     fn integrations_section(&self) -> Element<'_, Message> {
         let h = &self.codex_hook;
-        let (status, action): (String, Option<Element<'_, Message>>) = if !h.codex_found {
-            let dir = h.hooks_file.parent().map(crate::sidebar::display_dir).unwrap_or_default();
-            (format!("Codex is not set up on this computer (no configuration in {dir})."), None)
-        } else if let Some(file) = &h.installed_in {
-            let status = match self.core.codex_hook_last_report() {
-                Some(at) => {
-                    let at: chrono::DateTime<chrono::Local> = at.into();
-                    format!(
-                        "Active. Added to {}; last report at {}.",
-                        crate::sidebar::display_dir(file),
-                        at.format("%H:%M:%S")
-                    )
-                }
-                None => format!(
-                    "Added to {}. Waiting for Codex: it runs new hooks only after you trust them, so type /hooks \
-                     in Codex once and trust the TermRoost hook. This turns active after your next Codex prompt.",
-                    crate::sidebar::display_dir(file)
-                ),
-            };
-            let remove = button(text("Remove hook").size(13))
-                .padding([5, 12])
-                .style(button::secondary)
-                .on_press(Message::RemoveCodexHook);
-            (status, Some(remove.into()))
-        } else {
-            let add = button(text("Add hook").size(13))
-                .padding([5, 12])
-                .style(button::primary)
-                .on_press(Message::AddCodexHook);
+        let small = |label| button(text(label).size(13)).padding([5, 12]);
+        let (status, actions): (String, Vec<Element<'_, Message>>) = if !h.codex_found {
+            ("Codex isn't set up on this computer.".to_owned(), vec![])
+        } else if h.installed_in.is_none() {
             (
-                "Not added. Codex conversations are matched by folder and start time, which is exact only with one \
-                 Codex per folder."
-                    .to_owned(),
-                Some(add.into()),
+                "Not added.".to_owned(),
+                vec![small("Add hook").style(button::primary).on_press(Message::AddCodexHook).into()],
             )
+        } else {
+            let remove = small("Remove hook").style(button::secondary).on_press(Message::RemoveCodexHook).into();
+            match (h.trusted, self.core.codex_hook_last_report()) {
+                (_, Some(at)) => {
+                    let at: chrono::DateTime<chrono::Local> = at.into();
+                    (format!("Active · last report at {}.", at.format("%H:%M:%S")), vec![remove])
+                }
+                (true, None) => ("Added and trusted.".to_owned(), vec![remove]),
+                (false, None) => (
+                    "Added, but not trusted in Codex yet.".to_owned(),
+                    vec![
+                        small("Trust in Codex…").style(button::primary).on_press(Message::TrustCodexHook).into(),
+                        remove,
+                    ],
+                ),
+            }
         };
-        let mut col = column![
-            text("Codex session hook").size(14).font(BOLD),
-            muted_text(format!(
-                "Codex does not say which conversation runs in which terminal. This hook (in {}) reports it, so \
-                 each Codex terminal resumes exactly its own conversation. It only writes to TermRoost's data \
-                 folder, only while TermRoost runs; your other hooks are kept.",
-                crate::sidebar::display_dir(&h.hooks_file)
-            )),
-            text(status).size(13),
-        ]
-        .spacing(8);
-        if let Some(action) = action {
-            col = col.push(action);
-        }
-        section("Integrations", col)
+        section(
+            "Integrations",
+            column![
+                text("Codex session hook").size(14).font(BOLD),
+                muted_text("Lets TermRoost resume the right Codex conversation in each terminal."),
+                text(status).size(13),
+                row(actions).spacing(8),
+            ]
+            .spacing(8),
+        )
     }
 
     fn terminal_section<'a>(&'a self, st: &'a SettingsState) -> Element<'a, Message> {

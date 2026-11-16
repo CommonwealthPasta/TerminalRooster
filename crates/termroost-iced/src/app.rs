@@ -110,8 +110,8 @@ pub enum Dialog {
     },
     /// Offer to add the Codex hook (shown once at startup).
     CodexHook,
-    /// The hook was added; explain trusting it in Codex.
-    CodexHookAdded(PathBuf),
+    /// A small Codex window for trusting the hook (`/hooks`).
+    CodexTrust(termroost_core::TerminalHandle),
 }
 
 /// State of the settings page while it is open.
@@ -168,6 +168,9 @@ pub enum Message {
     CloseSettings,
     AddCodexHook,
     RemoveCodexHook,
+    /// Open the Codex window to trust the hook.
+    TrustCodexHook,
+    Noop,
     SystemTheme(iced::theme::Mode),
     FollowSystem(bool),
     /// Use a theme for the interface.
@@ -491,6 +494,9 @@ impl App {
                 return iced::exit();
             }
             Message::Escape => {
+                if matches!(self.dialog, Some(Dialog::CodexTrust(_))) {
+                    return Task::none();
+                }
                 if self.dialog.is_some() {
                     return self.update(Message::DialogCancel);
                 }
@@ -511,7 +517,7 @@ impl App {
                 }
             }
             Message::TabKey { shift } => {
-                if self.dialog.is_some() {
+                if self.dialog.is_some() && !matches!(self.dialog, Some(Dialog::CodexTrust(_))) {
                     return if shift { operation::focus_previous() } else { operation::focus_next() };
                 }
             }
@@ -574,16 +580,28 @@ impl App {
             Message::AddCodexHook => {
                 self.prefs.codex_hook_asked = true;
                 self.mark_prefs();
-                match self.core.install_codex_hook() {
-                    Ok(path) => {
-                        if self.settings.is_none() {
-                            self.dialog = Some(Dialog::CodexHookAdded(path));
-                        }
-                    }
+                let added = self.core.install_codex_hook();
+                self.codex_hook = self.core.codex_hook_status();
+                match added {
+                    Ok(_) => return self.update(Message::TrustCodexHook),
                     Err(e) => self.error = Some(format!("Could not add the Codex hook: {e}")),
                 }
-                self.codex_hook = self.core.codex_hook_status();
             }
+            Message::TrustCodexHook => {
+                let s = self.core.state();
+                let cwd = s
+                    .selected_project
+                    .and_then(|p| s.project(p))
+                    .map(|p| p.working_dir.clone())
+                    .filter(|d| d.is_dir())
+                    .or_else(|| directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()))
+                    .unwrap_or_default();
+                let handle = self.core.open_scratch_terminal(&cwd, Some("codex"));
+                let focus = operation::focus(terminal_view::widget_id(handle.pane()));
+                self.dialog = Some(Dialog::CodexTrust(handle));
+                return focus;
+            }
+            Message::Noop => {}
             Message::RemoveCodexHook => {
                 if let Err(e) = self.core.remove_codex_hook() {
                     self.error = Some(format!("Could not remove the Codex hook: {e}"));
@@ -759,10 +777,18 @@ impl App {
             }
             Message::DialogSubmit => return self.submit_dialog(),
             Message::DialogCancel => {
-                if matches!(self.dialog, Some(Dialog::CodexHook)) {
-                    // "Not now": don't ask again; Settings → Integrations offers it.
-                    self.prefs.codex_hook_asked = true;
-                    self.mark_prefs();
+                match &self.dialog {
+                    Some(Dialog::CodexHook) => {
+                        // "Not now": don't ask again; Settings → Integrations offers it.
+                        self.prefs.codex_hook_asked = true;
+                        self.mark_prefs();
+                    }
+                    Some(Dialog::CodexTrust(h)) => {
+                        let pane = h.pane();
+                        self.core.close_scratch_terminal(pane);
+                        self.codex_hook = self.core.codex_hook_status();
+                    }
+                    _ => {}
                 }
                 self.dialog = None;
                 return self.focus_active();
@@ -982,7 +1008,10 @@ impl App {
                 self.dispatch(Command::SetResumeCommand { pane, command: Some(resume) });
             }
             Dialog::CodexHook => return self.update(Message::AddCodexHook),
-            Dialog::CodexHookAdded(_) => {}
+            Dialog::CodexTrust(h) => {
+                self.dialog = Some(Dialog::CodexTrust(h));
+                return self.update(Message::DialogCancel);
+            }
         }
         self.focus_active()
     }
@@ -1094,14 +1123,15 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        if self.settings.is_some() {
-            return self.view_settings();
-        }
-        let mut main = row![self.view_projects(), self.view_tabs(), self.view_main()].height(Length::Fill);
-        if self.prefs.tasks_open && self.core.state().selected_project.is_some() {
-            main = main.push(self.view_tasks());
-        }
-        let base: Element<'_, Message> = container(main).width(Length::Fill).height(Length::Fill).into();
+        let base: Element<'_, Message> = if self.settings.is_some() {
+            self.view_settings()
+        } else {
+            let mut main = row![self.view_projects(), self.view_tabs(), self.view_main()].height(Length::Fill);
+            if self.prefs.tasks_open && self.core.state().selected_project.is_some() {
+                main = main.push(self.view_tasks());
+            }
+            container(main).width(Length::Fill).height(Length::Fill).into()
+        };
         match &self.dialog {
             Some(d) => stack![base, self.view_dialog(d)].into(),
             None => column![base].into(),

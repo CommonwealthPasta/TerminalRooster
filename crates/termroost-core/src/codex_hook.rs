@@ -37,6 +37,8 @@ pub struct CodexHookStatus {
     pub installed_in: Option<PathBuf>,
     /// The file the hook is (or would be) added to.
     pub hooks_file: PathBuf,
+    /// The user trusted the hook in Codex (`/hooks`), so Codex runs it.
+    pub trusted: bool,
 }
 
 pub(crate) fn reports_dir(data_dir: &Path) -> PathBuf {
@@ -49,12 +51,45 @@ fn hooks_json(codex_home: &Path) -> PathBuf {
 
 pub(crate) fn status(codex_home: &Path) -> CodexHookStatus {
     let file = hooks_json(codex_home);
-    let installed = std::fs::read_to_string(&file).is_ok_and(|t| t.contains(MARKER));
+    let hooks: Option<Value> = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok());
+    let installed = hooks.as_ref().is_some_and(|h| EVENTS.iter().any(|e| our_group(h, e).is_some()));
     CodexHookStatus {
         codex_found: codex_home.join("config.toml").is_file() || codex_home.join("auth.json").is_file(),
         installed_in: installed.then(|| file.clone()),
+        trusted: installed && hooks.as_ref().is_some_and(|h| trusted(codex_home, &file, h)),
         hooks_file: file,
     }
+}
+
+/// Index of TermRoost's matcher group within an event's hooks.
+fn our_group(hooks: &Value, event: &str) -> Option<usize> {
+    hooks["hooks"][event].as_array()?.iter().position(is_ours)
+}
+
+/// Codex records trust in `config.toml` as
+/// `[hooks.state."<hooks file>:<event_name>:<group>:<handler>"] trusted_hash = "..."`.
+fn trusted(codex_home: &Path, file: &Path, hooks: &Value) -> bool {
+    let Ok(text) = std::fs::read_to_string(codex_home.join("config.toml")) else { return false };
+    let Ok(config) = text.parse::<toml::Table>() else { return false };
+    let Some(state) = config.get("hooks").and_then(|h| h.get("state")).and_then(|s| s.as_table()) else {
+        return false;
+    };
+    EVENTS.iter().all(|event| {
+        let Some(group) = our_group(hooks, event) else { return false };
+        let key = format!("{}:{}:{group}:0", file.display(), snake_case(event));
+        state.get(&key).and_then(|e| e.get("trusted_hash")).is_some_and(|h| h.as_str().is_some_and(|s| !s.is_empty()))
+    })
+}
+
+fn snake_case(event: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in event.chars().enumerate() {
+        if c.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(c.to_ascii_lowercase());
+    }
+    out
 }
 
 /// POSIX hook command. The reports directory is passed as `$1`; `$0` is the marker.
@@ -292,6 +327,27 @@ mod tests {
         install(&codex, &data).unwrap();
         remove(&codex).unwrap();
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn trust_is_read_from_codex_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex = tmp.path().join("codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::write(codex.join("config.toml"), "model = \"x\"\n").unwrap();
+        let file = install(&codex, &tmp.path().join("data")).unwrap();
+        assert!(!status(&codex).trusted);
+        // What Codex writes when the user trusts both hooks in `/hooks`.
+        let entry = |event: &str| {
+            let key = format!("{}:{event}:0:0", file.display()).replace('\\', "\\\\");
+            format!("[hooks.state.\"{key}\"]\ntrusted_hash = \"sha256:00\"\n")
+        };
+        let config = format!("model = \"x\"\n\n[hooks.state]\n\n{}\n", entry("session_start"));
+        std::fs::write(codex.join("config.toml"), &config).unwrap();
+        assert!(!status(&codex).trusted, "both hooks must be trusted");
+        std::fs::write(codex.join("config.toml"), config + &entry("user_prompt_submit")).unwrap();
+        assert!(status(&codex).trusted);
+        assert_eq!(snake_case("UserPromptSubmit"), "user_prompt_submit");
     }
 
     #[test]

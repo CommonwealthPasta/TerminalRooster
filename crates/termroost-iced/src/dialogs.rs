@@ -7,6 +7,7 @@ use termroost_core::session::shell;
 
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message};
 use crate::sidebar::{BOLD, muted_text};
+use crate::terminal_view::TerminalView;
 use crate::theme;
 
 fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
@@ -33,6 +34,25 @@ fn modal<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
                 .style(theme::modal_backdrop),
         )
         .on_press(Message::DialogCancel),
+    )
+}
+
+/// The small Codex window for trusting the hook. Clicking outside does not
+/// close it (it would end Codex); Done does.
+fn codex_window(handle: &termroost_core::TerminalHandle, font_size: f32) -> Element<'_, Message> {
+    let term = TerminalView::new(handle.clone(), true, font_size, Message::Noop, Message::Noop);
+    let content = column![
+        row![
+            text("Type /hooks and trust the TermRoost hook.").size(14).width(Length::Fill),
+            button(text("Done")).padding([5, 14]).style(button::primary).on_press(Message::DialogCancel),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
+        container(term).height(420).style(theme::pane(true)),
+    ]
+    .spacing(10);
+    opaque(
+        center(opaque(container(content).padding(14).width(820).style(theme::modal_card))).style(theme::modal_backdrop),
     )
 }
 
@@ -118,46 +138,18 @@ impl App {
                 .spacing(14)
                 .into()
             }
+            Dialog::CodexTrust(handle) => return codex_window(handle, self.prefs.font_size),
             Dialog::CodexHook => column![
-                text("Track Codex conversations exactly?").size(18).font(BOLD),
-                text(
-                    "TermRoost found Codex on this computer. Codex does not say which conversation runs in which \
-                     terminal, so with several Codex terminals in one folder TermRoost has to guess which one to \
-                     resume after a restart.",
-                )
-                .size(13),
-                text(format!(
-                    "A small hook in {} can tell TermRoost exactly. It only writes to TermRoost's own data folder, \
-                     only while TermRoost is running, and your other hooks are kept.",
-                    crate::sidebar::display_dir(&self.codex_hook.hooks_file)
-                ))
-                .size(13),
-                muted_text(
-                    "Codex runs new hooks only after you trust them: after adding it, type /hooks in Codex once and \
-                     trust the TermRoost hook. If you choose Not now, you can add it later in Settings → \
-                     Integrations.",
-                ),
+                text("Track Codex sessions?").size(18).font(BOLD),
+                text("Add a small hook to Codex so TermRoost always resumes the right conversation in each terminal.",)
+                    .size(13),
+                muted_text("You can change this later in Settings."),
                 row![
                     space::horizontal(),
                     button(text("Not now")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
                     button(text("Add hook")).padding([6, 14]).style(button::primary).on_press(Message::DialogSubmit),
                 ]
                 .spacing(8),
-            ]
-            .spacing(12)
-            .into(),
-            Dialog::CodexHookAdded(path) => column![
-                text("Codex hook added").size(18).font(BOLD),
-                text(format!("Added to {}.", path.display())).size(13),
-                text(
-                    "One more step: Codex skips new hooks until you trust them. Open Codex, type /hooks and trust \
-                     the TermRoost hook. Settings → Integrations shows when it starts reporting.",
-                )
-                .size(13),
-                row![
-                    space::horizontal(),
-                    button(text("OK")).padding([6, 14]).style(button::primary).on_press(Message::DialogCancel),
-                ],
             ]
             .spacing(12)
             .into(),

@@ -202,6 +202,12 @@ pub(crate) struct Session {
 #[derive(Clone)]
 pub struct TerminalHandle(pub(crate) Arc<Session>);
 
+impl std::fmt::Debug for TerminalHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TerminalHandle").field(&self.pane()).finish()
+    }
+}
+
 impl TerminalHandle {
     pub(crate) fn new(
         pane: PaneId,
