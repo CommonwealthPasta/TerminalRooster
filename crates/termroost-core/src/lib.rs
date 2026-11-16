@@ -265,6 +265,12 @@ impl Core {
         self.bg.sessions.lock().unwrap().get(&pane).cloned()
     }
 
+    /// Process ids of the running shells of all terminals.
+    pub fn shell_pids(&self) -> Vec<u32> {
+        let sessions = self.bg.sessions.lock().unwrap();
+        sessions.values().chain(self.scratch.values()).filter_map(|h| h.shell_pid()).collect()
+    }
+
     /// Records the effects of an event on the state. Call for every event.
     pub fn apply_event(&mut self, event: &Event) {
         match event {
@@ -321,7 +327,7 @@ impl Core {
     /// it restart in their tab's directory when idle; ones running a program
     /// stay, see [`LeftDir::busy`]. Wait with [`LeftDir::wait`] before
     /// deleting the directory: Windows cannot delete a folder that a process
-    /// is still working in.
+    /// is still working in (other programs: [`detect::processes_in`]).
     pub fn leave_dir(&mut self, dir: &std::path::Path) -> LeftDir {
         let s = &self.state;
         let closed: Vec<TabId> =
