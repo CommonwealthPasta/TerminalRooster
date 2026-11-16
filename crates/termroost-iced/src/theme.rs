@@ -119,6 +119,17 @@ pub fn accent_badge(theme: &Theme) -> container::Style {
     }
 }
 
+/// A badge for something still to do, such as a commit not pushed yet.
+pub fn warning_badge(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.warning.weak.color)),
+        text_color: Some(p.warning.weak.text),
+        border: Border::default().rounded(8),
+        ..container::Style::default()
+    }
+}
+
 /// A tab at the top of the side panel (Tasks, Git).
 pub fn side_tab(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme, status| {

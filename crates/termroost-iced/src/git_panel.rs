@@ -1,13 +1,15 @@
 //! The Git tab of the side panel: the log of the visible session's
 //! repository, next to the Tasks tab. It follows new commits: every git poll
 //! compares the repository's refs, and reads the log again when they moved.
+//! Commits that are on no remote are marked, and the branch's distance to
+//! its upstream is shown.
 
 use std::path::PathBuf;
 
 use iced::widget::{button, checkbox, column, container, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Task};
 use serde::{Deserialize, Serialize};
-use termroost_core::git::{Commit, Repo};
+use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
 use crate::sidebar::{BOLD, branch_label, muted_text};
@@ -34,6 +36,9 @@ pub struct GitLog {
     pub commits: Option<Result<Vec<Commit>, String>>,
     /// [`Repo::ref_stamp`] when `commits` were read.
     pub stamp: Option<u64>,
+    /// How the commits stand against the remotes; `None` until read, or
+    /// when git could not tell.
+    pub tracking: Option<Tracking>,
 }
 
 /// A log read in the background.
@@ -44,6 +49,7 @@ pub struct LogRead {
     pub stamp: u64,
     /// `None` when the refs have not moved since the log on screen was read.
     pub commits: Option<Result<Vec<Commit>, String>>,
+    pub tracking: Option<Tracking>,
 }
 
 /// `s` cut to `max` characters, ending in "…" when cut.
@@ -95,7 +101,8 @@ impl App {
             _ => {
                 // A read still running is for the old log: dropped when it
                 // arrives, which starts this one.
-                self.git_log = Some(GitLog { worktree: repo.worktree.clone(), all, commits: None, stamp: None });
+                self.git_log =
+                    Some(GitLog { worktree: repo.worktree.clone(), all, commits: None, stamp: None, tracking: None });
                 None
             }
         };
@@ -107,8 +114,12 @@ impl App {
         std::thread::spawn(move || {
             // The stamp first: a commit landing in between is caught next time.
             let stamp = repo.ref_stamp();
-            let commits = (known != Some(stamp)).then(|| repo.log(all, LOG_LIMIT));
-            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, all, stamp, commits });
+            let changed = known != Some(stamp);
+            let commits = changed.then(|| repo.log(all, LOG_LIMIT));
+            let tracking = changed
+                .then(|| repo.tracking(all, LOG_LIMIT))
+                .and_then(|t| t.map_err(|e| tracing::warn!(error = %e, "reading the git remotes failed")).ok());
+            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, all, stamp, commits, tracking });
         });
         Task::perform(async move { rx.recv().await.ok() }, |read| match read {
             Some(read) => Message::LogRead(read),
@@ -127,6 +138,7 @@ impl App {
                     Some(Ok(commits)) => {
                         log.commits = Some(Ok(commits));
                         log.stamp = Some(read.stamp);
+                        log.tracking = read.tracking;
                     }
                     // Without a stamp, the next poll tries again.
                     Some(Err(e)) => {
@@ -180,23 +192,55 @@ impl App {
             ),
         );
 
+        let tracking = self.git_log.as_ref().and_then(|l| l.tracking.as_ref());
+        let mut title = title;
+        if let Some(status) = tracking.and_then(|t| remote_status(t, head)) {
+            title = title.push(muted_text(status).size(12));
+        }
+
         let body: Element<'_, Message> = match self.git_log.as_ref().and_then(|l| l.commits.as_ref()) {
             None => muted_text("Reading the log…").size(12).into(),
             Some(Err(e)) => text(e).size(12).style(text::danger).into(),
             Some(Ok(commits)) if commits.is_empty() => muted_text("No commits yet.").size(12).into(),
             Some(Ok(commits)) => {
                 let now = chrono::Utc::now().timestamp();
-                scrollable(column(commits.iter().map(|c| commit_item(c, now))).spacing(12).padding([0, 10]))
-                    .height(Length::Fill)
-                    .into()
+                let unpushed = |c: &Commit| tracking.is_some_and(|t| t.unpushed.contains(&c.id));
+                scrollable(
+                    column(commits.iter().map(|c| commit_item(c, unpushed(c), now))).spacing(12).padding([0, 10]),
+                )
+                .height(Length::Fill)
+                .into()
             }
         };
         column![title, body].spacing(10).into()
     }
 }
 
-/// One commit: subject, then id, author and age, then branches and tags.
-fn commit_item(c: &Commit, now: i64) -> Element<'_, Message> {
+/// Where the branch stands against its remote: "2 commits to push · 1 to
+/// pull (origin/main)". `None` without a remote.
+fn remote_status(t: &Tracking, head: Option<&Head>) -> Option<String> {
+    let remote = t.remote.as_ref()?;
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    Some(match (&t.upstream, head) {
+        (Some(upstream), _) if t.ahead == 0 && t.behind == 0 => format!("Up to date with {upstream}"),
+        (Some(upstream), _) => {
+            let mut parts = Vec::new();
+            if t.ahead > 0 {
+                parts.push(format!("{} commit{} to push", t.ahead, plural(t.ahead)));
+            }
+            if t.behind > 0 {
+                parts.push(format!("{} to pull", t.behind));
+            }
+            format!("{} ({upstream})", parts.join(" · "))
+        }
+        (None, Some(Head::Branch(branch))) => format!("{branch} is not on {remote} yet"),
+        (None, _) => format!("Not on a branch; {remote} is the remote"),
+    })
+}
+
+/// One commit: subject, then id, author and age, then branches and tags,
+/// and whether it is on no remote yet.
+fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
     let meta = row![
         text(&c.short)
             .font(theme::MONO)
@@ -207,12 +251,21 @@ fn commit_item(c: &Commit, now: i64) -> Element<'_, Message> {
     ]
     .spacing(6);
     let mut item = column![text(&c.subject).size(13), meta].spacing(2);
-    if !c.refs.is_empty() {
+    if !c.refs.is_empty() || unpushed {
+        let badge = |label: &str, style: fn(&iced::Theme) -> container::Style| -> Element<'_, Message> {
+            container(text(label.to_owned()).size(10).wrapping(text::Wrapping::None))
+                .padding([1, 6])
+                .style(style)
+                .into()
+        };
         let head_branch = c.head.then(|| c.refs.first()).flatten();
-        let badges = c.refs.iter().map(|r| {
-            let style = if Some(r) == head_branch { theme::accent_badge } else { theme::badge };
-            container(text(r).size(10).wrapping(text::Wrapping::None)).padding([1, 6]).style(style).into()
-        });
+        let mut badges: Vec<Element<'_, Message>> = Vec::new();
+        if unpushed {
+            badges.push(badge("not pushed", theme::warning_badge));
+        }
+        badges.extend(
+            c.refs.iter().map(|r| badge(r, if Some(r) == head_branch { theme::accent_badge } else { theme::badge })),
+        );
         item = item.push(row(badges).spacing(4).wrap());
     }
     item.into()
@@ -221,6 +274,24 @@ fn commit_item(c: &Commit, now: i64) -> Element<'_, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_statuses() {
+        let main = Head::Branch("main".into());
+        let t = |upstream: Option<&str>, ahead, behind| Tracking {
+            remote: Some("origin".into()),
+            upstream: upstream.map(Into::into),
+            ahead,
+            behind,
+            unpushed: Default::default(),
+        };
+        let status = |t: Tracking| remote_status(&t, Some(&main));
+        assert_eq!(status(t(Some("origin/main"), 0, 0)).unwrap(), "Up to date with origin/main");
+        assert_eq!(status(t(Some("origin/main"), 1, 0)).unwrap(), "1 commit to push (origin/main)");
+        assert_eq!(status(t(Some("origin/main"), 2, 3)).unwrap(), "2 commits to push · 3 to pull (origin/main)");
+        assert_eq!(status(t(None, 0, 0)).unwrap(), "main is not on origin yet");
+        assert_eq!(status(Tracking::default()), None, "no remote");
+    }
 
     #[test]
     fn ages() {
