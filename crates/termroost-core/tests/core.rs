@@ -182,6 +182,9 @@ fn agents_resume_their_exact_session() {
     std::fs::write(projects.join(format!("{session_id}.jsonl")), "{}").unwrap();
     let mut core = open(dir.path());
     wait_for_text(&mut core, pane, &format!("claude --resume {session_id} --model opus"));
+    // The agent shows its own conversation; the old screen is not replayed.
+    let text = screen_text(&core, pane);
+    assert!(!text.contains("restored session") && !text.contains("--session-id"), "{text}");
     core.dispatch(Command::ClearAgent(pane)).unwrap();
     assert!(core.state().pane(pane).unwrap().agent.is_none());
 }

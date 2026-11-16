@@ -814,7 +814,11 @@ impl Core {
             size,
         );
         let restored = self.restored.remove(&pane);
+        // A coding agent shows its conversation again when it resumes, so its
+        // terminal starts clean instead of under a copy of its old screen.
+        let had_agent = self.state.pane(pane).is_some_and(|p| p.agent.is_some());
         if restored
+            && !had_agent
             && let Some((data, saved_at)) = self.store.load_scrollback(pane)
             && !data.is_empty()
         {
