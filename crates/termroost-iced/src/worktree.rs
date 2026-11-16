@@ -1,12 +1,13 @@
 //! The Worktrees dialog: switching a session to another git worktree of its
-//! repository, or making a new worktree and moving the session into it.
+//! repository, opening a new session in one, or making a new worktree (in a
+//! new session, or this one when asked).
 //!
 //! New worktrees go beside the repository (so on the same drive), named
 //! `<repository>-<branch>`.
 
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, operation, row, scrollable, space, text, text_input};
+use iced::widget::{button, checkbox, column, container, operation, row, scrollable, space, text, text_input};
 use iced::{Alignment, Element, Length, Task};
 use termroost_core::git::{self, Branches, Head, Plan, Repo};
 use termroost_core::{Command, Outcome, TabId};
@@ -29,6 +30,8 @@ pub struct WorktreeForm {
     pub path: String,
     /// The location was typed in, so it no longer follows the branch name.
     pub path_edited: bool,
+    /// A new worktree takes this session along; otherwise it gets a new session.
+    pub move_session: bool,
     /// Branches and worktrees, read in the background when the dialog opens.
     pub branches: Option<Result<Branches, String>>,
     /// git is making the worktree.
@@ -43,12 +46,16 @@ pub enum WorktreeMsg {
     Loaded(TabId, Result<Branches, String>),
     /// Move the session to this existing worktree.
     Switch(PathBuf),
+    /// Open a new session in this existing worktree.
+    NewSession(PathBuf),
+    MoveSession(bool),
     Branch(String),
     Base(String),
     Path(String),
     Submit,
     Created {
         tab: TabId,
+        branch: String,
         path: PathBuf,
         result: Result<(), String>,
     },
@@ -116,6 +123,26 @@ impl App {
                 let (tab, dir) = (f.tab, f.repo.same_place_in(&f.from, &path));
                 return self.move_session(tab, dir);
             }
+            WorktreeMsg::NewSession(path) => {
+                let Some(f) = self.worktree_form().filter(|f| !f.creating) else { return Task::none() };
+                let dir = f.repo.same_place_in(&f.from, &path);
+                let title = f
+                    .branches
+                    .as_ref()
+                    .and_then(|b| b.as_ref().ok())
+                    .and_then(|b| b.worktrees.iter().find(|w| w.path == path))
+                    .and_then(|w| match &w.head {
+                        Some(Head::Branch(b)) => Some(b.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| path.file_name().map(|n| n.to_string_lossy().into_owned()));
+                return self.open_session(title, dir);
+            }
+            WorktreeMsg::MoveSession(on) => {
+                if let Some(f) = self.worktree_form() {
+                    f.move_session = on;
+                }
+            }
             WorktreeMsg::Branch(v) => {
                 if let Some(f) = self.worktree_form() {
                     if !f.path_edited {
@@ -140,14 +167,18 @@ impl App {
                 }
             }
             WorktreeMsg::Submit => return self.submit_worktree(),
-            WorktreeMsg::Created { tab, path, result } => {
+            WorktreeMsg::Created { tab, branch, path, result } => {
                 let Some(f) = self.worktree_form().filter(|f| f.tab == tab) else { return Task::none() };
                 f.creating = false;
                 match result {
                     Ok(()) => {
                         let dir = f.repo.same_place_in(&f.from, &path);
                         tracing::info!(%tab, path = %path.display(), "worktree created");
-                        return self.move_session(tab, dir);
+                        return if f.move_session {
+                            self.move_session(tab, dir)
+                        } else {
+                            self.open_session(Some(branch), dir)
+                        };
                     }
                     Err(e) => {
                         tracing::warn!(%tab, path = %path.display(), error = %e, "creating a worktree failed");
@@ -189,6 +220,7 @@ impl App {
             base: String::new(),
             path: String::new(),
             path_edited: false,
+            move_session: false,
             branches: None,
             creating: false,
             error: None,
@@ -213,13 +245,21 @@ impl App {
         f.error = None;
         let repo = f.repo.clone();
         let (tx, rx) = async_channel::bounded(1);
-        let target = path.clone();
+        let (target, name) = (path.clone(), branch.clone());
         std::thread::spawn(move || {
-            let _ = tx.send_blocking(repo.add_worktree(&target, &branch, &plan, base.as_deref()));
+            let _ = tx.send_blocking(repo.add_worktree(&target, &name, &plan, base.as_deref()));
         });
         Task::perform(async move { rx.recv().await.unwrap_or_else(|e| Err(e.to_string())) }, move |result| {
-            msg(WorktreeMsg::Created { tab, path: path.clone(), result })
+            msg(WorktreeMsg::Created { tab, branch: branch.clone(), path: path.clone(), result })
         })
+    }
+
+    /// Opens a new session of this project in `dir`, closing the dialog.
+    fn open_session(&mut self, title: Option<String>, dir: PathBuf) -> Task<Message> {
+        let Some(Dialog::Worktree(f)) = self.dialog.take() else { return Task::none() };
+        let Some(project) = self.core.state().tab(f.tab).map(|t| t.project) else { return Task::none() };
+        self.dispatch(Command::CreateTab { project, title, working_dir: Some(dir) });
+        self.after_select()
     }
 
     /// Moves the session to `dir`, closes the dialog and says which terminals
@@ -255,22 +295,24 @@ impl App {
         };
         let rows = worktrees.map(|w| {
             let here = git::same_path(&w.path, &f.repo.worktree);
-            let action: Element<'_, Message> = if here {
+            let idle = !f.creating;
+            let switch: Element<'_, Message> = if here {
                 muted_text("this session").size(12).into()
             } else {
-                small_button("Switch")
-                    .on_press_maybe((!f.creating).then(|| msg(WorktreeMsg::Switch(w.path.clone()))))
-                    .into()
+                small_button("Switch").on_press_maybe(idle.then(|| msg(WorktreeMsg::Switch(w.path.clone())))).into()
             };
+            let open =
+                small_button("New session").on_press_maybe(idle.then(|| msg(WorktreeMsg::NewSession(w.path.clone()))));
             let head = w.head.as_ref().expect("usable worktrees have a HEAD");
             row![
                 column![
-                    branch_label(head, 13.0, 48),
+                    branch_label(head, 13.0, 40),
                     muted_text(short_dir(&w.path, 64)).size(12).wrapping(text::Wrapping::None)
                 ]
                 .spacing(2)
                 .width(Length::Fill),
-                action,
+                switch,
+                open,
             ]
             .spacing(8)
             .align_y(Alignment::Center)
@@ -349,9 +391,22 @@ impl App {
                 .spacing(4),
             );
         }
+        if !matches!(plan, Some(Plan::CheckedOut(_))) {
+            col = col.push(
+                column![
+                    checkbox(f.move_session)
+                        .label(format!("Move “{session}” into it"))
+                        .on_toggle(|on| msg(WorktreeMsg::MoveSession(on)))
+                        .size(14)
+                        .text_size(13),
+                    muted_text("Otherwise it opens in a new session named after the branch.").size(12),
+                ]
+                .spacing(4),
+            );
+        }
         col = col.push(muted_text(
-            "The session then works there: idle terminals restart in it (keeping their scrollback); terminals \
-             running a program or an agent are left as they are.",
+            "Moving a session restarts its idle terminals there (keeping their scrollback); terminals running a \
+             program or an agent are left as they are.",
         ));
         if let Some(e) = &f.error {
             col = col.push(text(e).size(13).style(text::danger));

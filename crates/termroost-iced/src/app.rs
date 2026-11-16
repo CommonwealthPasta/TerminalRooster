@@ -554,7 +554,7 @@ impl App {
         }
     }
 
-    fn after_select(&mut self) -> Task<Message> {
+    pub(crate) fn after_select(&mut self) -> Task<Message> {
         if let Some(tab) = self.active_tab_id() {
             self.activity.remove(&tab);
         }
