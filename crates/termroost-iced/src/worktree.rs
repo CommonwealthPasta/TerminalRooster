@@ -3,7 +3,7 @@
 //! new session, or this one when asked).
 //!
 //! New worktrees go beside the repository (so on the same drive), named
-//! `<repository>-<branch>`.
+//! `<repository>-<branch>`. Removing one is in [`crate::worktree_remove`].
 
 use std::path::PathBuf;
 
@@ -15,6 +15,7 @@ use termroost_core::{Command, Outcome, TabId};
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message, expand_home};
 use crate::dialogs::field;
 use crate::sidebar::{BOLD, branch_label, display_dir, muted_text, short_dir};
+use crate::worktree_remove::RemoveMsg;
 
 /// State of the Worktrees dialog.
 #[derive(Clone, Debug)]
@@ -104,6 +105,9 @@ impl WorktreeForm {
 fn msg(m: WorktreeMsg) -> Message {
     Message::Worktree(m)
 }
+
+/// Width of a worktree's Remove button, kept free on the main one's row.
+const REMOVE_WIDTH: f32 = 66.0;
 
 fn small_button(label: &str) -> iced::widget::Button<'_, Message> {
     button(text(label).size(12)).padding([3, 10]).style(button::secondary)
@@ -288,10 +292,11 @@ impl App {
 
     /// The repository's worktrees, each with what can be done with it.
     fn view_worktree_list<'a>(&'a self, f: &'a WorktreeForm) -> Element<'a, Message> {
-        let worktrees = match &f.branches {
+        let (worktrees, main) = match &f.branches {
             None => return muted_text("Looking up worktrees…").size(12).into(),
             Some(Err(e)) => return text(e).size(12).style(text::danger).into(),
-            Some(Ok(b)) => b.worktrees.iter().filter(|w| w.usable()),
+            // git lists the main working tree first.
+            Some(Ok(b)) => (b.worktrees.iter().filter(|w| w.usable()), b.worktrees.first().map(|w| &w.path)),
         };
         let rows = worktrees.map(|w| {
             let here = git::same_path(&w.path, &f.repo.worktree);
@@ -303,16 +308,28 @@ impl App {
             };
             let open =
                 small_button("New session").on_press_maybe(idle.then(|| msg(WorktreeMsg::NewSession(w.path.clone()))));
+            // The main working tree holds the repository; git won't remove it.
+            let remove: Element<'_, Message> = if main == Some(&w.path) {
+                space::horizontal().width(REMOVE_WIDTH).into()
+            } else {
+                button(text("Remove").size(12).style(text::danger))
+                    .padding([3, 8])
+                    .width(REMOVE_WIDTH)
+                    .style(button::text)
+                    .on_press_maybe(idle.then(|| Message::RemoveWorktree(RemoveMsg::Ask(w.path.clone()))))
+                    .into()
+            };
             let head = w.head.as_ref().expect("usable worktrees have a HEAD");
             row![
                 column![
                     branch_label(head, 13.0, 40),
-                    muted_text(short_dir(&w.path, 64)).size(12).wrapping(text::Wrapping::None)
+                    muted_text(short_dir(&w.path, 52)).size(12).wrapping(text::Wrapping::None)
                 ]
                 .spacing(2)
                 .width(Length::Fill),
                 switch,
                 open,
+                remove,
             ]
             .spacing(8)
             .align_y(Alignment::Center)
@@ -347,7 +364,7 @@ impl App {
         let mut col = column![
             text("Worktrees").size(18).font(BOLD),
             text(format!("{session} is on {on} in {}.", display_dir(&f.repo.worktree))).size(13),
-            text("Switch this session to").size(14).font(BOLD),
+            text("Existing worktrees").size(14).font(BOLD),
             self.view_worktree_list(f),
             text("New worktree").size(14).font(BOLD),
             column![
