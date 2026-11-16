@@ -2,7 +2,7 @@
 //! repository, next to the Tasks tab. It follows new commits: every git poll
 //! compares the repository's refs, and reads the log again when they moved.
 //! Commits that are on no remote are marked, and the branch's distance to
-//! its upstream is shown.
+//! its upstream is shown, with Pull (rebasing by default) and Push.
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
-use crate::sidebar::{BOLD, branch_label, muted_text};
+use crate::sidebar::{BOLD, branch_label, icon_button, muted_text};
 use crate::theme;
 
 /// How many commits the log shows.
@@ -24,6 +24,22 @@ pub enum SideTab {
     #[default]
     Tasks,
     Git,
+}
+
+/// What the Git tab's buttons do with the remote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncOp {
+    Pull,
+    Push,
+}
+
+/// A pull or push: running while `result` is `None`.
+#[derive(Clone, Debug)]
+pub struct GitSync {
+    pub worktree: PathBuf,
+    pub op: SyncOp,
+    /// What happened, in a sentence, or what git said went wrong.
+    pub result: Option<Result<String, String>>,
 }
 
 /// The log on screen, and the working tree it comes from.
@@ -197,6 +213,12 @@ impl App {
         if let Some(status) = tracking.and_then(|t| remote_status(t, head)) {
             title = title.push(muted_text(status).size(12));
         }
+        if let Some(t) = tracking.filter(|t| t.remote.is_some()) {
+            title = title.push(self.sync_buttons(t, head));
+        }
+        if let Some(note) = self.sync_note() {
+            title = title.push(note);
+        }
 
         let body: Element<'_, Message> = match self.git_log.as_ref().and_then(|l| l.commits.as_ref()) {
             None => muted_text("Reading the log…").size(12).into(),
@@ -213,6 +235,85 @@ impl App {
             }
         };
         column![title, body].spacing(10).into()
+    }
+
+    /// Pull (rebasing or not) and Push, for a repository with a remote.
+    fn sync_buttons<'a>(&'a self, t: &Tracking, head: Option<&Head>) -> Element<'a, Message> {
+        let running = self.git_sync.as_ref().filter(|s| s.result.is_none()).map(|s| s.op);
+        let on_branch = matches!(head, Some(Head::Branch(_)));
+        let idle = running.is_none() && on_branch;
+        let action = |label: &'a str, busy: &'a str, op: SyncOp, enabled: bool| {
+            button(text(if running == Some(op) { busy } else { label }).size(12))
+                .padding([3, 10])
+                .style(button::secondary)
+                .on_press_maybe((idle && enabled).then_some(Message::GitSync(op)))
+        };
+        row![
+            // Pulling needs a remote branch to pull from.
+            action("↓ Pull", "Pulling…", SyncOp::Pull, t.upstream.is_some()),
+            checkbox(self.prefs.pull_rebase).label("Rebase").on_toggle(Message::PullRebase).size(14).text_size(12),
+            space::horizontal(),
+            action("↑ Push", "Pushing…", SyncOp::Push, true),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
+    /// What the last pull or push of this repository did, until dismissed.
+    fn sync_note(&self) -> Option<Element<'_, Message>> {
+        let sync = self.git_sync.as_ref()?;
+        let shown = self.git_log.as_ref().is_some_and(|l| l.worktree == sync.worktree);
+        let result = sync.result.as_ref().filter(|_| shown)?;
+        let message: Element<'_, Message> = match result {
+            Ok(done) => muted_text(done).size(12).into(),
+            Err(e) => text(e).size(12).style(text::danger).into(),
+        };
+        Some(
+            row![container(message).width(Length::Fill), icon_button("✕", Message::DismissSync, "Dismiss")]
+                .spacing(4)
+                .align_y(Alignment::Start)
+                .into(),
+        )
+    }
+
+    /// Pulls or pushes the Git tab's repository on a thread.
+    pub(crate) fn start_sync(&mut self, op: SyncOp) -> Task<Message> {
+        if self.git_sync.as_ref().is_some_and(|s| s.result.is_none()) {
+            return Task::none();
+        }
+        let Some(repo) = self.active_repo().cloned() else { return Task::none() };
+        let rebase = self.prefs.pull_rebase;
+        self.git_sync = Some(GitSync { worktree: repo.worktree.clone(), op, result: None });
+        tracing::info!(repo = %repo.worktree.display(), ?op, rebase, "git sync started");
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let result = match op {
+                SyncOp::Pull => repo.pull(rebase),
+                SyncOp::Push => repo.push(),
+            };
+            let _ = tx.send_blocking((repo.worktree, result));
+        });
+        Task::perform(async move { rx.recv().await.ok() }, |done| match done {
+            Some((worktree, result)) => Message::GitSynced(worktree, result),
+            None => Message::Noop,
+        })
+    }
+
+    /// Shows how a pull or push went, and reads the log again right away.
+    pub(crate) fn sync_done(&mut self, worktree: PathBuf, result: Result<String, String>) -> Task<Message> {
+        match &result {
+            Ok(done) => tracing::info!(repo = %worktree.display(), "{done}"),
+            Err(e) => tracing::warn!(repo = %worktree.display(), error = %e, "git sync failed"),
+        }
+        if let Some(sync) = self.git_sync.as_mut().filter(|s| s.worktree == worktree) {
+            sync.result = Some(result);
+        }
+        // A pull that brought nothing leaves the refs as they were; read anyway.
+        if let Some(log) = self.git_log.as_mut().filter(|l| l.worktree == worktree) {
+            log.stamp = None;
+        }
+        Task::batch([self.refresh_log(), self.read_git()])
     }
 }
 

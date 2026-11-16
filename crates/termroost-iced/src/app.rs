@@ -14,7 +14,7 @@ use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
-use crate::git_panel::{GitLog, LogRead, SideTab};
+use crate::git_panel::{GitLog, GitSync, LogRead, SideTab, SyncOp};
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
@@ -71,6 +71,9 @@ pub struct Prefs {
     pub side_tab: SideTab,
     /// The git log shows every branch, not just the session's.
     pub log_all_branches: bool,
+    /// Pull rebases the branch's own commits on top of what came in,
+    /// instead of merging.
+    pub pull_rebase: bool,
 }
 
 impl Default for Prefs {
@@ -94,6 +97,7 @@ impl Default for Prefs {
             confirm_quit: true,
             side_tab: SideTab::Tasks,
             log_all_branches: false,
+            pull_rebase: true,
         }
     }
 }
@@ -372,6 +376,11 @@ pub enum Message {
     SideTab(SideTab),
     LogRead(LogRead),
     LogAllBranches(bool),
+    /// Pull or push the Git tab's repository.
+    GitSync(SyncOp),
+    GitSynced(PathBuf, Result<String, String>),
+    PullRebase(bool),
+    DismissSync,
 
     DismissError,
     DismissNotice,
@@ -400,6 +409,8 @@ pub struct App {
     git_polling: bool,
     /// The log in the side panel's Git tab.
     pub(crate) git_log: Option<GitLog>,
+    /// The Git tab's last pull or push.
+    pub(crate) git_sync: Option<GitSync>,
     /// The log is being read.
     pub(crate) log_reading: bool,
     pub(crate) themes: ThemeStore,
@@ -499,6 +510,7 @@ impl App {
             git: HashMap::new(),
             git_polling: false,
             git_log: None,
+            git_sync: None,
             log_reading: false,
             themes,
             themes_dirty: false,
@@ -1508,6 +1520,13 @@ impl App {
                 return Task::batch([self.refresh_log(), self.focus_active()]);
             }
             Message::LogRead(read) => return self.log_read(read),
+            Message::GitSync(op) => return self.start_sync(op),
+            Message::GitSynced(worktree, result) => return self.sync_done(worktree, result),
+            Message::PullRebase(on) => {
+                self.prefs.pull_rebase = on;
+                self.mark_prefs();
+            }
+            Message::DismissSync => self.git_sync = None,
             Message::LogAllBranches(all) => {
                 self.prefs.log_all_branches = all;
                 self.mark_prefs();
