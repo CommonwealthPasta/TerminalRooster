@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::{Event as AEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::index::{Column, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{self, Term, TermMode, viewport_to_point};
@@ -461,7 +461,14 @@ impl TerminalHandle {
             }
             *cur = size;
         }
-        self.0.term.lock().resize(size);
+        {
+            let mut term = self.0.term.lock();
+            if cfg!(windows) {
+                resize_like_conpty(&mut term, size);
+            } else {
+                term.resize(size);
+            }
+        }
         if let Some(s) = self.0.shared.sender.lock().unwrap().as_ref() {
             let _ = s.send(Msg::Resize(size.window_size()));
         }
@@ -584,6 +591,28 @@ impl TerminalHandle {
     }
 }
 
+/// Resizes the way ConPTY resizes its screen, which it then redraws from the
+/// top: when the screen gets taller, the content stays where it is and the
+/// new rows are added below. (alacritty instead brings lines down from the
+/// history to fill them, which ConPTY then draws over, so they were lost.)
+fn resize_like_conpty<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>, size: GridSize) {
+    let rows = size.rows as usize;
+    if rows > term.screen_lines() && !term.mode().contains(TermMode::ALT_SCREEN) {
+        // The rows first, at the current width, to see how many lines came down.
+        let line = term.grid().cursor.point.line;
+        term.resize(GridSize { cols: term.columns() as u16, ..size });
+        let pulled = (term.grid().cursor.point.line.0 - line.0).max(0) as usize;
+        if pulled > 0 {
+            let grid = term.grid_mut();
+            grid.scroll_up(&(Line(0)..Line(rows as i32)), pulled);
+            grid.cursor.point.line -= pulled;
+            grid.saved_cursor.point.line = Line((grid.saved_cursor.point.line.0 - pulled as i32).max(0));
+            term.selection = None;
+        }
+    }
+    term.resize(size);
+}
+
 /// The program as the start of a Windows command line. Unquoted, a path like
 /// `C:\Program Files\Git\bin\bash.exe` is split at the space and Windows
 /// would first look for `C:\Program.exe`.
@@ -604,5 +633,54 @@ mod tests {
         assert_eq!(quote_program(r"C:\Program Files\Git\bin\bash.exe"), r#""C:\Program Files\Git\bin\bash.exe""#);
         assert_eq!(quote_program("pwsh.exe"), "pwsh.exe");
         assert_eq!(quote_program(r#""C:\a b\c.exe""#), r#""C:\a b\c.exe""#);
+    }
+
+    mod conpty {
+        use alacritty_terminal::event::VoidListener;
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Line};
+        use alacritty_terminal::term::{self, Term};
+        use alacritty_terminal::vte::ansi::Processor;
+
+        use super::super::{GridSize, resize_like_conpty};
+
+        fn term(cols: u16, rows: u16) -> Term<VoidListener> {
+            let size = GridSize { cols, rows, cell_width: 1, cell_height: 1 };
+            Term::new(term::Config::default(), &size, VoidListener)
+        }
+
+        fn feed(t: &mut Term<VoidListener>, s: &str) {
+            let mut p: Processor = Processor::new();
+            p.advance(t, s.as_bytes());
+        }
+
+        fn row(t: &Term<VoidListener>, line: i32) -> String {
+            let g = t.grid();
+            (0..g.columns()).map(|c| g[Line(line)][Column(c)].c).collect::<String>().trim_end().to_owned()
+        }
+
+        /// The rows on screen, scrolled back as the view is.
+        fn view(t: &Term<VoidListener>) -> Vec<String> {
+            let offset = t.grid().display_offset() as i32;
+            (0..t.screen_lines() as i32).map(|r| row(t, r - offset)).collect()
+        }
+
+        #[test]
+        fn growing_keeps_the_history() {
+            let mut t = term(10, 5);
+            feed(&mut t, &(1..=12).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\r\n"));
+            assert_eq!(t.grid().history_size(), 7);
+
+            resize_like_conpty(&mut t, GridSize { cols: 12, rows: 8, cell_width: 1, cell_height: 1 });
+            assert_eq!(t.grid().history_size(), 7);
+            assert_eq!(t.grid().cursor.point.line, Line(4));
+            assert_eq!(view(&t), ["l8", "l9", "l10", "l11", "l12", "", "", ""]);
+            assert_eq!(row(&t, -1), "l7");
+
+            // Shrinking works as before: the top lines go into the history.
+            resize_like_conpty(&mut t, GridSize { cols: 12, rows: 3, cell_width: 1, cell_height: 1 });
+            assert_eq!(view(&t), ["l10", "l11", "l12"]);
+            assert_eq!(t.grid().history_size(), 9);
+        }
     }
 }
