@@ -1,5 +1,6 @@
 //! Terminal sessions and the background autosave/agent-detection thread.
 
+pub mod bundled_bash;
 pub mod input;
 pub mod render;
 pub mod shell;

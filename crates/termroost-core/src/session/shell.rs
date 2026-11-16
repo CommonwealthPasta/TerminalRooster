@@ -105,8 +105,8 @@ impl std::fmt::Display for ShellOption {
 }
 
 /// The shells installed on this machine, best first. On Windows this lists
-/// Git Bash, MSYS2, WSL distributions, PowerShell and cmd; elsewhere the
-/// login shells in `/etc/shells`.
+/// TermRoost's own bash (once downloaded), Git Bash, MSYS2, WSL distributions,
+/// PowerShell and cmd; elsewhere the login shells in `/etc/shells`.
 ///
 /// Can take a moment (it asks `wsl.exe` for its distributions), so call it
 /// off the UI thread.
@@ -167,12 +167,16 @@ mod windows {
     use std::time::{Duration, Instant};
 
     use super::{ShellOption, find_in_path, parse_wsl_list};
+    use crate::session::bundled_bash;
 
     /// Keeps console programs started from the GUI from flashing a window.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     pub(super) fn detect() -> Vec<ShellOption> {
         let mut found = Vec::new();
+        if let Some(exe) = bundled_bash::installed() {
+            found.push(bundled_bash::shell_option(&exe));
+        }
         if let Some(root) = git_root() {
             let bash = display(&root.join(r"bin\bash.exe"));
             found.push(ShellOption::new("Git Bash", &[bash.as_str(), "-i", "-l"]));
@@ -268,6 +272,9 @@ mod windows {
         parse_wsl_list(&out)
     }
 }
+
+#[cfg(windows)]
+pub(crate) use windows::CREATE_NO_WINDOW;
 
 #[cfg(test)]
 mod tests {
