@@ -8,6 +8,7 @@ use std::time::Duration;
 use iced::widget::{column, container, operation, pane_grid, row, stack};
 use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
+use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId};
 
@@ -140,6 +141,22 @@ impl std::fmt::Display for TabChoice {
     }
 }
 
+/// Installing TermRoost's own bash (Settings → Terminal, Windows only).
+#[derive(Clone, Debug, Default)]
+pub enum BashInstall {
+    #[default]
+    Idle,
+    Running(bundled_bash::Progress),
+    Failed(String),
+}
+
+/// News from the thread installing the bash.
+#[derive(Clone, Debug)]
+pub enum BashInstallEvent {
+    Progress(bundled_bash::Progress),
+    Done(Result<PathBuf, String>),
+}
+
 #[derive(Clone, Debug)]
 pub enum Message {
     Core(Event),
@@ -233,6 +250,8 @@ pub enum Message {
     ShellsDetected(Vec<ShellOption>),
     /// A shell picked from the list in settings becomes the default.
     PickDefaultShell(ShellOption),
+    InstallBash,
+    BashInstall(BashInstallEvent),
 
     DismissError,
 }
@@ -255,6 +274,7 @@ pub struct App {
     pub(crate) settings: Option<SettingsState>,
     /// Shells installed on this machine, for the shell pickers.
     pub(crate) shells: Vec<ShellOption>,
+    pub(crate) bash_install: BashInstall,
     pub(crate) system_mode: iced::theme::Mode,
     ui_theme: iced::Theme,
     /// Cached Codex integration state (reads files, so refreshed on demand).
@@ -291,6 +311,7 @@ impl App {
             themes_dirty: false,
             settings: None,
             shells: Vec::new(),
+            bash_install: BashInstall::Idle,
             system_mode: iced::theme::Mode::None,
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
@@ -618,6 +639,41 @@ impl App {
                     st.shell_input = option.command.clone();
                 }
                 self.dispatch(Command::SetDefaultShell(Some(option.command)));
+            }
+            Message::InstallBash => {
+                if matches!(self.bash_install, BashInstall::Running(_)) {
+                    return Task::none();
+                }
+                let total = bundled_bash::download_size();
+                self.bash_install = BashInstall::Running(bundled_bash::Progress::Downloading { done: 0, total });
+                let (tx, rx) = async_channel::unbounded();
+                std::thread::spawn(move || {
+                    let report = tx.clone();
+                    let result = bundled_bash::install(move |p| {
+                        let _ = report.send_blocking(BashInstallEvent::Progress(p));
+                    });
+                    let _ = tx.send_blocking(BashInstallEvent::Done(result.map_err(|e| e.to_string())));
+                });
+                return Task::run(rx, Message::BashInstall);
+            }
+            Message::BashInstall(BashInstallEvent::Progress(p)) => {
+                if matches!(self.bash_install, BashInstall::Running(_)) {
+                    self.bash_install = BashInstall::Running(p);
+                }
+            }
+            Message::BashInstall(BashInstallEvent::Done(Ok(exe))) => {
+                self.bash_install = BashInstall::Idle;
+                // The button says "Install and use": new terminals start bash.
+                let command = bundled_bash::shell_option(&exe).command;
+                if let Some(st) = &mut self.settings {
+                    st.shell_input = command.clone();
+                }
+                self.dispatch(Command::SetDefaultShell(Some(command)));
+                return detect_shells();
+            }
+            Message::BashInstall(BashInstallEvent::Done(Err(e))) => {
+                tracing::warn!(error = %e, "installing TermRoost bash failed");
+                self.bash_install = BashInstall::Failed(e);
             }
             Message::Noop => {}
             Message::RemoveCodexHook => {

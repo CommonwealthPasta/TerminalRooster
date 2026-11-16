@@ -4,6 +4,7 @@ use iced::widget::{
     Column, button, checkbox, column, container, pick_list, row, scrollable, slider, space, text, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length};
+use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
 
 use crate::app::{App, Message, SettingsState};
@@ -375,6 +376,7 @@ impl App {
                      their own shell. Typed changes are saved when you press Enter or leave settings.",
                 ),
             ]
+            .push(bundled_bash::SUPPORTED.then(|| self.bundled_bash_row(&st.shell_input, &platform)))
             .spacing(12),
         )
     }
@@ -397,6 +399,49 @@ impl App {
             .padding(5)
             .width(190);
         Some(picker.into())
+    }
+
+    /// Windows: download TermRoost's own bash, or say where it is.
+    fn bundled_bash_row<'a>(&'a self, input: &str, platform: &str) -> Element<'a, Message> {
+        use crate::app::{BashInstall, shell_matching};
+
+        let mb = bundled_bash::download_size() / 1_000_000;
+        let version = bundled_bash::GIT_VERSION;
+        let install = |label: &'a str| button(text(label).size(13)).padding([4, 10]).on_press(Message::InstallBash);
+        let (action, status): (Option<Element<'a, Message>>, Element<'a, Message>) =
+            match (&self.bash_install, bundled_bash::installed()) {
+                (BashInstall::Running(progress), _) => (None, text(progress.to_string()).size(13).into()),
+                (_, Some(_)) => {
+                    let current = if input.trim().is_empty() { platform } else { input };
+                    let in_use = shell_matching(&self.shells, current).is_some_and(|o| o.name == bundled_bash::NAME);
+                    let dir = bundled_bash::install_dir().map(|d| d.display().to_string()).unwrap_or_default();
+                    let note = if in_use {
+                        format!("Installed in {dir} and used for new terminals.")
+                    } else {
+                        format!("Installed in {dir}. Pick “{}” above to use it.", bundled_bash::NAME)
+                    };
+                    (None, muted_text(note).into())
+                }
+                (BashInstall::Failed(e), None) => (
+                    Some(install("Try again").into()),
+                    text(format!("Could not install bash: {e}")).size(13).style(text::danger).into(),
+                ),
+                (BashInstall::Idle, None) => (
+                    Some(install("Install and use").into()),
+                    muted_text(format!(
+                        "Bash with coreutils, vim, less, ssh and git, from Git for Windows {version}: a {mb} MB \
+                         download, a few hundred MB unpacked into TermRoost's own folder. Nothing else on the \
+                         system changes."
+                    ))
+                    .into(),
+                ),
+            };
+        row![text("TermRoost bash").size(13).width(120)]
+            .push(action)
+            .push(container(status).width(Length::Fill))
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .into()
     }
 }
 
