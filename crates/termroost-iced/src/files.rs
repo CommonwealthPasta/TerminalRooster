@@ -3,6 +3,9 @@
 //! Folders are read when they are opened, on a thread (the folder may be on a
 //! slow network drive), and kept by their full path, so sessions in the same
 //! folder share what was read.
+//!
+//! What git leaves out (`.gitignore`, `.git/info/exclude`, the global
+//! excludes file) is dimmed, along with everything inside it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,6 +29,8 @@ pub struct Entry {
     pub path: PathBuf,
     pub name: String,
     pub is_dir: bool,
+    /// Git's ignore rules leave it out.
+    pub ignored: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -56,6 +61,18 @@ pub enum FilesMsg {
 /// `.git` (a folder, or a file in a linked worktree) is left out.
 pub fn list_dir(dir: &Path) -> Result<Vec<Entry>, String> {
     let read = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    // What a walk that follows git's rules (as git does: only inside a
+    // repository) still lists; the rest is ignored. Hidden files count too.
+    let kept: HashSet<PathBuf> = ignore::WalkBuilder::new(dir)
+        .max_depth(Some(1))
+        .hidden(false)
+        .ignore(false)
+        .parents(true)
+        .build()
+        .filter_map(Result::ok)
+        .filter(|e| e.depth() == 1)
+        .map(ignore::DirEntry::into_path)
+        .collect();
     let mut entries: Vec<Entry> = read
         .filter_map(Result::ok)
         .filter(|e| e.file_name() != ".git")
@@ -67,7 +84,8 @@ pub fn list_dir(dir: &Path) -> Result<Vec<Entry>, String> {
                 Ok(t) => t.is_dir(),
                 Err(_) => false,
             };
-            Entry { name: e.file_name().to_string_lossy().into_owned(), path, is_dir }
+            let ignored = !kept.contains(&path);
+            Entry { name: e.file_name().to_string_lossy().into_owned(), path, is_dir, ignored }
         })
         .collect();
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase(), e.name.clone()));
@@ -81,22 +99,23 @@ pub enum Row<'a> {
         entry: &'a Entry,
         depth: usize,
         open: bool,
+        /// Ignored by git, itself or as part of an ignored folder.
+        dim: bool,
     },
     /// "Loading…", an error, or how many entries are not shown.
-    Note {
-        text: String,
-        depth: usize,
-    },
+    Note { text: String, depth: usize },
 }
 
 /// The tree under `root` as lines: each open folder's listing below it.
 pub fn rows<'a>(root: &Path, state: &'a FilesState) -> Vec<Row<'a>> {
     let mut out = Vec::new();
-    push_rows(root, 0, state, &mut out);
+    push_rows(root, 0, false, state, &mut out);
     out
 }
 
-fn push_rows<'a>(dir: &Path, depth: usize, state: &'a FilesState, out: &mut Vec<Row<'a>>) {
+/// `dim`: `dir` is ignored. Git's rules don't say so of the things inside an
+/// ignored folder (`target/` doesn't match `target/debug`), so they inherit it.
+fn push_rows<'a>(dir: &Path, depth: usize, dim: bool, state: &'a FilesState, out: &mut Vec<Row<'a>>) {
     match state.listings.get(dir) {
         None => out.push(Row::Note { text: "Loading…".into(), depth }),
         Some(Listing::Failed(e)) => out.push(Row::Note { text: format!("Can't read this folder: {e}"), depth }),
@@ -106,9 +125,10 @@ fn push_rows<'a>(dir: &Path, depth: usize, state: &'a FilesState, out: &mut Vec<
             }
             for entry in entries.iter().take(MAX_ENTRIES) {
                 let open = entry.is_dir && state.expanded.contains(&entry.path);
-                out.push(Row::Entry { entry, depth, open });
+                let dim = dim || entry.ignored;
+                out.push(Row::Entry { entry, depth, open, dim });
                 if open {
-                    push_rows(&entry.path, depth + 1, state, out);
+                    push_rows(&entry.path, depth + 1, dim, state, out);
                 }
             }
             if entries.len() > MAX_ENTRIES {
@@ -203,16 +223,17 @@ impl App {
 
 fn file_row(r: Row<'_>) -> Element<'_, Message> {
     match r {
-        Row::Entry { entry, depth, open } => {
+        Row::Entry { entry, depth, open, dim } => {
             let arrow = match (entry.is_dir, open) {
                 (true, true) => "▾",
                 (true, false) => "▸",
                 (false, _) => "",
             };
+            let style = move |t: &iced::Theme| text::Style { color: dim.then(|| theme::muted(t)) };
             let label = row![
                 space::horizontal().width(depth as f32 * INDENT),
-                text(arrow).size(11).width(12),
-                text(&entry.name).size(13).wrapping(text::Wrapping::None),
+                text(arrow).size(11).width(12).style(style),
+                text(&entry.name).size(13).wrapping(text::Wrapping::None).style(style),
             ]
             .spacing(2)
             .align_y(Alignment::Center);
@@ -262,23 +283,60 @@ mod tests {
         assert!(list_dir(&dir.path().join("gone")).is_err());
     }
 
-    fn entry(path: &str, is_dir: bool) -> Entry {
-        let path = PathBuf::from(path);
-        Entry { name: path.file_name().unwrap().to_string_lossy().into_owned(), path, is_dir }
+    /// What `list_dir` says of each entry: its name, with `~` when it is ignored.
+    fn marked(dir: &Path) -> Vec<String> {
+        list_dir(dir).unwrap().iter().map(|e| format!("{}{}", e.name, if e.ignored { "~" } else { "" })).collect()
     }
 
-    /// Each line as `depth:text`, `▸`/`▾` marking closed and open folders.
+    #[test]
+    fn what_git_ignores_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "target/\n*.log\n").unwrap();
+        for f in ["main.rs", "build.log", ".env"] {
+            std::fs::write(root.join(f), "").unwrap();
+        }
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::create_dir_all(root.join("src/gen")).unwrap();
+        std::fs::write(root.join("src/.gitignore"), "gen/\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+
+        assert_eq!(marked(root), ["src", "target~", ".env", ".gitignore", "build.log~", "main.rs"]);
+        assert_eq!(marked(&root.join("src")), ["gen~", ".gitignore", "lib.rs"], "rules of the folder itself");
+        // Rules from folders above count too; the inside of an ignored folder
+        // isn't matched by them (rows() dims it).
+        std::fs::write(root.join("src/notes.log"), "").unwrap();
+        assert_eq!(marked(&root.join("src")), ["gen~", ".gitignore", "lib.rs", "notes.log~"]);
+        assert_eq!(marked(&root.join("target")), ["debug"]);
+    }
+
+    #[test]
+    fn outside_a_repository_gitignore_does_not_count() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(dir.path().join("a.log"), "").unwrap();
+        assert_eq!(marked(dir.path()), [".gitignore", "a.log"], "as in git");
+    }
+
+    fn entry(path: &str, is_dir: bool) -> Entry {
+        let path = PathBuf::from(path);
+        Entry { name: path.file_name().unwrap().to_string_lossy().into_owned(), path, is_dir, ignored: false }
+    }
+
+    /// Each line as `depth:text`, `▸`/`▾` marking closed and open folders and
+    /// `~` dimmed entries.
     fn lines(root: &str, state: &FilesState) -> Vec<String> {
         rows(Path::new(root), state)
             .into_iter()
             .map(|r| match r {
-                Row::Entry { entry, depth, open } => {
+                Row::Entry { entry, depth, open, dim } => {
                     let mark = match (entry.is_dir, open) {
                         (true, true) => "▾",
                         (true, false) => "▸",
                         _ => "",
                     };
-                    format!("{depth}:{mark}{}", entry.name)
+                    format!("{depth}:{mark}{}{}", entry.name, if dim { "~" } else { "" })
                 }
                 Row::Note { text, depth } => format!("{depth}:({text})"),
             })
@@ -301,6 +359,17 @@ mod tests {
             ["0:▾src", "1:▾lib", "2:(Loading…)", "0:▸docs", "0:x.md"],
             "an open folder not read yet says so; files never open"
         );
+    }
+
+    #[test]
+    fn the_inside_of_an_ignored_folder_is_dimmed_too() {
+        let mut state = FilesState::default();
+        let ignored = Entry { ignored: true, ..entry("/r/target", true) };
+        state.listings.insert("/r".into(), Listing::Ready(vec![entry("/r/src", true), ignored]));
+        state.listings.insert("/r/target".into(), Listing::Ready(vec![entry("/r/target/debug", true)]));
+        state.listings.insert("/r/target/debug".into(), Listing::Ready(vec![entry("/r/target/debug/app", false)]));
+        state.expanded.extend(["/r/target".into(), "/r/target/debug".into()]);
+        assert_eq!(lines("/r", &state), ["0:▸src", "0:▾target~", "1:▾debug~", "2:app~"]);
     }
 
     #[test]
