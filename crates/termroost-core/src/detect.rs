@@ -600,6 +600,91 @@ pub(crate) fn wait_for_exit(pids: &[u32], timeout: Duration) -> bool {
     }
 }
 
+/// A process working in a folder, see [`processes_in`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderProcess {
+    pub pid: u32,
+    /// Its program's file name (`cmd.exe`).
+    pub name: String,
+    start: u64,
+}
+
+/// The processes whose working directory is in `dir` or below, or whose
+/// program is: Windows cannot delete a folder while they run. Leaves out
+/// this process, its own children, and the processes of `shells` (the
+/// terminals' shells, which are stopped another way) and below them.
+pub fn processes_in(dir: &Path, shells: &[u32]) -> Vec<FolderProcess> {
+    let Ok(mut sys) = System::new() else { return Vec::new() };
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().without_tasks().with_cwd(UpdateKind::Always).with_exe(UpdateKind::Always),
+    );
+    let children = children_of(&sys);
+    let skip: HashSet<Pid> = shells.iter().flat_map(|s| tree(&children, *s)).collect();
+    let me = Pid::from_u32(std::process::id());
+    let within = |path: Option<&Path>| path.is_some_and(|p| crate::git::is_within(p, dir));
+    let mut found: Vec<FolderProcess> = sys
+        .processes()
+        .iter()
+        .filter(|(pid, p)| **pid != me && p.parent() != Some(me) && !skip.contains(pid))
+        .filter(|(_, p)| within(p.cwd()) || within(p.exe()))
+        .map(|(pid, p)| FolderProcess {
+            pid: pid.as_u32(),
+            name: p.name().to_string_lossy().into_owned(),
+            start: p.start_time(),
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
+    found
+}
+
+/// Ends the given processes, except ones that exited meanwhile (their id
+/// may belong to another process by now). Returns the ids of those ended,
+/// to wait for (see [`crate::LeftDir::wait`]).
+pub fn end_processes(procs: &[FolderProcess]) -> Vec<u32> {
+    let Ok(mut sys) = System::new() else { return Vec::new() };
+    let pids: Vec<Pid> = procs.iter().map(|p| Pid::from_u32(p.pid)).collect();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        true,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
+    procs
+        .iter()
+        .filter(|f| sys.process(Pid::from_u32(f.pid)).is_some_and(|p| p.start_time() == f.start && p.kill()))
+        .map(|f| f.pid)
+        .collect()
+}
+
+/// Waits up to `grace` for the process `pid` (which `process` is a handle
+/// to) to exit. If it does not, ends it and every process below it, and
+/// returns true.
+#[cfg(windows)]
+pub(crate) fn end_unless_exited(pid: u32, process: &std::os::windows::io::OwnedHandle, grace: Duration) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+
+    let handle = process.as_raw_handle();
+    let millis = u32::try_from(grace.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: `process` is an open process handle.
+    if unsafe { WaitForSingleObject(handle, millis) } != WAIT_TIMEOUT {
+        return false;
+    }
+    // While the handle is open, `pid` is still this process.
+    if let Ok(mut sys) = System::new() {
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
+        let below = tree(&children_of(&sys), pid);
+        for p in below.iter().skip(1).filter_map(|p| sys.process(*p)) {
+            p.kill();
+        }
+    }
+    // SAFETY: as above.
+    unsafe { TerminateProcess(handle, 1) };
+    true
+}
+
 /// Lowercased file stem of a program path (`/usr/bin/Codex.exe` -> `codex`).
 fn stem(s: &std::ffi::OsStr) -> String {
     Path::new(s).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()

@@ -120,6 +120,9 @@ pub(crate) struct Shared {
     cwd: Mutex<Option<PathBuf>>,
     /// Locked after the term, never before.
     pin: Mutex<Pin>,
+    /// PTYs of the core's terminals that are open, or closed with their shell
+    /// not seen gone yet (see `tap::EndShell`).
+    pub(crate) ptys: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Shared {
@@ -313,6 +316,7 @@ impl TerminalHandle {
         palette: SharedPalette,
         scrollback_lines: usize,
         size: GridSize,
+        ptys: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Self {
         let shared = Arc::new(Shared {
             pane,
@@ -332,6 +336,7 @@ impl TerminalHandle {
             programs: Mutex::new(Vec::new()),
             cwd: Mutex::new(None),
             pin: Mutex::new(Pin::Off),
+            ptys,
         });
         let config = term::Config { scrolling_history: scrollback_lines, ..Default::default() };
         let term = Term::new(config, &size, Proxy { shared: shared.clone(), run: None });

@@ -189,16 +189,39 @@ impl Repo {
     /// Removes the linked working tree at `path`, deleting its folder; `force`
     /// deletes uncommitted changes too. Branches are kept. git runs from the
     /// main working tree, so its own working directory is not in the folder
-    /// it deletes (Windows cannot delete a folder a process is working in).
+    /// it deletes (Windows cannot delete a folder a process is working in;
+    /// see [`crate::detect::processes_in`] for the others).
     pub fn remove_worktree(&self, path: &Path, force: bool) -> Result<(), String> {
-        let from = self.main_worktree().unwrap_or_else(|| self.common_dir.clone());
         let path = path.to_string_lossy();
         let mut args = vec!["worktree", "remove"];
         if force {
             args.push("--force");
         }
         args.push(&path);
-        git(&from, &args).map(drop)
+        git(&self.main_dir(), &args).map(drop)
+    }
+
+    /// Whether git lists a working tree at `path`. git forgets a worktree it
+    /// removes even when it cannot delete all of its folder.
+    pub fn has_worktree(&self, path: &Path) -> Result<bool, String> {
+        let list = git(&self.main_dir(), &["worktree", "list", "--porcelain"])?;
+        Ok(Branches::parse("", &list).worktrees.iter().any(|w| same_path(&w.path, path)))
+    }
+
+    /// Deletes what is left of the folder of a worktree git removed but
+    /// could not delete all of (see [`Repo::has_worktree`]). Refuses while
+    /// git still lists it.
+    pub fn remove_leftover(&self, path: &Path) -> Result<(), String> {
+        if self.has_worktree(path)? {
+            return Err(format!("{} is still a worktree", path.display()));
+        }
+        std::fs::remove_dir_all(path).map_err(|e| format!("could not delete {}: {e}", path.display()))
+    }
+
+    /// Where git runs for the repository as a whole: the main working tree,
+    /// whose folder is never removed.
+    fn main_dir(&self) -> PathBuf {
+        self.main_worktree().unwrap_or_else(|| self.common_dir.clone())
     }
 
     /// How this working tree's commits stand against the remotes, as of the
@@ -966,6 +989,53 @@ mod tests {
         let branches = repo.branches().unwrap();
         assert_eq!(branches.worktrees.len(), 1);
         assert!(branches.local.contains(&"fix".to_owned()), "the branch is kept");
+    }
+
+    /// On Windows a program working in a worktree's folder keeps git from
+    /// deleting all of it, but git forgets the worktree anyway; the rest goes
+    /// once the program is ended. With git installed.
+    #[cfg(windows)]
+    #[test]
+    fn removes_what_a_busy_worktree_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("app");
+        std::fs::create_dir(&root).unwrap();
+        let run = |args: &[&str]| git(&root, args);
+        if run(&["init", "-q", "-b", "main"]).is_err() {
+            eprintln!("git not available; skipping");
+            return;
+        }
+        let who = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"];
+        run(&[&who[..], &["commit", "-q", "--allow-empty", "-m", "first"]].concat()).unwrap();
+        let repo = Repo::discover(&root).unwrap();
+        let path = repo.suggest_worktree_path("fix").unwrap();
+        repo.add_worktree(&path, "fix", &Plan::NewBranch, None).unwrap();
+        assert!(repo.remove_leftover(&path).unwrap_err().contains("still a worktree"));
+        assert!(path.join(".git").exists());
+
+        // A program in a subfolder, started by a shell that is gone at once.
+        let sub = path.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", "/b", "ping", "-n", "60", "127.0.0.1"])
+            .current_dir(&sub)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let found = crate::detect::processes_in(&path, &[]);
+        assert!(found.iter().any(|p| p.name.eq_ignore_ascii_case("ping.exe")), "{found:?}");
+
+        assert!(repo.remove_worktree(&path, true).is_err());
+        assert!(sub.exists());
+        assert_eq!(repo.has_worktree(&path), Ok(false), "git forgets it anyway");
+        assert!(repo.remove_leftover(&path).is_err(), "still in use");
+
+        let ended = crate::detect::end_processes(&found);
+        assert_eq!(ended.len(), found.len());
+        assert!(crate::detect::wait_for_exit(&ended, std::time::Duration::from_secs(10)));
+        repo.remove_leftover(&path).unwrap();
+        assert!(!path.exists());
     }
 
     /// Push, pull and tracking against a bare repository standing in for a

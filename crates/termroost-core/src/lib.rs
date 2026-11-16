@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 pub use agent::{AgentKind, AgentSession};
 pub use alert::{AgentEvent, Alert};
@@ -175,6 +175,7 @@ impl Core {
             store: store.writer(),
             events: events_tx,
             saved_lines: Arc::new(AtomicUsize::new(state.settings.saved_scrollback_lines)),
+            ptys: Arc::new(AtomicUsize::new(0)),
         };
         codex_hook::set_running(&data_dir, true);
         let (stop_tx, stop_rx) = mpsc::channel();
@@ -268,6 +269,12 @@ impl Core {
         self.bg.sessions.lock().unwrap().get(&pane).cloned()
     }
 
+    /// Process ids of the running shells of all terminals.
+    pub fn shell_pids(&self) -> Vec<u32> {
+        let sessions = self.bg.sessions.lock().unwrap();
+        sessions.values().chain(self.scratch.values()).filter_map(|h| h.shell_pid()).collect()
+    }
+
     /// Records the effects of an event on the state. Call for every event.
     pub fn apply_event(&mut self, event: &Event) {
         match event {
@@ -324,7 +331,7 @@ impl Core {
     /// it restart in their tab's directory when idle; ones running a program
     /// stay, see [`LeftDir::busy`]. Wait with [`LeftDir::wait`] before
     /// deleting the directory: Windows cannot delete a folder that a process
-    /// is still working in.
+    /// is still working in (other programs: [`detect::processes_in`]).
     pub fn leave_dir(&mut self, dir: &std::path::Path) -> LeftDir {
         let s = &self.state;
         let closed: Vec<TabId> =
@@ -365,6 +372,13 @@ impl Core {
                 handle.print_notice(&format!("─── left {}, which is being removed ───", dir.display()));
                 self.start_process(*pane, &handle, false);
             }
+        }
+        // And so does this process.
+        if let (Ok(cwd), Some(parent)) = (std::env::current_dir(), dir.parent())
+            && git::is_within(&cwd, dir)
+            && let Err(e) = std::env::set_current_dir(parent)
+        {
+            tracing::warn!(error = %e, "could not leave a folder being removed");
         }
         tracing::info!(dir = %dir.display(), closed = closed.len(), busy = busy.len(), "left a directory");
         LeftDir { closed, busy, pids }
@@ -985,6 +999,7 @@ impl Core {
             self.palette.clone(),
             self.state.settings.scrollback_lines,
             size,
+            self.bg.ptys.clone(),
         );
         let restored = self.restored.remove(&pane);
         // A coding agent shows its conversation again when it resumes, so its
@@ -1078,6 +1093,7 @@ impl Core {
             self.palette.clone(),
             self.state.settings.scrollback_lines,
             size,
+            self.bg.ptys.clone(),
         )
     }
 
@@ -1161,8 +1177,22 @@ impl Core {
         for (_, h) in self.scratch.drain() {
             h.shutdown();
         }
+        // Their threads close the terminals, and end shells closing left
+        // running; this process may exit right after.
+        let deadline = Instant::now() + PTY_CLOSE_WAIT;
+        while self.bg.ptys.load(std::sync::atomic::Ordering::Acquire) > 0 {
+            if Instant::now() >= deadline {
+                tracing::warn!("terminals still closing at shutdown");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
+
+/// How long [`Core::shutdown`] waits for the terminals to close, longer
+/// than a closed terminal's shell gets to exit.
+const PTY_CLOSE_WAIT: Duration = Duration::from_secs(7);
 
 impl Drop for Core {
     fn drop(&mut self) {

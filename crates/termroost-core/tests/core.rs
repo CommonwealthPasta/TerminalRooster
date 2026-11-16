@@ -413,6 +413,38 @@ fn state_survives_a_crash() {
 }
 
 #[test]
+fn closed_terminals_end_their_shells() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(printer("x", None)))).unwrap();
+    let Outcome::Project(p) = core
+        .dispatch(Command::CreateProject { name: "p".into(), working_dir: dir.path().into(), shell: None })
+        .unwrap()
+    else {
+        panic!()
+    };
+    // Closed as soon as they start: on Windows, closing a console before
+    // its shell is up does not end the shell, which runs on without a
+    // window (and keeps its folder from being deleted).
+    let mut shells = Vec::new();
+    for _ in 0..3 {
+        let Outcome::Tab(tab) =
+            core.dispatch(Command::CreateTab { project: p, title: None, working_dir: None }).unwrap()
+        else {
+            panic!()
+        };
+        let pane = core.state().tab(tab).unwrap().layout.first_pane();
+        shells.extend(core.terminal(pane).and_then(|h| h.shell_pid()));
+        core.dispatch(Command::DeleteTab(tab)).unwrap();
+    }
+    assert_eq!(shells.len(), 3);
+    // Dropping the core waits for them, as the process may exit right after.
+    drop(core);
+    let shells = LeftDir { pids: shells, ..Default::default() };
+    assert!(shells.wait(Duration::from_secs(1)), "shells outlived their terminals");
+}
+
+#[test]
 fn palette_can_change_at_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let mut core = open(dir.path());

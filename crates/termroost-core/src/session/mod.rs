@@ -41,6 +41,8 @@ pub(crate) struct Background {
     pub store: StoreWriter,
     pub events: async_channel::Sender<Event>,
     pub saved_lines: Arc<std::sync::atomic::AtomicUsize>,
+    /// PTYs not done closing, of all terminals; see `tap::EndShell`.
+    pub ptys: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Background {

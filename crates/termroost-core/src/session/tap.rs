@@ -4,6 +4,7 @@
 
 use std::io::{self, Read};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use alacritty_terminal::event::{OnResize, WindowSize};
 use alacritty_terminal::tty::{ChildEvent, EventedPty, EventedReadWrite, Pty};
@@ -17,12 +18,68 @@ pub(crate) struct TapPty {
     scanner: OscScanner,
     signals: Vec<Signal>,
     shared: Arc<Shared>,
+    /// Declared after `inner`, so it drops once the PTY is closed.
+    _end: EndShell,
 }
 
 impl TapPty {
     pub fn new(inner: Pty, shared: Arc<Shared>) -> Self {
-        Self { inner, scanner: OscScanner::default(), signals: Vec::new(), shared }
+        shared.ptys.fetch_add(1, Ordering::AcqRel);
+        let end = EndShell {
+            ptys: shared.ptys.clone(),
+            #[cfg(windows)]
+            shell: shell_process(&inner),
+        };
+        Self { inner, scanner: OscScanner::default(), signals: Vec::new(), shared, _end: end }
     }
+}
+
+/// How long a shell gets to exit once its console is closed, before it is
+/// ended.
+#[cfg(windows)]
+const SHELL_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ends the shell once its PTY is closed, if closing did not. On Windows a
+/// console closed right after it started does not end its shell, which then
+/// runs on without a window. Counts the PTY in [`Shared::ptys`] until done.
+struct EndShell {
+    ptys: Arc<std::sync::atomic::AtomicUsize>,
+    /// The shell's process id, and a handle to the process that keeps the
+    /// id from going to another process meanwhile.
+    #[cfg(windows)]
+    shell: Option<(u32, std::os::windows::io::OwnedHandle)>,
+}
+
+impl Drop for EndShell {
+    fn drop(&mut self) {
+        let ptys = self.ptys.clone();
+        #[cfg(windows)]
+        if let Some((pid, process)) = self.shell.take() {
+            let end = move || {
+                if crate::detect::end_unless_exited(pid, &process, SHELL_EXIT_GRACE) {
+                    tracing::info!(pid, "ended a shell that outlived its terminal");
+                }
+                ptys.fetch_sub(1, Ordering::AcqRel);
+            };
+            if let Err(e) = std::thread::Builder::new().name("end-shell".into()).spawn(end) {
+                tracing::warn!(error = %e, "could not watch a closed terminal's shell");
+                self.ptys.fetch_sub(1, Ordering::AcqRel);
+            }
+            return;
+        }
+        ptys.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// The PTY's shell, if it started.
+#[cfg(windows)]
+fn shell_process(pty: &Pty) -> Option<(u32, std::os::windows::io::OwnedHandle)> {
+    use std::os::windows::io::{BorrowedHandle, RawHandle};
+    let watcher = pty.child_watcher();
+    let pid = watcher.pid()?.get();
+    // SAFETY: the handle is valid while the PTY is; the copy outlives it.
+    let process = unsafe { BorrowedHandle::borrow_raw(watcher.raw_handle() as RawHandle) };
+    Some((pid, process.try_clone_to_owned().ok()?))
 }
 
 impl Read for TapPty {
