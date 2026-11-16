@@ -821,15 +821,8 @@ impl Core {
     /// restored and not checked for agents. `command` is typed into its shell
     /// once it has started (e.g. `codex`). Close it with [`Core::close_scratch_terminal`].
     pub fn open_scratch_terminal(&mut self, cwd: &std::path::Path, command: Option<&str>) -> TerminalHandle {
-        let pane = PaneId(-self.next_scratch);
-        self.next_scratch += 1;
-        let handle = TerminalHandle::new(
-            pane,
-            self.bg.events.clone(),
-            self.palette.clone(),
-            self.state.settings.scrollback_lines,
-            GridSize::default(),
-        );
+        let handle = self.new_scratch(GridSize::default());
+        let pane = handle.pane();
         let spec = SpawnSpec {
             shell: session::shell::resolve(None, self.state.settings.default_shell.as_deref()),
             cwd: cwd.to_path_buf(),
@@ -845,6 +838,40 @@ impl Core {
         }
         self.scratch.insert(pane, handle.clone());
         handle
+    }
+
+    /// Runs `command` itself, without a shell, in a terminal that belongs to
+    /// no project (as [`Core::open_scratch_terminal`] does), with `env` added
+    /// to the usual environment. Programs such as an editor end the terminal
+    /// when they quit: [`Event::ProcessExited`] says so, and then the terminal
+    /// is closed with [`Core::close_scratch_terminal`].
+    pub fn open_program_terminal(
+        &mut self,
+        cwd: &std::path::Path,
+        command: session::shell::ShellCommand,
+        env: Vec<(String, String)>,
+        size: GridSize,
+    ) -> Result<TerminalHandle> {
+        let handle = self.new_scratch(size);
+        let mut all = base_env();
+        all.extend(env);
+        tracing::info!(pane = %handle.pane(), program = %command.program, cwd = %cwd.display(), "starting program");
+        handle.spawn(&SpawnSpec { shell: command, cwd: cwd.to_path_buf(), env: all })?;
+        self.scratch.insert(handle.pane(), handle.clone());
+        Ok(handle)
+    }
+
+    /// A terminal for [`Core::open_scratch_terminal`] and the like, with nothing running yet.
+    fn new_scratch(&mut self, size: GridSize) -> TerminalHandle {
+        let pane = PaneId(-self.next_scratch);
+        self.next_scratch += 1;
+        TerminalHandle::new(
+            pane,
+            self.bg.events.clone(),
+            self.palette.clone(),
+            self.state.settings.scrollback_lines,
+            size,
+        )
     }
 
     /// Stops a terminal opened with [`Core::open_scratch_terminal`].

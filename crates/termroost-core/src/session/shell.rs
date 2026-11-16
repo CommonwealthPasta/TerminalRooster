@@ -1,4 +1,7 @@
-//! Shell selection and command-line splitting.
+//! Shell selection and command-line splitting, and finding programs on PATH.
+
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 /// A program plus its arguments.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +65,66 @@ pub fn default_shell() -> ShellCommand {
 #[cfg(windows)]
 pub(crate) fn find_in_path(exe: &str) -> bool {
     std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file())).unwrap_or(false)
+}
+
+/// The full path of program `name` in the folders of `path` (a `PATH`
+/// value). On Windows `name` may leave out `.exe` (or `.com`). Batch files
+/// are not taken: they can't be started without a shell. Folders on `path`
+/// that aren't absolute are skipped, as they depend on the working directory.
+pub fn find_program(name: &str, path: &OsStr) -> Option<PathBuf> {
+    let names: Vec<String> = if cfg!(windows) && Path::new(name).extension().is_none() {
+        vec![format!("{name}.exe"), format!("{name}.com")]
+    } else {
+        vec![name.to_owned()]
+    };
+    std::env::split_paths(path)
+        .filter(|d| d.is_absolute())
+        .flat_map(|d| names.iter().map(move |n| d.join(n)).collect::<Vec<_>>())
+        .find(|p| p.is_file())
+}
+
+/// A terminal editor for files, and what to add to its environment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorProgram {
+    pub program: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
+impl EditorProgram {
+    /// `program`, with what it needs to run here: a Vim built for MSYS (Git
+    /// for Windows has one in `usr\bin`) reads `TERM`, which Windows doesn't set.
+    pub fn new(program: PathBuf) -> EditorProgram {
+        let msys = cfg!(windows) && program.parent().is_some_and(|d| d.ends_with(Path::new("usr").join("bin")));
+        let env = if msys { vec![("TERM".to_owned(), "xterm-256color".to_owned())] } else { Vec::new() };
+        EditorProgram { program, env }
+    }
+}
+
+/// The editor files open in when they are edited in a terminal editor and
+/// no command is set: Neovim on PATH, else Vim on PATH; on Windows then the
+/// Vim of Git for Windows, else the one of TerminalRooster's own bash.
+pub fn find_terminal_editor() -> Option<EditorProgram> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    pick_editor(&path, &fallback_editors()).map(EditorProgram::new)
+}
+
+fn pick_editor(path: &OsStr, fallbacks: &[PathBuf]) -> Option<PathBuf> {
+    ["nvim", "vim"]
+        .into_iter()
+        .find_map(|name| find_program(name, path))
+        .or_else(|| fallbacks.iter().find(|p| p.is_file()).cloned())
+}
+
+#[cfg(windows)]
+fn fallback_editors() -> Vec<PathBuf> {
+    let git = windows::git_root().map(|root| root.join(r"usr\bin\vim.exe"));
+    let ours = super::bundled_bash::install_dir().map(|dir| dir.join(r"usr\bin\vim.exe"));
+    git.into_iter().chain(ours).collect()
+}
+
+#[cfg(not(windows))]
+fn fallback_editors() -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// Resolves the shell for a pane: project override, then global default, then platform.
@@ -209,7 +272,7 @@ mod windows {
 
     /// A Git for Windows installation: next to `git.exe` on PATH, or in one of
     /// the usual places (installer, per-user installer, scoop).
-    fn git_root() -> Option<PathBuf> {
+    pub(super) fn git_root() -> Option<PathBuf> {
         let is_root = |d: &Path| d.join(r"bin\bash.exe").is_file() && d.join("git-bash.exe").is_file();
         // git.exe lives in <root>\cmd, <root>\bin or <root>\mingw64\bin.
         let near_git = std::env::var_os("PATH")
@@ -279,6 +342,56 @@ pub(crate) use windows::CREATE_NO_WINDOW;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty program file named as `name` would be on this platform.
+    fn program(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(if cfg!(windows) { format!("{name}.exe") } else { name.to_owned() });
+        std::fs::write(&path, "").unwrap();
+        path
+    }
+
+    #[test]
+    fn programs_are_found_on_the_path() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let vim = program(a.path(), "vim");
+        let nvim = program(b.path(), "nvim");
+        let both = std::env::join_paths([a.path(), b.path()]).unwrap();
+        assert_eq!(find_program("vim", &both), Some(vim.clone()));
+        assert_eq!(find_program("emacs", &both), None);
+        assert_eq!(pick_editor(&both, &[]), Some(nvim), "Neovim first, wherever it is on the path");
+        let only_vim = std::env::join_paths([a.path()]).unwrap();
+        assert_eq!(pick_editor(&only_vim, &[]), Some(vim));
+        let fallback = program(a.path(), "fallback");
+        let none = OsStr::new("");
+        assert_eq!(pick_editor(none, &[a.path().join("missing"), fallback.clone()]), Some(fallback));
+        assert_eq!(pick_editor(none, &[]), None);
+        let relative = std::env::join_paths(["relative-dir"]).unwrap();
+        assert_eq!(find_program("vim", &relative), None, "folders that aren't absolute are skipped");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_names_may_leave_out_exe_but_not_be_batch_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tool.cmd"), "").unwrap();
+        let path = std::env::join_paths([dir.path()]).unwrap();
+        assert_eq!(find_program("tool", &path), None);
+        let exe = program(dir.path(), "tool");
+        assert_eq!(find_program("tool", &path), Some(exe.clone()));
+        assert_eq!(find_program("tool.exe", &path), Some(exe));
+    }
+
+    #[test]
+    fn msys_vim_is_told_the_terminal_type() {
+        let git_vim = EditorProgram::new(PathBuf::from(r"C:\Program Files\Git\usr\bin\vim.exe"));
+        let nvim = EditorProgram::new(PathBuf::from(r"C:\Program Files\Neovim\bin\nvim.exe"));
+        assert!(nvim.env.is_empty());
+        if cfg!(windows) {
+            assert_eq!(git_vim.env, [("TERM".to_owned(), "xterm-256color".to_owned())]);
+        } else {
+            assert!(git_vim.env.is_empty(), "TERM is set for every terminal elsewhere");
+        }
+    }
 
     #[test]
     fn joining_round_trips() {

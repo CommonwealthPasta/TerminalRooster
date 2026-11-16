@@ -647,3 +647,31 @@ fn new_sessions_can_start_in_another_directory() {
     core.terminal(pane).unwrap().write(format!("{show_dir}\r"));
     wait_for_text(&mut core, pane, "app-other]");
 }
+
+#[test]
+fn programs_run_without_a_shell_and_end_their_terminal() {
+    use termroost_core::session::shell::ShellCommand;
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open(dir.path());
+    let (program, args) = if cfg!(windows) { ("cmd.exe", ["/c", "exit 4"]) } else { ("sh", ["-c", "exit 4"]) };
+    let command = ShellCommand { program: program.into(), args: args.map(Into::into).to_vec() };
+    let handle = core.open_program_terminal(dir.path(), command, Vec::new(), GridSize::default()).unwrap();
+    let pane = handle.pane();
+    assert!(pane.0 < 0, "outside the projects");
+
+    let mut code = None;
+    wait_for(&mut core, Duration::from_secs(15), |_, ev| {
+        if let Some(Event::ProcessExited { pane: p, code: c }) = ev
+            && *p == pane
+        {
+            code = *c;
+            return true;
+        }
+        false
+    });
+    assert_eq!(code, Some(4), "its own exit status, no shell around it");
+    core.close_scratch_terminal(pane);
+
+    let missing = ShellCommand { program: "no-such-program-terminalrooster".into(), args: Vec::new() };
+    assert!(core.open_program_terminal(dir.path(), missing, Vec::new(), GridSize::default()).is_err());
+}
