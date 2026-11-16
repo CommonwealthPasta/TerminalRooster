@@ -10,6 +10,7 @@ mod keymap;
 mod layout_conv;
 mod logging;
 mod notify;
+mod on_escape;
 mod panes;
 mod reorder;
 mod settings;

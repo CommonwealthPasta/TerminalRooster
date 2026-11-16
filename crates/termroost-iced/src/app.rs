@@ -255,6 +255,8 @@ pub enum Message {
     ProjectSearchSubmit,
     /// Empty the projects search box (its ✕).
     ProjectSearchClear,
+    /// Escape in the projects search box: empty it and go back to the terminal.
+    ProjectSearchEscape,
 
     NewProject,
     EditProject(ProjectId),
@@ -929,6 +931,10 @@ impl App {
             Message::ProjectSearchClear => {
                 self.project_search.clear();
                 return operation::focus(PROJECT_SEARCH);
+            }
+            Message::ProjectSearchEscape => {
+                self.project_search.clear();
+                return self.focus_active();
             }
 
             Message::NewProject => {

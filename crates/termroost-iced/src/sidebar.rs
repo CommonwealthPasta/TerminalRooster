@@ -11,6 +11,7 @@ use termroost_core::{PaneId, Project, ProjectId, Tab, TabId};
 use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
+use crate::on_escape::on_escape;
 use crate::reorder::reorder;
 use crate::theme;
 
@@ -227,7 +228,7 @@ impl App {
             .size(13)
             .padding(Padding { right: 28.0, ..Padding::new(5.0) });
         // The input stays the first layer, so it keeps its focus when the ✕ comes and goes.
-        let mut field = stack![input];
+        let mut field = stack![on_escape(input, Message::ProjectSearchEscape)];
         if !self.project_search.is_empty() {
             let clear = icon_button("✕", Message::ProjectSearchClear, "Clear search");
             field = field.push(container(clear).padding([0, 2]).align_right(Length::Fill).center_y(Length::Fill));
