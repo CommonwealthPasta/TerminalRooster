@@ -41,9 +41,8 @@ fn bash(command: String) -> Shell {
 }
 
 #[cfg(windows)]
-#[test]
-fn powershell() {
-    check(Shell {
+fn windows_powershell() -> Shell {
+    Shell {
         command: "powershell.exe -NoLogo -NoProfile".into(),
         prompt: "PS ",
         fail: "cmd /c exit 3",
@@ -52,7 +51,13 @@ fn powershell() {
             // UTF-8, as agents write it (Windows PowerShell defaults to the OEM code page).
             format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Console]::Write('{s}')")
         },
-    });
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell() {
+    check(windows_powershell());
 }
 
 /// Git Bash as TerminalRooster starts it: an interactive login shell, which
@@ -184,4 +189,54 @@ fn running_programs_are_listed() {
         assert!(Instant::now() < deadline, "{name} not listed: {running:?}");
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// Waits for an `ActivityChanged` of `pane` after which its activity passes `check`.
+fn wait_for_activity(core: &mut Core, pane: PaneId, what: &str, check: impl Fn(&Activity) -> bool) {
+    let events = core.events();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let activity = |core: &Core| core.terminal(pane).unwrap().activity();
+    loop {
+        match events.try_recv() {
+            Ok(e) => {
+                core.apply_event(&e);
+                if e == Event::ActivityChanged(pane) && check(&activity(core)) {
+                    return;
+                }
+            }
+            Err(_) => {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}: {:?}", activity(core));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
+/// What the sidebar shows a terminal doing: programs from the periodic scan,
+/// and an agent's turn from its own signals.
+#[test]
+fn activity_is_reported() {
+    #[cfg(windows)]
+    let (shell, program, name) = (windows_powershell(), "ping -n 4 127.0.0.1", "ping");
+    #[cfg(not(windows))]
+    let (shell, program, name) = (bash("bash --norc --noprofile".into()), "sleep 3", "sleep");
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(shell.command.clone()))).unwrap();
+    core.dispatch(Command::CreateProject { name: "p".into(), working_dir: dir.path().into(), shell: None }).unwrap();
+    let pane = core.state().active_tab().unwrap().layout.first_pane();
+    wait_for_text(&mut core, pane, shell.prompt);
+    let h = core.terminal(pane).unwrap();
+    assert!(h.activity().is_idle(), "{:?}", h.activity());
+    let run = |line: &str| h.write(format!("{line}\r"));
+
+    run(program);
+    let runs = |a: &Activity| a.busy_programs().any(|p| p.name.eq_ignore_ascii_case(name));
+    wait_for_activity(&mut core, pane, name, runs);
+    wait_for_activity(&mut core, pane, "the program to end", Activity::is_idle);
+
+    run(&(shell.print)("\\e]0;\u{25d0} Fixing\\a"));
+    wait_for_activity(&mut core, pane, "the agent's turn", |a| a.agent_working && !a.is_idle());
+    run(&(shell.print)("\\e]0;\u{2733} Fixing\\a"));
+    wait_for_activity(&mut core, pane, "the end of the turn", Activity::is_idle);
 }

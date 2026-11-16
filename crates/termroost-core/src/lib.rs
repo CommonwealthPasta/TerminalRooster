@@ -43,7 +43,7 @@ pub use layout::{Axis, Layout};
 pub use model::*;
 pub use session::input::{Key, KeyInput, Modifiers, MouseButton, MouseEventKind, MouseInput, NamedKey};
 pub use session::render::{CellStyle, CursorInfo, CursorShape, Palette, RenderCell, RenderContent, Rgb};
-pub use session::{GridSize, SelectionKind, TerminalHandle};
+pub use session::{Activity, GridSize, SelectionKind, TerminalHandle};
 
 use paths::InstanceLock;
 use session::{Background, SpawnSpec};
@@ -58,7 +58,8 @@ pub struct Config {
     /// Where the database lives; `None` uses [`paths::default_data_dir`].
     pub data_dir: Option<PathBuf>,
     pub palette: Palette,
-    /// How often changed scrollback is saved and terminals are checked for agents.
+    /// How often changed scrollback is saved and terminals are checked for
+    /// agents and other programs.
     pub autosave_interval: Duration,
     /// Where Claude Code, Codex and Grok keep their session records.
     pub agent_homes: AgentHomes,
@@ -1121,7 +1122,7 @@ impl Core {
         let _ = stop.send(());
         let _ = thread.join();
         // Last look at what runs where, while the agents are still alive.
-        for (pane, agent) in self.bg.detect_agents() {
+        for (pane, agent) in self.bg.scan_terminals() {
             self.record_agent(pane, agent.as_ref());
         }
         codex_hook::set_running(&self.data_dir, false);
