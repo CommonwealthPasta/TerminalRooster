@@ -369,6 +369,13 @@ impl Core {
                 self.start_process(*pane, &handle, false);
             }
         }
+        // And so does this process.
+        if let (Ok(cwd), Some(parent)) = (std::env::current_dir(), dir.parent())
+            && git::is_within(&cwd, dir)
+            && let Err(e) = std::env::set_current_dir(parent)
+        {
+            tracing::warn!(error = %e, "could not leave a folder being removed");
+        }
         tracing::info!(dir = %dir.display(), closed = closed.len(), busy = busy.len(), "left a directory");
         LeftDir { closed, busy, pids }
     }
