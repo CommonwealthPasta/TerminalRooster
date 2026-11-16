@@ -225,6 +225,27 @@ impl App {
                 }
                 col.push(actions("Quit", true)).into()
             }
+            Dialog::SaveConflict { doc, name } => column![
+                text(format!("{name} changed on disk")).size(18).font(BOLD),
+                text(
+                    "It was changed outside TerminalRooster since you opened or saved it, maybe by an agent. \
+                     Overwrite replaces that version with yours; Reload shows it and drops your changes (undo \
+                     brings them back).",
+                )
+                .size(13),
+                row![
+                    space::horizontal(),
+                    button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text("Reload"))
+                        .padding([6, 14])
+                        .style(button::secondary)
+                        .on_press(Message::Editor(EditorMsg::Reload(*doc))),
+                    button(text("Overwrite")).padding([6, 14]).style(button::danger).on_press(Message::DialogSubmit),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
             Dialog::CloseFile { doc, name } => column![
                 text(format!("Save the changes to {name}?")).size(18).font(BOLD),
                 text("If you don't save them, they are lost.").size(13),

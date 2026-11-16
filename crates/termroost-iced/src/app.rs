@@ -178,6 +178,11 @@ pub enum Dialog {
         doc: DocId,
         name: String,
     },
+    /// Saving a file that changed on disk since it was read.
+    SaveConflict {
+        doc: DocId,
+        name: String,
+    },
 }
 
 /// State of the settings page while it is open.
@@ -402,6 +407,8 @@ pub struct App {
     pub(crate) next_doc: u64,
     /// The last version number given to the text of an open file.
     pub(crate) next_version: u64,
+    /// Open files are being compared with the disk.
+    pub(crate) disk_polling: bool,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     pub(crate) error: Option<String>,
@@ -506,6 +513,7 @@ impl App {
             editors: HashMap::new(),
             next_doc: 0,
             next_version: 0,
+            disk_polling: false,
             activity: HashSet::new(),
             error: None,
             notice: None,
@@ -633,6 +641,10 @@ impl App {
         ];
         if self.files_shown() && self.window_focused {
             subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Files(FilesMsg::Poll)));
+        }
+        // Agents change open files: look at them now and then, and when coming back to the window.
+        if self.has_text_docs() && self.window_focused {
+            subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Editor(EditorMsg::DiskPoll)));
         }
         if self.task_drag.is_some() {
             // Only while a task is held, so moving the mouse doesn't redraw the app otherwise.
@@ -818,6 +830,9 @@ impl App {
             Message::WindowFocus(id, focused) => {
                 self.window_id = Some(id);
                 self.window_focused = focused;
+                if focused {
+                    return self.update(Message::Editor(EditorMsg::DiskPoll));
+                }
             }
             Message::WindowFound(id) => self.window_id = self.window_id.or(id),
             Message::ShowPane(pane) => return self.show_pane(pane),
@@ -1606,7 +1621,8 @@ impl App {
                 self.dialog = Some(Dialog::Worktree(form));
                 return self.update_worktree(WorktreeMsg::Submit);
             }
-            Dialog::CloseFile { doc, .. } => return self.save_doc(doc, true),
+            Dialog::CloseFile { doc, .. } => return self.save_doc(doc, true, false),
+            Dialog::SaveConflict { doc, .. } => return self.update(Message::Editor(EditorMsg::SaveAnyway(doc))),
             Dialog::ConfirmQuit { dont_ask, .. } => {
                 if dont_ask {
                     self.prefs.confirm_quit = false;

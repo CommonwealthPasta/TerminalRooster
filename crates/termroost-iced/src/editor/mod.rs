@@ -1,6 +1,7 @@
 //! Files opened from the Files tab. Each session has its own open files, and
 //! one of them can be shown in place of the session's terminals.
 
+mod disk;
 mod history;
 mod keys;
 mod text;
@@ -16,8 +17,9 @@ use iced::widget::text_editor::{self, Action, Cursor, Edit, Position};
 use termroost_core::TabId;
 
 use crate::app::{App, Dialog, Message};
+use disk::{FileText, OnDisk, Reaction, SaveError, Stamp};
 use history::{History, Snapshot};
-pub use text::{Decoded, Format, Indent};
+pub use text::{Format, Indent};
 
 /// Widget id of the file editor, for focusing it.
 pub const FILE_EDITOR: &str = "file-editor";
@@ -69,6 +71,18 @@ pub struct TextDoc {
     /// Close it once it is written (Save in the close dialog).
     close_after_save: bool,
     pub history: History,
+    /// The file on disk when it was last read or written.
+    disk: Stamp,
+    /// The file changed on disk in a way that needs the user to choose.
+    pub conflict: Option<Conflict>,
+}
+
+/// How the file on disk went its own way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Conflict {
+    /// It changed while there are unsaved changes here (its new stamp).
+    Changed(Stamp),
+    Deleted,
 }
 
 impl TextDoc {
@@ -83,6 +97,23 @@ impl TextDoc {
             self.history.push(Snapshot::of(&self.content, self.version));
         }
         self.history.edited(kind, now);
+    }
+
+    /// Shows `file` as read from disk now, with nothing left unsaved. The
+    /// text before can be had back with undo.
+    fn replace_text(&mut self, file: FileText, version: u64) {
+        self.history.push(Snapshot::of(&self.content, self.version));
+        self.history.close_step();
+        let at = self.content.cursor().position;
+        let text = file.decoded.text;
+        let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+        Snapshot { text: lines.join("\n"), cursor: (at.line, at.column), version }.restore(&mut self.content);
+        self.format = file.decoded.format;
+        self.indent = text::detect_indent(&text);
+        self.disk = file.stamp;
+        self.version = version;
+        self.saved_version = version;
+        self.conflict = None;
     }
 }
 
@@ -107,7 +138,7 @@ pub enum EditorMsg {
     /// Close a file without saving its changes.
     Discard(DocId),
     /// A file was read (or can't be edited, and why).
-    Loaded(DocId, Result<Decoded, String>),
+    Loaded(DocId, Result<FileText, String>),
     /// Something done in the editor: typing, moving, selecting, scrolling.
     Action(DocId, text_editor::Action),
     /// Tab (`false`) or Shift+Tab (`true`).
@@ -115,15 +146,26 @@ pub enum EditorMsg {
     Undo(DocId),
     Redo(DocId),
     Save(DocId),
+    /// Save over a file that changed on disk, or write a deleted one again.
+    SaveAnyway(DocId),
     /// A file was written as it was at that version.
-    Saved(DocId, u64, Result<(), String>),
+    Saved(DocId, u64, Result<Stamp, SaveError>),
+    /// Time to look at the open files on disk.
+    DiskPoll,
+    /// How each file looked on disk, compared to the stamp it had then.
+    DiskChecked(Vec<(DocId, Stamp, OnDisk)>),
+    /// Show what is on disk instead of the unsaved changes here.
+    Reload(DocId),
+    Reloaded(DocId, Result<FileText, String>),
+    /// Keep the changes here over what changed on disk (until saved).
+    KeepMine(DocId),
 }
 
 impl EditorMsg {
     /// Whether the message may be logged: some carry what is in a file or
     /// what the user types.
     pub fn loggable(&self) -> bool {
-        !matches!(self, EditorMsg::Loaded(..) | EditorMsg::Action(..))
+        !matches!(self, EditorMsg::Loaded(..) | EditorMsg::Action(..) | EditorMsg::Reloaded(..))
     }
 }
 
@@ -232,10 +274,60 @@ impl App {
         files.shown = Some(id);
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let _ = tx.send_blocking(text::read_file(&path));
+            let _ = tx.send_blocking(disk::read(&path));
         });
         Task::perform(async move { rx.recv().await.unwrap_or_else(|_| Err("reading it stopped".into())) }, move |r| {
             Message::Editor(EditorMsg::Loaded(id, r))
+        })
+    }
+
+    /// Reads an open file again, to show what is on disk now.
+    fn reload_doc(&mut self, id: DocId) -> Task<Message> {
+        let Some((_, doc)) = self.doc(id) else { return Task::none() };
+        let path = doc.path.clone();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(disk::read(&path));
+        });
+        Task::perform(async move { rx.recv().await.unwrap_or_else(|_| Err("reading it stopped".into())) }, move |r| {
+            Message::Editor(EditorMsg::Reloaded(id, r))
+        })
+    }
+
+    /// Whether any open file is shown in the built-in editor (and so is
+    /// compared with the disk now and then).
+    pub(crate) fn has_text_docs(&self) -> bool {
+        self.editors.values().flat_map(|f| &f.open).any(|d| matches!(d.kind, DocKind::Text(_)))
+    }
+
+    /// Looks at every open file on disk, on a thread.
+    fn poll_disk(&mut self) -> Task<Message> {
+        if self.disk_polling {
+            return Task::none();
+        }
+        let files: Vec<(DocId, PathBuf, Stamp)> = self
+            .editors
+            .values()
+            .flat_map(|f| &f.open)
+            .filter_map(|d| match &d.kind {
+                DocKind::Text(t) if !t.saving => Some((d.id, d.path.clone(), t.disk)),
+                _ => None,
+            })
+            .collect();
+        if files.is_empty() {
+            return Task::none();
+        }
+        self.disk_polling = true;
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let checked = files.into_iter().map(|(id, path, known)| {
+                let now = disk::check(&path, &known);
+                (id, known, now)
+            });
+            let _ = tx.send_blocking(checked.collect());
+        });
+        Task::perform(async move { rx.recv().await.unwrap_or_default() }, |c| {
+            Message::Editor(EditorMsg::DiskChecked(c))
         })
     }
 
@@ -252,13 +344,15 @@ impl App {
     }
 
     /// Writes a file with changes on a thread; `then_close` closes it after.
-    pub(crate) fn save_doc(&mut self, id: DocId, then_close: bool) -> Task<Message> {
+    /// Unless `force`, a file that changed on disk is not written over, and
+    /// one without changes is not written at all.
+    pub(crate) fn save_doc(&mut self, id: DocId, then_close: bool, force: bool) -> Task<Message> {
         let Some(OpenFile { path, kind: DocKind::Text(doc), .. }) = self.doc_mut(id) else { return Task::none() };
         doc.close_after_save |= then_close;
         if doc.saving {
             return Task::none();
         }
-        if !doc.modified() {
+        if !doc.modified() && !force {
             if doc.close_after_save {
                 self.close_doc(id);
                 return self.focus_active();
@@ -268,14 +362,16 @@ impl App {
         doc.saving = true;
         let bytes = text::encode(doc.content.lines().map(|l| l.text), doc.format);
         let version = doc.version;
+        let known = doc.disk;
         let path = path.clone();
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
-            let _ = tx.send_blocking(std::fs::write(&path, bytes).map_err(|e| e.to_string()));
+            let _ = tx.send_blocking(disk::write(&path, &bytes, Some(&known), force));
         });
-        Task::perform(async move { rx.recv().await.unwrap_or_else(|_| Err("writing it stopped".into())) }, move |r| {
-            Message::Editor(EditorMsg::Saved(id, version, r))
-        })
+        Task::perform(
+            async move { rx.recv().await.unwrap_or_else(|_| Err(SaveError::Io("writing it stopped".into()))) },
+            move |r| Message::Editor(EditorMsg::Saved(id, version, r)),
+        )
     }
 
     fn next_version(&mut self) -> u64 {
@@ -305,7 +401,7 @@ impl App {
                 self.close_doc(id);
                 self.focus_active()
             }
-            EditorMsg::Loaded(id, Ok(decoded)) => {
+            EditorMsg::Loaded(id, Ok(FileText { decoded, stamp })) => {
                 let version = self.next_version();
                 if let Some(doc) = self.doc_mut(id) {
                     let mut content = text_editor::Content::with_text(&decoded.text);
@@ -320,6 +416,8 @@ impl App {
                         saving: false,
                         close_after_save: false,
                         history: History::default(),
+                        disk: stamp,
+                        conflict: None,
                     }));
                 }
                 self.focus_active()
@@ -376,30 +474,91 @@ impl App {
                 }
                 Task::none()
             }
-            EditorMsg::Save(id) => {
+            EditorMsg::Save(id) | EditorMsg::SaveAnyway(id) => {
+                let force = matches!(msg, EditorMsg::SaveAnyway(_));
+                if force {
+                    self.dialog = None;
+                }
                 if let Some(doc) = self.text_mut(id) {
                     doc.history.close_step();
                 }
-                self.save_doc(id, false)
+                Task::batch([self.save_doc(id, false, force), self.focus_active()])
             }
             EditorMsg::Saved(id, version, result) => {
-                let name = self.doc(id).map(|(tab, d)| self.file_label(Some(tab), &d.path));
+                let name = self.doc(id).map(|(tab, d)| self.file_label(Some(tab), &d.path)).unwrap_or_default();
                 let Some(doc) = self.text_mut(id) else { return Task::none() };
                 doc.saving = false;
                 match result {
-                    Ok(()) => {
+                    Ok(stamp) => {
                         doc.saved_version = version;
+                        doc.disk = stamp;
+                        doc.conflict = None;
                         if doc.close_after_save {
                             self.close_doc(id);
                             return self.focus_active();
                         }
                     }
-                    Err(e) => {
+                    Err(SaveError::Conflict) => {
                         doc.close_after_save = false;
-                        self.error = Some(format!("Could not save {}: {e}", name.unwrap_or_default()));
+                        self.dialog = Some(Dialog::SaveConflict { doc: id, name });
+                    }
+                    Err(SaveError::Io(e)) => {
+                        doc.close_after_save = false;
+                        self.error = Some(format!("Could not save {name}: {e}"));
                     }
                 }
                 Task::none()
+            }
+            EditorMsg::DiskPoll => self.poll_disk(),
+            EditorMsg::DiskChecked(checked) => {
+                self.disk_polling = false;
+                let mut reload = Vec::new();
+                for (id, known, now) in checked {
+                    let Some(doc) = self.text_mut(id) else { continue };
+                    // Saved or reloaded meanwhile: this look is out of date.
+                    if doc.saving || doc.disk != known {
+                        continue;
+                    }
+                    match disk::react(doc.modified(), now) {
+                        Reaction::Keep(stamp) => {
+                            doc.disk = stamp;
+                            // Back after being deleted, unchanged.
+                            if doc.conflict == Some(Conflict::Deleted) {
+                                doc.conflict = None;
+                            }
+                        }
+                        Reaction::Reload => reload.push(id),
+                        Reaction::Ask(stamp) => doc.conflict = Some(Conflict::Changed(stamp)),
+                        Reaction::Deleted => doc.conflict = Some(Conflict::Deleted),
+                        Reaction::Nothing => {}
+                    }
+                }
+                Task::batch(reload.into_iter().map(|id| self.reload_doc(id)))
+            }
+            EditorMsg::Reload(id) => {
+                self.dialog = None;
+                Task::batch([self.reload_doc(id), self.focus_active()])
+            }
+            EditorMsg::Reloaded(id, Ok(file)) => {
+                let version = self.next_version();
+                if let Some(doc) = self.text_mut(id) {
+                    doc.replace_text(file, version);
+                }
+                Task::none()
+            }
+            EditorMsg::Reloaded(id, Err(e)) => {
+                let name = self.doc(id).map(|(tab, d)| self.file_label(Some(tab), &d.path)).unwrap_or_default();
+                self.error = Some(format!("Can't read {name} again: {e}."));
+                Task::none()
+            }
+            EditorMsg::KeepMine(id) => {
+                if let Some(doc) = self.text_mut(id)
+                    && let Some(Conflict::Changed(stamp)) = doc.conflict.take()
+                {
+                    // Asked again only if it changes again.
+                    doc.disk = stamp;
+                }
+                self.focus_active()
             }
         }
     }

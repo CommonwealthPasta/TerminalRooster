@@ -1,8 +1,6 @@
 //! Reading text files for the editor: what counts as text, and how its
 //! lines end, so saving can write it back the same way.
 
-use std::path::Path;
-
 /// Larger files are not opened: the editor keeps whole copies for undo.
 pub const MAX_SIZE: u64 = 5 * 1024 * 1024;
 /// How much of the start is looked at for NUL bytes, as git does to spot binaries.
@@ -113,19 +111,7 @@ pub struct Decoded {
     pub format: Format,
 }
 
-/// Reads `path` as text, or says why it can't be edited.
-pub fn read_file(path: &Path) -> Result<Decoded, String> {
-    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
-        return Err("it is not a file".into());
-    }
-    if meta.len() > MAX_SIZE {
-        return Err(too_large());
-    }
-    decode(std::fs::read(path).map_err(|e| e.to_string())?)
-}
-
-fn too_large() -> String {
+pub fn too_large() -> String {
     format!("it is larger than {} MB", MAX_SIZE / (1024 * 1024))
 }
 
@@ -217,16 +203,6 @@ mod tests {
         let mut late = vec![b'a'; BINARY_PROBE + 10];
         late[BINARY_PROBE + 5] = 0;
         assert!(decode(late).is_ok());
-    }
-
-    #[test]
-    fn reading_checks_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(read_file(dir.path()).unwrap_err().contains("not a file"));
-        assert!(read_file(&dir.path().join("gone")).is_err());
-        let file = dir.path().join("a.txt");
-        std::fs::write(&file, "hi\n").unwrap();
-        assert_eq!(read_file(&file).unwrap().text, "hi\n");
     }
 
     #[test]

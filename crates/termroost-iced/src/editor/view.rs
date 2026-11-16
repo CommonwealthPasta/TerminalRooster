@@ -4,7 +4,7 @@ use iced::widget::{button, center, column, container, row, space, text, text_edi
 use iced::{Alignment, Element, Length};
 
 use super::text::char_column;
-use super::{DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, keys};
+use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, keys};
 use crate::app::{App, Message};
 use crate::sidebar::{display_dir, icon_button, muted_text};
 use crate::theme::{self, MONO};
@@ -66,11 +66,41 @@ impl App {
                 if self.dialog.is_none() {
                     editor = editor.on_action(move |a| Message::Editor(EditorMsg::Action(id, a)));
                 }
-                column![editor, self.status_line(doc, t)].into()
+                // The banner goes below the text: above it, appearing moves the
+                // editor, which then loses the keyboard (seen with iced 0.14;
+                // cause not found). The text doesn't jump this way either.
+                column![editor, conflict_banner(id, t.conflict), self.status_line(doc, t)].into()
             }
         }
     }
+}
 
+/// Under the text when the file went its own way on disk: what happened,
+/// and what to do about it.
+fn conflict_banner<'a>(id: DocId, conflict: Option<Conflict>) -> Element<'a, Message> {
+    let small = |label: &'a str, msg: EditorMsg| {
+        button(text(label).size(12)).padding([3, 10]).style(button::secondary).on_press(Message::Editor(msg))
+    };
+    let (message, buttons, style): (&str, _, fn(&iced::Theme) -> container::Style) = match conflict {
+        None => return space::vertical().height(0).into(),
+        Some(Conflict::Changed(_)) => (
+            "This file changed on disk, and you have unsaved changes here.",
+            row![small("Reload", EditorMsg::Reload(id)), small("Keep mine", EditorMsg::KeepMine(id))],
+            theme::notice_banner,
+        ),
+        Some(Conflict::Deleted) => (
+            "This file was deleted from disk.",
+            row![small("Save it again", EditorMsg::SaveAnyway(id)), small("Close", EditorMsg::Close(id))],
+            theme::error_banner,
+        ),
+    };
+    container(row![text(message).size(13).width(Length::Fill), buttons.spacing(6)].align_y(Alignment::Center))
+        .padding([4, 10])
+        .style(style)
+        .into()
+}
+
+impl App {
     /// Under the editor: the file, where the cursor is, and how the file is stored.
     fn status_line(&self, doc: &OpenFile, t: &TextDoc) -> Element<'_, Message> {
         let at = t.content.cursor().position;
