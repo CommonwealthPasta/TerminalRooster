@@ -11,9 +11,10 @@ use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
 use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
-use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
+use termroost_core::{AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
+use crate::groups;
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
@@ -245,8 +246,11 @@ pub enum Message {
     SelectProject(ProjectId),
     SelectTab(TabId),
     NewTab,
-    /// Move a project to this index of the list without it (dragged there).
-    MoveProject(ProjectId, usize),
+    /// Move or group projects (dragged, or moved with the keyboard): a
+    /// `MoveProject`, `MoveGroup` or `GroupProjects` command.
+    ArrangeProjects(Command),
+    /// Show or hide a group's projects.
+    ToggleGroup(GroupId),
     /// Move a session to this index of its project's list without it.
     MoveTab(TabId, usize),
     /// The text in the projects search box changed.
@@ -913,9 +917,14 @@ impl App {
                     return self.after_select();
                 }
             }
-            Message::MoveProject(project, to_index) => {
-                let group = self.core.state().project(project).and_then(|p| p.group);
-                self.dispatch(Command::MoveProject { project, to_index, group });
+            Message::ArrangeProjects(cmd) => {
+                self.dispatch(cmd);
+            }
+            Message::ToggleGroup(group) => {
+                if let Some(g) = self.core.state().group(group) {
+                    let collapsed = !g.collapsed;
+                    self.dispatch(Command::SetGroupCollapsed { group, collapsed });
+                }
             }
             Message::MoveTab(tab, to_index) => {
                 self.dispatch(Command::MoveTab { tab, to_index });
@@ -1830,10 +1839,10 @@ impl App {
             Action::MoveProjectUp | Action::MoveProjectDown => {
                 if let Some(project) = s.selected_project {
                     // One place up or down in the list as shown, while searching.
-                    let all: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
-                    let shown: Vec<ProjectId> = self.listed_projects().map(|p| p.id).collect();
-                    if let Some(to) = step(&shown, project, action == Action::MoveProjectDown) {
-                        return self.update(Message::MoveProject(project, place(&all, &shown, project, to)));
+                    let all = groups::entries(&s.projects);
+                    let shown = groups::entries(self.listed_projects());
+                    if let Some(cmd) = groups::step(&all, &shown, project, action == Action::MoveProjectDown) {
+                        return self.update(Message::ArrangeProjects(cmd));
                     }
                 }
             }
@@ -1928,22 +1937,6 @@ fn step<T: PartialEq>(items: &[T], item: T, down: bool) -> Option<usize> {
     if down { (i + 1 < items.len()).then_some(i + 1) } else { i.checked_sub(1) }
 }
 
-/// Where `item` goes among `all` when it is moved to index `to` of `shown`
-/// without it, `shown` being some of `all` in the same order: just above the
-/// item that follows it in `shown`, or just below the last one. The result is
-/// an index of `all` without `item`, like `to`.
-pub(crate) fn place<T: Copy + PartialEq>(all: &[T], shown: &[T], item: T, to: usize) -> usize {
-    let rest: Vec<T> = all.iter().copied().filter(|x| *x != item).collect();
-    let others: Vec<T> = shown.iter().copied().filter(|x| *x != item).collect();
-    let index = |x: T| rest.iter().position(|r| *r == x);
-    let placed = match others.get(to) {
-        Some(&below) => index(below),
-        None => others.last().and_then(|&last| index(last)).map(|i| i + 1),
-    };
-    // Nothing else shown to go by: it stays where it is.
-    placed.or_else(|| all.iter().position(|x| *x == item)).unwrap_or(to)
-}
-
 pub(crate) fn expand_home(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~")
         && (rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
@@ -1988,30 +1981,5 @@ mod tests {
         assert_eq!(cycle(&items, None, false), Some('c'), "not listed: the last");
         assert_eq!(cycle(&[] as &[char], None, true), None);
         assert_eq!(cycle(&[] as &[char], None, false), None);
-    }
-
-    /// `all` after moving `item` to index `to` of `shown` without it.
-    fn moved(all: &str, shown: &str, item: char, to: usize) -> String {
-        let all: Vec<char> = all.chars().collect();
-        let shown: Vec<char> = shown.chars().collect();
-        let mut out: Vec<char> = all.iter().copied().filter(|c| *c != item).collect();
-        out.insert(place(&all, &shown, item, to), item);
-        out.into_iter().collect()
-    }
-
-    #[test]
-    fn moves_in_a_filtered_list_land_among_the_shown_items() {
-        // Everything shown: `to` is the place.
-        for to in 0..3 {
-            let mut expected: Vec<char> = "bc".chars().collect();
-            expected.insert(to, 'a');
-            assert_eq!(moved("abc", "abc", 'a', to), expected.into_iter().collect::<String>());
-        }
-        // `h` is hidden: a, b, c are shown.
-        assert_eq!(moved("ahbc", "abc", 'b', 0), "bahc", "up past a");
-        assert_eq!(moved("ahbc", "abc", 'a', 1), "hbac", "down past b, which was below h");
-        assert_eq!(moved("ahbc", "abc", 'b', 2), "ahcb", "to the end of the shown items");
-        assert_eq!(moved("ahbcz", "abc", 'a', 2), "hbcaz", "just below the last one shown");
-        assert_eq!(moved("ahb", "b", 'b', 0), "ahb", "alone in the list: stays");
     }
 }
