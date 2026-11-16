@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="packaging/icons/terminalrooster-256.png" alt="TerminalRooster's icon: a rooster's head in a terminal window" width="128">
+</p>
+
 # TerminalRooster
 
 A project-based terminal manager for running coding agents (Claude Code, Codex, Grok, …) side by side.
