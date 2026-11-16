@@ -5,8 +5,11 @@
 //! front end can poll them for every visible session. Everything else runs
 //! the `git` program.
 
+use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// The working tree a directory belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,6 +201,96 @@ impl Repo {
         git(&from, &args).map(drop)
     }
 
+    /// How this working tree's commits stand against the remotes, as of the
+    /// last fetch. `unpushed` covers the newest `limit` commits of HEAD, or
+    /// of every branch when `all`.
+    pub fn tracking(&self, all: bool, limit: usize) -> Result<Tracking, String> {
+        let remotes: Vec<String> = git(&self.worktree, &["remote"])?
+            .lines()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .map(Into::into)
+            .collect();
+        if remotes.is_empty() {
+            return Ok(Tracking::default());
+        }
+        let mut t = Tracking::default();
+        if let Some(Head::Branch(branch)) = self.head() {
+            let format = "--format=%(upstream:short)%09%(upstream:remotename)";
+            let line = git(&self.worktree, &["for-each-ref", format, &format!("refs/heads/{branch}")])?;
+            let mut parts = line.trim_end().split('\t');
+            let (upstream, remote) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            // An upstream whose remote branch was deleted fails to count, and counts as none.
+            if !upstream.is_empty()
+                && let Ok(counts) = git(&self.worktree, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+            {
+                let mut n = counts.split_whitespace().map(|n| n.parse().unwrap_or(0));
+                (t.ahead, t.behind) = (n.next().unwrap_or(0), n.next().unwrap_or(0));
+                t.upstream = Some(upstream.to_owned());
+                t.remote = Some(remote.to_owned()).filter(|r| !r.is_empty());
+            }
+        }
+        if t.remote.is_none() {
+            t.remote = remotes.iter().find(|r| *r == "origin").or(remotes.first()).cloned();
+        }
+        // A new repository has no HEAD commit to list from.
+        if all || self.head_commit().is_some() {
+            let max = format!("--max-count={limit}");
+            let tips = if all { "--branches" } else { "HEAD" };
+            let out = git(&self.worktree, &["rev-list", tips, "--not", "--remotes", &max])?;
+            t.unpushed = out.lines().map(str::trim).filter(|l| !l.is_empty()).map(Into::into).collect();
+        }
+        Ok(t)
+    }
+
+    /// Pushes the checked-out branch. A branch without an upstream is pushed
+    /// to the remote [`Repo::tracking`] names, and gets it as its upstream.
+    /// Returns what happened, in a sentence.
+    pub fn push(&self) -> Result<String, String> {
+        let Some(Head::Branch(branch)) = self.head() else {
+            return Err("Not on a branch: check one out to push it.".into());
+        };
+        let t = self.tracking(false, 1)?;
+        let Some(remote) = t.remote else { return Err("This repository has no remote to push to.".into()) };
+        match &t.upstream {
+            Some(upstream) => {
+                git_remote(&self.worktree, &["push"])?;
+                Ok(format!("Pushed {branch} to {upstream}."))
+            }
+            None => {
+                git_remote(&self.worktree, &["push", "--set-upstream", &remote, &branch])?;
+                Ok(format!("Pushed {branch} to {remote}, which it now tracks."))
+            }
+        }
+    }
+
+    /// Pulls the checked-out branch's upstream, rebasing the branch's own
+    /// commits on top of it, or merging it when `rebase` is off. Returns what
+    /// happened, in a sentence.
+    pub fn pull(&self, rebase: bool) -> Result<String, String> {
+        let Some(Head::Branch(branch)) = self.head() else {
+            return Err("Not on a branch: check one out to pull into it.".into());
+        };
+        let t = self.tracking(false, 1)?;
+        if t.remote.is_none() {
+            return Err("This repository has no remote to pull from.".into());
+        }
+        let Some(upstream) = t.upstream else {
+            return Err(format!("{branch} does not track a remote branch yet: push it first."));
+        };
+        // Whether anything came in shows in HEAD; git's own words vary with
+        // the language and with rebasing or merging.
+        let before = self.head_commit();
+        git_remote(&self.worktree, &["pull", if rebase { "--rebase" } else { "--no-rebase" }])?;
+        Ok(if self.head_commit() == before {
+            format!("{branch} is up to date with {upstream}.")
+        } else if rebase {
+            format!("Pulled {upstream} and rebased {branch} on it.")
+        } else {
+            format!("Pulled {upstream} into {branch}.")
+        })
+    }
+
     /// The latest `limit` commits of this working tree's HEAD, or of every
     /// branch and tag when `all`, newest first.
     pub fn log(&self, all: bool, limit: usize) -> Result<Vec<Commit>, String> {
@@ -259,6 +352,23 @@ impl Repo {
         }
         h.finish()
     }
+}
+
+/// How a working tree's commits stand against its remotes, from what the
+/// last fetch (or pull, or push) saw of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Tracking {
+    /// Where a push goes: the upstream's remote, else `origin`, else the
+    /// first remote. `None` when the repository has no remote.
+    pub remote: Option<String>,
+    /// The branch the checked-out branch tracks, such as `origin/main`.
+    pub upstream: Option<String>,
+    /// Commits on the branch but not on its upstream.
+    pub ahead: usize,
+    /// Commits on the upstream but not on the branch.
+    pub behind: usize,
+    /// Commits that are on no remote branch at all.
+    pub unpushed: HashSet<String>,
 }
 
 /// One commit, as `git log` lists it.
@@ -477,28 +587,89 @@ fn git_program() -> PathBuf {
     PathBuf::from("git")
 }
 
-/// Runs git in `dir`; returns its output, or what it said went wrong.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+/// How long a command that talks to a remote may run. It can wait on the
+/// network, or on a login prompt nobody sees: git runs without a console.
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// git in `dir`, without a console, never asking anything on a terminal.
+fn command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(git_program());
-    cmd.arg("-C").arg(dir).args(args).stdin(Stdio::null()).env("GIT_TERMINAL_PROMPT", "0");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // A merging pull takes git's message instead of opening an editor.
+        .env("GIT_MERGE_AUTOEDIT", "no");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(crate::session::shell::CREATE_NO_WINDOW);
     }
     tracing::debug!(dir = %dir.display(), ?args, "running git");
-    let out = match cmd.output() {
-        Ok(out) => out,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err("git is not installed (or not on PATH)".into());
-        }
-        Err(e) => return Err(format!("could not run git: {e}")),
-    };
-    if out.status.success() {
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+    cmd
+}
+
+fn spawn_error(e: std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        "git is not installed (or not on PATH)".into()
+    } else {
+        format!("could not run git: {e}")
     }
-    let message = error_message(&String::from_utf8_lossy(&out.stderr));
-    Err(if message.is_empty() { format!("git {} failed ({})", args.join(" "), out.status) } else { message })
+}
+
+/// git's output when it succeeded, else what it said went wrong.
+fn outcome(args: &[&str], status: std::process::ExitStatus, stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    if status.success() {
+        return Ok(String::from_utf8_lossy(stdout).into_owned());
+    }
+    let message = error_message(&String::from_utf8_lossy(stderr));
+    Err(if message.is_empty() { format!("git {} failed ({status})", args.join(" ")) } else { message })
+}
+
+/// Runs git in `dir`; returns its output, or what it said went wrong.
+fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = command(dir, args).output().map_err(spawn_error)?;
+    outcome(args, out.status, &out.stdout, &out.stderr)
+}
+
+/// Like [`git`], for commands that talk to a remote: stopped after
+/// [`REMOTE_TIMEOUT`].
+fn git_remote(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let mut child = command(dir, args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(spawn_error)?;
+    // Both pipes are read on threads, so a full pipe can't stall git.
+    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let deadline = Instant::now() + REMOTE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // The readers are left alone: a helper git started (ssh, a
+                // credential prompt) may still hold the pipes open.
+                return Err(format!(
+                    "git {} took longer than {} minutes and was stopped. It may be waiting for a login; try it \
+                     in a terminal.",
+                    args[0],
+                    REMOTE_TIMEOUT.as_secs() / 60
+                ));
+            }
+            Err(e) => return Err(format!("could not run git: {e}")),
+        }
+    };
+    let (stdout, stderr) = (stdout.join().unwrap_or_default(), stderr.join().unwrap_or_default());
+    outcome(args, status, &stdout, &stderr)
 }
 
 /// What went wrong, from git's error output: its last lines ("error: …",
@@ -795,5 +966,83 @@ mod tests {
         let branches = repo.branches().unwrap();
         assert_eq!(branches.worktrees.len(), 1);
         assert!(branches.local.contains(&"fix".to_owned()), "the branch is kept");
+    }
+
+    /// Push, pull and tracking against a bare repository standing in for a
+    /// remote, with git installed.
+    #[test]
+    fn pushes_and_pulls_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        if git(dir.path(), &["init", "-q", "--bare", "-b", "main", &remote.to_string_lossy()]).is_err() {
+            eprintln!("git not available; skipping");
+            return;
+        }
+        // A clone with its own identity, so commits and rebases work anywhere.
+        let clone = |name: &str| {
+            let path = dir.path().join(name);
+            git(dir.path(), &["clone", "-q", &remote.to_string_lossy(), &path.to_string_lossy()]).unwrap();
+            for (key, value) in [("user.name", name), ("user.email", "t@t"), ("commit.gpgsign", "false")] {
+                git(&path, &["config", key, value]).unwrap();
+            }
+            git(&path, &["switch", "-q", "-C", "main"]).unwrap();
+            Repo::discover(&path).unwrap()
+        };
+        let commit = |repo: &Repo, msg: &str| {
+            git(&repo.worktree, &["commit", "-q", "--allow-empty", "-m", msg]).unwrap();
+            repo.head_commit().unwrap()
+        };
+        let subjects =
+            |repo: &Repo| -> Vec<String> { repo.log(false, 50).unwrap().into_iter().map(|c| c.subject).collect() };
+
+        let a = clone("a");
+        let one = commit(&a, "one");
+        let t = a.tracking(false, 50).unwrap();
+        assert_eq!((t.remote.as_deref(), t.upstream.as_deref()), (Some("origin"), None));
+        assert_eq!(t.unpushed, HashSet::from([one.clone()]));
+        assert!(a.pull(true).unwrap_err().contains("push it first"));
+
+        // The first push sets the upstream.
+        assert_eq!(a.push().unwrap(), "Pushed main to origin, which it now tracks.");
+        let t = a.tracking(false, 50).unwrap();
+        assert_eq!((t.upstream.as_deref(), t.ahead, t.behind), (Some("origin/main"), 0, 0));
+        assert!(t.unpushed.is_empty());
+
+        // Someone else pushes; a's own commit is then rejected until it pulls.
+        let b = clone("b");
+        commit(&b, "two");
+        assert_eq!(b.push().unwrap(), "Pushed main to origin/main.");
+        let three = commit(&a, "three");
+        let t = a.tracking(false, 50).unwrap();
+        assert_eq!((t.ahead, t.behind), (1, 0), "a has not fetched yet");
+        assert_eq!(t.unpushed, HashSet::from([three]));
+        let err = a.push().unwrap_err();
+        assert!(err.contains("rejected") && !err.contains("hint:"), "{err}");
+
+        // Rebasing keeps the history a line: three now sits on two.
+        assert_eq!(a.pull(true).unwrap(), "Pulled origin/main and rebased main on it.");
+        assert_eq!(subjects(&a), vec!["three", "two", "one"]);
+        assert_eq!(a.pull(true).unwrap(), "main is up to date with origin/main.");
+        a.push().unwrap();
+
+        // Without rebasing, a pull merges.
+        b.pull(true).unwrap();
+        commit(&b, "four");
+        b.push().unwrap();
+        commit(&a, "five");
+        assert_eq!(a.pull(false).unwrap(), "Pulled origin/main into main.");
+        let parents = git(&a.worktree, &["rev-list", "--parents", "-n", "1", "HEAD"]).unwrap();
+        assert_eq!(parents.split_whitespace().count(), 3, "a merge commit has two parents");
+        let t = a.tracking(false, 50).unwrap();
+        assert_eq!((t.ahead, t.behind, t.unpushed.len()), (2, 0, 2));
+
+        // No remote, or no branch: nothing to push.
+        let lone = dir.path().join("lone");
+        git(dir.path(), &["init", "-q", "-b", "main", &lone.to_string_lossy()]).unwrap();
+        let lone = Repo::discover(&lone).unwrap();
+        assert_eq!(lone.tracking(false, 50).unwrap(), Tracking::default());
+        assert!(lone.push().unwrap_err().contains("no remote"));
+        git(&a.worktree, &["switch", "-q", "--detach"]).unwrap();
+        assert!(a.push().unwrap_err().contains("Not on a branch"));
     }
 }
