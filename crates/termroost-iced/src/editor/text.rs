@@ -23,6 +23,77 @@ impl Eol {
             Eol::Crlf => "CRLF",
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Eol::Lf => "\n",
+            Eol::Crlf => "\r\n",
+        }
+    }
+}
+
+/// What Tab inserts in a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Indent {
+    Tabs,
+    /// This many spaces per level.
+    Spaces(usize),
+}
+
+impl Indent {
+    pub fn label(self) -> String {
+        match self {
+            Indent::Tabs => "Tabs".into(),
+            Indent::Spaces(n) => format!("Spaces: {n}"),
+        }
+    }
+
+    /// What Tab inserts at character column `column`: a tab, or the spaces up
+    /// to the next indent stop.
+    pub fn unit(self, column: usize) -> String {
+        match self {
+            Indent::Tabs => "\t".into(),
+            Indent::Spaces(n) => " ".repeat(n - column % n),
+        }
+    }
+
+    /// How many bytes at the start of `line` one Shift+Tab removes: a tab, or
+    /// up to one level of spaces.
+    pub fn outdent_len(self, line: &str) -> usize {
+        if line.starts_with('\t') {
+            return 1;
+        }
+        let level = match self {
+            Indent::Tabs => 4,
+            Indent::Spaces(n) => n,
+        };
+        line.bytes().take_while(|b| *b == b' ').count().min(level)
+    }
+}
+
+/// How a file is indented: tabs if more lines start with one than with
+/// spaces, else the smallest indent of two or more spaces (4 if none).
+pub fn detect_indent(text: &str) -> Indent {
+    let (mut tabs, mut spaced, mut width) = (0, 0, usize::MAX);
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        if line.starts_with('\t') {
+            tabs += 1;
+        } else if line.starts_with(' ') {
+            spaced += 1;
+            // One space is alignment (` * ` in comments), not indent.
+            let n = line.len() - line.trim_start_matches(' ').len();
+            if n >= 2 {
+                width = width.min(n);
+            }
+        }
+    }
+    if tabs > spaced {
+        Indent::Tabs
+    } else if (2..=8).contains(&width) {
+        Indent::Spaces(width)
+    } else {
+        Indent::Spaces(4)
+    }
 }
 
 /// What to keep of a file's bytes besides its text.
@@ -83,6 +154,24 @@ pub fn decode(bytes: Vec<u8>) -> Result<Decoded, String> {
     Ok(Decoded { text, format: Format { bom, eol } })
 }
 
+/// The bytes to write for `lines`: each line ended the file's usual way
+/// (also lines added in the editor, which ends them with LF), and the byte
+/// order mark if the file had one. The editor's last line is what follows
+/// the last line break, so a final newline is kept as it was.
+pub fn encode<S: AsRef<str>>(lines: impl IntoIterator<Item = S>, format: Format) -> Vec<u8> {
+    let mut out = String::new();
+    if format.bom {
+        out.push(BOM);
+    }
+    for (i, line) in lines.into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(format.eol.as_str());
+        }
+        out.push_str(line.as_ref());
+    }
+    out.into_bytes()
+}
+
 /// The column of byte offset `byte` in `line`, counted in characters.
 pub fn char_column(line: &str, byte: usize) -> usize {
     let mut end = byte.min(line.len());
@@ -138,6 +227,55 @@ mod tests {
         let file = dir.path().join("a.txt");
         std::fs::write(&file, "hi\n").unwrap();
         assert_eq!(read_file(&file).unwrap().text, "hi\n");
+    }
+
+    #[test]
+    fn encoding_ends_every_line_the_files_way() {
+        let lf = Format { bom: false, eol: Eol::Lf };
+        assert_eq!(encode(["a", "b", ""], lf), b"a\nb\n");
+        assert_eq!(encode(["a", "b"], lf), b"a\nb", "no final newline: none added");
+        assert_eq!(encode([""], lf), b"");
+        let crlf_bom = Format { bom: true, eol: Eol::Crlf };
+        assert_eq!(encode(["x", ""], crlf_bom), "\u{feff}x\r\n".as_bytes());
+    }
+
+    #[test]
+    fn saving_writes_back_what_was_read() {
+        use iced::widget::text_editor::{Action, Content, Edit, Motion};
+        let lines = |c: &Content| c.lines().map(|l| l.text.into_owned()).collect::<Vec<_>>();
+        for original in ["fn main() {\r\n    x\r\n}\r\n", "a\nb", "\u{feff}bom\n", ""] {
+            let d = decode(original.as_bytes().to_vec()).unwrap();
+            let content = Content::with_text(&d.text);
+            assert_eq!(encode(lines(&content), d.format), original.as_bytes(), "{original:?}");
+        }
+        // A line added in a CRLF file ends with CRLF too.
+        let d = decode(b"a\r\nb\r\n".to_vec()).unwrap();
+        let mut content = Content::with_text(&d.text);
+        content.perform(Action::Move(Motion::DocumentStart));
+        content.perform(Action::Move(Motion::End));
+        content.perform(Action::Edit(Edit::Enter));
+        content.perform(Action::Edit(Edit::Insert('n')));
+        assert_eq!(encode(lines(&content), d.format), b"a\r\nn\r\nb\r\n");
+    }
+
+    #[test]
+    fn indent_follows_the_file() {
+        assert_eq!(detect_indent("fn a() {\n    x;\n        y;\n}\n"), Indent::Spaces(4));
+        assert_eq!(detect_indent("a:\n  b:\n    c\n"), Indent::Spaces(2));
+        assert_eq!(detect_indent("{\n\tx\n\t\ty\n}\n"), Indent::Tabs);
+        assert_eq!(detect_indent("/**\n * doc\n */\n"), Indent::Spaces(4), "one space is alignment");
+        assert_eq!(detect_indent("plain\n"), Indent::Spaces(4));
+    }
+
+    #[test]
+    fn tab_goes_to_the_next_stop_and_shift_tab_back_one_level() {
+        assert_eq!(Indent::Spaces(4).unit(0), "    ");
+        assert_eq!(Indent::Spaces(4).unit(6), "  ");
+        assert_eq!(Indent::Tabs.unit(3), "\t");
+        assert_eq!(Indent::Spaces(4).outdent_len("      x"), 4);
+        assert_eq!(Indent::Spaces(4).outdent_len("  x"), 2);
+        assert_eq!(Indent::Spaces(2).outdent_len("\tx"), 1);
+        assert_eq!(Indent::Tabs.outdent_len("x"), 0);
     }
 
     #[test]

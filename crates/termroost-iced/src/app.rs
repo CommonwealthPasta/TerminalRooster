@@ -14,7 +14,7 @@ use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
-use crate::editor::{EditorMsg, SessionFiles};
+use crate::editor::{DocId, EditorMsg, SessionFiles};
 use crate::files::{FilesMsg, FilesState};
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
@@ -166,10 +166,17 @@ pub enum Dialog {
     Renamed(termroost_core::Renamed),
     /// Switch the session to another git worktree, or make one.
     Worktree(Box<WorktreeForm>),
-    /// Quitting while terminals still run programs.
+    /// Quitting while terminals still run programs, or files have unsaved changes.
     ConfirmQuit {
         running: Vec<RunningTerminal>,
+        /// Files with unsaved changes ("src/main.rs (agents)").
+        unsaved: Vec<String>,
         dont_ask: bool,
+    },
+    /// Closing a file with unsaved changes.
+    CloseFile {
+        doc: DocId,
+        name: String,
     },
 }
 
@@ -393,6 +400,8 @@ pub struct App {
     pub(crate) editors: HashMap<TabId, SessionFiles>,
     /// The last id given to an open file.
     pub(crate) next_doc: u64,
+    /// The last version number given to the text of an open file.
+    pub(crate) next_version: u64,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     pub(crate) error: Option<String>,
@@ -496,6 +505,7 @@ impl App {
             files: FilesState::default(),
             editors: HashMap::new(),
             next_doc: 0,
+            next_version: 0,
             activity: HashSet::new(),
             error: None,
             notice: None,
@@ -865,13 +875,13 @@ impl App {
                 if matches!(self.dialog, Some(Dialog::ConfirmQuit { .. })) {
                     return Task::none();
                 }
-                if self.prefs.confirm_quit {
-                    let running = self.running_terminals();
-                    if !running.is_empty() {
-                        self.rename = None;
-                        self.dialog = Some(Dialog::ConfirmQuit { running, dont_ask: false });
-                        return Task::none();
-                    }
+                // Unsaved files are always asked about; running programs as the user chose.
+                let unsaved = self.unsaved_files();
+                let running = if self.prefs.confirm_quit { self.running_terminals() } else { Vec::new() };
+                if !running.is_empty() || !unsaved.is_empty() {
+                    self.rename = None;
+                    self.dialog = Some(Dialog::ConfirmQuit { running, unsaved, dont_ask: false });
+                    return Task::none();
                 }
                 return self.quit();
             }
@@ -907,7 +917,12 @@ impl App {
                 // Dialogs with text fields submit through the fields themselves.
                 if matches!(
                     self.dialog,
-                    Some(Dialog::ConfirmDeleteProject(_) | Dialog::ConfirmDeleteTab(_) | Dialog::ConfirmQuit { .. })
+                    Some(
+                        Dialog::ConfirmDeleteProject(_)
+                            | Dialog::ConfirmDeleteTab(_)
+                            | Dialog::ConfirmQuit { .. }
+                            | Dialog::CloseFile { .. }
+                    )
                 ) {
                     return self.submit_dialog();
                 }
@@ -1591,6 +1606,7 @@ impl App {
                 self.dialog = Some(Dialog::Worktree(form));
                 return self.update_worktree(WorktreeMsg::Submit);
             }
+            Dialog::CloseFile { doc, .. } => return self.save_doc(doc, true),
             Dialog::ConfirmQuit { dont_ask, .. } => {
                 if dont_ask {
                     self.prefs.confirm_quit = false;

@@ -4,7 +4,7 @@ use iced::widget::{button, center, column, container, row, space, text, text_edi
 use iced::{Alignment, Element, Length};
 
 use super::text::char_column;
-use super::{DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc};
+use super::{DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, keys};
 use crate::app::{App, Message};
 use crate::sidebar::{display_dir, icon_button, muted_text};
 use crate::theme::{self, MONO};
@@ -26,8 +26,11 @@ impl App {
             .spacing(4)
             .align_y(Alignment::Center);
         for doc in &files.open {
-            let name =
+            let mut name =
                 doc.path.file_name().map_or_else(|| doc.path.display().to_string(), |n| n.to_string_lossy().into());
+            if doc.modified() {
+                name.push_str(" ●");
+            }
             let item = row![
                 tab(name, files.shown == Some(doc.id), Message::Editor(EditorMsg::Show(Some(doc.id)))),
                 icon_button("✕", Message::Editor(EditorMsg::Close(doc.id)), "Close"),
@@ -48,15 +51,21 @@ impl App {
             DocKind::Loading => center(muted_text("Reading…")).into(),
             DocKind::Text(t) => {
                 let id = doc.id;
-                let editor = text_editor(&t.content)
+                let keymap = self.keymap.clone();
+                let mut editor = text_editor(&t.content)
                     .id(FILE_EDITOR)
                     .font(MONO)
                     .size(self.prefs.font_size)
                     .padding(8)
                     .wrapping(text::Wrapping::WordOrGlyph)
                     .height(Length::Fill)
-                    .on_action(move |a| Message::Editor(EditorMsg::Action(id, a)))
+                    .key_binding(move |press| keys::binding(&keymap, id, press))
                     .style(theme::file_editor);
+                // Keys go to a dialog, not to the editor behind it (which keeps
+                // the keyboard for when the dialog closes).
+                if self.dialog.is_none() {
+                    editor = editor.on_action(move |a| Message::Editor(EditorMsg::Action(id, a)));
+                }
                 column![editor, self.status_line(doc, t)].into()
             }
         }
@@ -68,7 +77,10 @@ impl App {
         let column = t.content.line(at.line).map_or(0, |l| char_column(&l.text, at.column));
         let mut info = vec![format!("Ln {}, Col {}", at.line + 1, column + 1), t.format.eol.label().to_owned()];
         info.push(if t.format.bom { "UTF-8 with BOM" } else { "UTF-8" }.to_owned());
-        info.push("Read-only".to_owned());
+        info.push(t.indent.label());
+        if t.saving {
+            info.push("Saving…".to_owned());
+        }
         row![
             container(muted_text(self.doc_label(&doc.path)).wrapping(text::Wrapping::None))
                 .width(Length::Fill)
