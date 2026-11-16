@@ -6,6 +6,7 @@ use termroost_core::{AgentKind, Axis, PaneId, Tab};
 
 use crate::app::{App, Message};
 use crate::keymap::Action;
+use crate::notify::Category;
 use crate::sidebar::{BOLD, icon_button, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
 use crate::theme;
@@ -104,8 +105,22 @@ impl App {
             Some(id) => format!("{} · {}", a.kind.label(), &id[..id.len().min(8)]),
             None => format!("{} · new session", a.kind.label()),
         });
-        let mut title_row =
-            row![text(title).size(12).wrapping(text::Wrapping::None)].spacing(8).align_y(Alignment::Center);
+        let mut title_row = row![].spacing(8).align_y(Alignment::Center);
+        // An alert the user hasn't seen, first so a long title can't hide it.
+        // It goes away when the user focuses this terminal.
+        let notice = self.notices.get(&pane).and_then(|n| n.first());
+        if let Some(n) = notice {
+            let label = match &n.detail {
+                Some(d) if n.category == Category::Error => format!("{} {} · {d}", n.glyph(), n.headline),
+                _ => format!("{} {}", n.glyph(), n.headline),
+            };
+            title_row = title_row.push(
+                container(text(label).size(11).wrapping(text::Wrapping::None))
+                    .padding([1, 6])
+                    .style(theme::notice_chip(n.category)),
+            );
+        }
+        title_row = title_row.push(text(title).size(12).wrapping(text::Wrapping::None));
         if let Some(agent) = agent {
             title_row = title_row.push(container(text(agent).size(11)).padding([1, 6]).style(theme::badge));
         }

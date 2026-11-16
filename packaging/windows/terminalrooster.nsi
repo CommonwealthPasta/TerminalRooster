@@ -141,4 +141,6 @@ Section "Uninstall"
 
   DeleteRegKey HKCU "${UNINSTALL_KEY}"
   DeleteRegKey HKCU "${SETTINGS_KEY}"
+  ; Written by the app so its desktop notifications show its name and icon.
+  DeleteRegKey HKCU "Software\Classes\AppUserModelId\io.github.Davenport_Physics.TerminalRooster"
 SectionEnd

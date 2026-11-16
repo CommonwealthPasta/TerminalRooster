@@ -9,6 +9,7 @@ mod dialogs;
 mod keymap;
 mod layout_conv;
 mod logging;
+mod notify;
 mod panes;
 mod settings;
 mod sidebar;
@@ -16,6 +17,7 @@ mod tasks;
 mod terminal_view;
 mod theme;
 mod themes;
+mod toasts;
 
 use std::sync::Mutex;
 
