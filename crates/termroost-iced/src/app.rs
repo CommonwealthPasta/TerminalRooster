@@ -67,6 +67,8 @@ pub struct Prefs {
     pub confirm_quit: bool,
     /// The tab the side panel shows.
     pub side_tab: SideTab,
+    /// The git log shows every branch, not just the session's.
+    pub log_all_branches: bool,
 }
 
 impl Default for Prefs {
@@ -89,6 +91,7 @@ impl Default for Prefs {
             notify_agents: Level::Prominent,
             confirm_quit: true,
             side_tab: SideTab::Tasks,
+            log_all_branches: false,
         }
     }
 }
@@ -355,6 +358,7 @@ pub enum Message {
     /// Show a tab of the side panel.
     SideTab(SideTab),
     LogRead(LogRead),
+    LogAllBranches(bool),
 
     DismissError,
     DismissNotice,
@@ -1465,6 +1469,11 @@ impl App {
                 return Task::batch([self.refresh_log(), self.focus_active()]);
             }
             Message::LogRead(read) => return self.log_read(read),
+            Message::LogAllBranches(all) => {
+                self.prefs.log_all_branches = all;
+                self.mark_prefs();
+                return self.refresh_log();
+            }
             Message::DismissError => self.error = None,
             Message::DismissNotice => self.notice = None,
         }

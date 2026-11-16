@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{button, checkbox, column, container, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Task};
 use serde::{Deserialize, Serialize};
 use termroost_core::git::{Commit, Repo};
@@ -28,6 +28,8 @@ pub enum SideTab {
 #[derive(Clone, Debug)]
 pub struct GitLog {
     pub worktree: PathBuf,
+    /// Every branch, not just the one checked out.
+    pub all: bool,
     /// `None` while it is read.
     pub commits: Option<Result<Vec<Commit>, String>>,
     /// [`Repo::ref_stamp`] when `commits` were read.
@@ -38,9 +40,19 @@ pub struct GitLog {
 #[derive(Clone, Debug)]
 pub struct LogRead {
     pub worktree: PathBuf,
+    pub all: bool,
     pub stamp: u64,
     /// `None` when the refs have not moved since the log on screen was read.
     pub commits: Option<Result<Vec<Commit>, String>>,
+}
+
+/// `s` cut to `max` characters, ending in "…" when cut.
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let kept: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{kept}…")
 }
 
 /// "5m ago", or the date for anything older than a week.
@@ -73,24 +85,30 @@ impl App {
     /// Reads the log when the Git tab shows a repository it has not read yet
     /// (such as after switching sessions), or when its refs moved since.
     pub(crate) fn refresh_log(&mut self) -> Task<Message> {
-        if !self.git_tab_shown() || self.log_reading {
+        if !self.git_tab_shown() {
             return Task::none();
         }
         let Some(repo) = self.active_repo().cloned() else { return Task::none() };
+        let all = self.prefs.log_all_branches;
         let known = match &self.git_log {
-            Some(log) if log.worktree == repo.worktree => log.stamp,
+            Some(log) if log.worktree == repo.worktree && log.all == all => log.stamp,
             _ => {
-                self.git_log = Some(GitLog { worktree: repo.worktree.clone(), commits: None, stamp: None });
+                // A read still running is for the old log: dropped when it
+                // arrives, which starts this one.
+                self.git_log = Some(GitLog { worktree: repo.worktree.clone(), all, commits: None, stamp: None });
                 None
             }
         };
+        if self.log_reading {
+            return Task::none();
+        }
         self.log_reading = true;
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             // The stamp first: a commit landing in between is caught next time.
             let stamp = repo.ref_stamp();
-            let commits = (known != Some(stamp)).then(|| repo.log(false, LOG_LIMIT));
-            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, stamp, commits });
+            let commits = (known != Some(stamp)).then(|| repo.log(all, LOG_LIMIT));
+            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, all, stamp, commits });
         });
         Task::perform(async move { rx.recv().await.ok() }, |read| match read {
             Some(read) => Message::LogRead(read),
@@ -99,11 +117,11 @@ impl App {
     }
 
     /// Takes in a log read in the background, unless the panel moved on to
-    /// another repository meanwhile.
+    /// another repository (or the other branch setting) meanwhile.
     pub(crate) fn log_read(&mut self, read: LogRead) -> Task<Message> {
         self.log_reading = false;
         match &mut self.git_log {
-            Some(log) if log.worktree == read.worktree => {
+            Some(log) if log.worktree == read.worktree && log.all == read.all => {
                 match read.commits {
                     None => {}
                     Some(Ok(commits)) => {
@@ -144,13 +162,23 @@ impl App {
         let s = self.core.state();
         let head = s.active_tab().and_then(|t| self.git_of(t)).and_then(|g| g.head.as_ref());
         let folder = self.active_repo().and_then(|r| r.worktree.file_name()).map(|n| n.to_string_lossy().into_owned());
-        let mut title = row![].spacing(8).align_y(Alignment::Center);
+        let mut title = column![].spacing(4);
         if let Some(head) = head {
-            title = title.push(branch_label(head, 13.0, 28));
+            title = title.push(branch_label(head, 13.0, 36));
         }
+        let mut options = row![].spacing(8).align_y(Alignment::Center);
         if let Some(folder) = folder {
-            title = title.push(muted_text(format!("in {folder}")).wrapping(text::Wrapping::None));
+            options = options.push(muted_text(format!("in {}", shorten(&folder, 24))).wrapping(text::Wrapping::None));
         }
+        let title = title.push(
+            options.push(space::horizontal()).push(
+                checkbox(self.prefs.log_all_branches)
+                    .label("All branches")
+                    .on_toggle(Message::LogAllBranches)
+                    .size(14)
+                    .text_size(12),
+            ),
+        );
 
         let body: Element<'_, Message> = match self.git_log.as_ref().and_then(|l| l.commits.as_ref()) {
             None => muted_text("Reading the log…").size(12).into(),
