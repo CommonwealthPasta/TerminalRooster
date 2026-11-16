@@ -308,7 +308,7 @@ impl Core {
                 ops.push(StoreOp::UpsertProject(project.clone()));
                 self.state.projects.push(project);
                 self.state.sort();
-                self.create_tab(id, None, ops)?;
+                self.create_tab(id, None, None, ops)?;
                 Ok(Outcome::Project(id))
             }
             C::RenameProject { project, name } => {
@@ -370,9 +370,9 @@ impl Core {
                 Ok(Outcome::None)
             }
 
-            C::CreateTab { project, title } => {
+            C::CreateTab { project, title, working_dir } => {
                 self.state.project(project).ok_or(Error::NotFound("project"))?;
-                let tab = self.create_tab(project, title, ops)?;
+                let tab = self.create_tab(project, title, working_dir, ops)?;
                 Ok(Outcome::Tab(tab))
             }
             C::RenameTab { tab, title } => {
@@ -675,7 +675,16 @@ impl Core {
         }
     }
 
-    fn create_tab(&mut self, project: ProjectId, title: Option<String>, ops: &mut Vec<StoreOp>) -> Result<TabId> {
+    fn create_tab(
+        &mut self,
+        project: ProjectId,
+        title: Option<String>,
+        working_dir: Option<PathBuf>,
+        ops: &mut Vec<StoreOp>,
+    ) -> Result<TabId> {
+        let project_dir = &self.state.project(project).ok_or(Error::NotFound("project"))?.working_dir;
+        // The project's own directory is stored as "follow the project".
+        let working_dir = working_dir.filter(|d| !d.as_os_str().is_empty() && d != project_dir);
         let tab_id = TabId(self.alloc());
         let pane_id = PaneId(self.alloc());
         let count = self.state.tabs_of(project).count();
@@ -688,7 +697,7 @@ impl Core {
             id: tab_id,
             project,
             title,
-            working_dir: None,
+            working_dir,
             layout: Layout::Pane(pane_id),
             focused_pane: Some(pane_id),
             sort_order,

@@ -201,7 +201,10 @@ fn delete_semantics() {
         panic!()
     };
     let tab1 = core.state().active_tab().unwrap().id;
-    let Outcome::Tab(tab2) = core.dispatch(Command::CreateTab { project: p, title: None }).unwrap() else { panic!() };
+    let Outcome::Tab(tab2) = core.dispatch(Command::CreateTab { project: p, title: None, working_dir: None }).unwrap()
+    else {
+        panic!()
+    };
     assert_eq!(core.state().tab(tab2).unwrap().title, "Session 2");
     let Outcome::Task(task) =
         core.dispatch(Command::CreateTask { project: p, title: "t".into(), tab: Some(tab2) }).unwrap()
@@ -561,4 +564,39 @@ fn relocating_moves_an_idle_git_bash() {
     std::thread::sleep(Duration::from_millis(1500));
     core.terminal(pane).unwrap().write("echo \"[$PWD]\"\r");
     wait_for_text(&mut core, pane, "moved-here]");
+}
+
+/// A new session can start in another directory, such as a git worktree.
+#[test]
+fn new_sessions_can_start_in_another_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("app");
+    let other = dir.path().join("app-other");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let (shell, show_dir) = if cfg!(windows) { ("cmd.exe", "echo [%CD%]") } else { ("sh", "echo \"[$PWD]\"") };
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(shell.into()))).unwrap();
+    let Outcome::Project(project) = core
+        .dispatch(Command::CreateProject { name: "p".into(), working_dir: project_dir.clone(), shell: None })
+        .unwrap()
+    else {
+        panic!()
+    };
+    let new = |core: &mut Core, working_dir: &Path| {
+        let cmd = Command::CreateTab { project, title: Some("x".into()), working_dir: Some(working_dir.into()) };
+        let Outcome::Tab(tab) = core.dispatch(cmd).unwrap() else { panic!() };
+        tab
+    };
+    // The project's own directory means "follow the project".
+    let same = new(&mut core, &project_dir);
+    assert_eq!(core.state().tab(same).unwrap().working_dir, None);
+
+    let tab = new(&mut core, &other);
+    assert_eq!(core.state().tab(tab).unwrap().working_dir.as_deref(), Some(other.as_path()));
+    assert_eq!(core.state().active_tab().map(|t| t.id), Some(tab));
+    let pane = core.state().tab(tab).unwrap().layout.first_pane();
+    std::thread::sleep(Duration::from_millis(500));
+    core.terminal(pane).unwrap().write(format!("{show_dir}\r"));
+    wait_for_text(&mut core, pane, "app-other]");
 }

@@ -37,10 +37,12 @@ pub enum Command {
     },
     SelectProject(ProjectId),
 
-    /// Creates a tab (with one terminal) and selects it.
+    /// Creates a tab (with one terminal) and selects it. Its terminals start
+    /// in `working_dir`, or in the project's directory when that is `None`.
     CreateTab {
         project: ProjectId,
         title: Option<String>,
+        working_dir: Option<PathBuf>,
     },
     RenameTab {
         tab: TabId,

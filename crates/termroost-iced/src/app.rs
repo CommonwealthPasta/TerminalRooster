@@ -676,7 +676,7 @@ impl App {
             }
             Message::NewTab => {
                 if let Some(project) = self.core.state().selected_project {
-                    self.dispatch(Command::CreateTab { project, title: None });
+                    self.dispatch(Command::CreateTab { project, title: None, working_dir: None });
                     return self.after_select();
                 }
             }
