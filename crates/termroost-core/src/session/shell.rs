@@ -105,7 +105,7 @@ impl std::fmt::Display for ShellOption {
 }
 
 /// The shells installed on this machine, best first. On Windows this lists
-/// TermRoost's own bash (once downloaded), Git Bash, MSYS2, WSL distributions,
+/// TerminalRooster's own bash (once downloaded), Git Bash, MSYS2, WSL distributions,
 /// PowerShell and cmd; elsewhere the login shells in `/etc/shells`.
 ///
 /// Can take a moment (it asks `wsl.exe` for its distributions), so call it

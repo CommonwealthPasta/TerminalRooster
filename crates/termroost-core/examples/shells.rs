@@ -1,8 +1,8 @@
-//! Prints the shells TermRoost offers in its shell pickers on this machine.
+//! Prints the shells TerminalRooster offers in its shell pickers on this machine.
 //!
 //! Usage: `cargo run -p termroost-core --example shells [-- --install]`
 //!
-//! `--install` first installs TermRoost's own bash (Windows), like Settings
+//! `--install` first installs TerminalRooster's own bash (Windows), like Settings
 //! does. Set `TERMINALROOSTER_DATA_DIR` to try it without touching the real data.
 
 use termroost_core::session::{bundled_bash, shell};
@@ -32,8 +32,8 @@ fn main() {
     if bundled_bash::SUPPORTED {
         let dir = bundled_bash::install_dir().map(|d| d.display().to_string()).unwrap_or_default();
         match bundled_bash::installed() {
-            Some(exe) => println!("\nTermRoost bash: installed ({})", exe.display()),
-            None => println!("\nTermRoost bash: not installed (would go to {dir})"),
+            Some(exe) => println!("\nTerminalRooster bash: installed ({})", exe.display()),
+            None => println!("\nTerminalRooster bash: not installed (would go to {dir})"),
         }
     }
 }

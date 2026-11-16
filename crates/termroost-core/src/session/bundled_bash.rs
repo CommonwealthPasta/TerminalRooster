@@ -1,4 +1,4 @@
-//! TermRoost's own bash on Windows, for people who want bash without
+//! TerminalRooster's own bash on Windows, for people who want bash without
 //! installing anything system-wide.
 //!
 //! On request it downloads a pinned Git for Windows release (bash, coreutils,
@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 
 use crate::session::shell::ShellOption;
 
-/// Whether TermRoost can install its own bash on this platform.
+/// Whether TerminalRooster can install its own bash on this platform.
 pub const SUPPORTED: bool = cfg!(windows);
 
 /// Name of the bundled bash in the shell lists.
-pub const NAME: &str = "TermRoost bash";
+pub const NAME: &str = "TerminalRooster bash";
 
 /// The Git for Windows release the bash comes from.
 pub const GIT_VERSION: &str = "2.56.1";
@@ -71,7 +71,7 @@ pub fn shell_option(exe: &Path) -> ShellOption {
 }
 
 /// Written last, so a half-finished install is never mistaken for a full one.
-const VERSION_FILE: &str = ".termroost-git-version";
+const VERSION_FILE: &str = ".terminalrooster-git-version";
 
 /// Install steps, reported while [`install`] runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,7 +102,7 @@ pub fn install(progress: impl Fn(Progress)) -> crate::Result<PathBuf> {
     let dir = install_dir().ok_or(crate::Error::NoDataDir)?;
     imp::install(&dir, &progress)?;
     std::fs::write(dir.join(VERSION_FILE), GIT_VERSION)?;
-    tracing::info!(dir = %dir.display(), version = GIT_VERSION, "installed TermRoost bash");
+    tracing::info!(dir = %dir.display(), version = GIT_VERSION, "installed TerminalRooster bash");
     installed().ok_or_else(|| crate::Error::Invalid("the download did not contain bin\\bash.exe".into()))
 }
 
@@ -111,7 +111,7 @@ mod imp {
     use super::Progress;
 
     pub(super) fn install(_dir: &std::path::Path, _progress: &dyn Fn(Progress)) -> crate::Result<()> {
-        Err(crate::Error::Invalid("TermRoost only installs its own bash on Windows".into()))
+        Err(crate::Error::Invalid("TerminalRooster only installs its own bash on Windows".into()))
     }
 }
 

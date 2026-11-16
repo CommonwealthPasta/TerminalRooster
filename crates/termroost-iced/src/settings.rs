@@ -381,14 +381,14 @@ impl App {
             "Terminal",
             column![
                 row![
-                    text("Font size").size(13).width(120),
+                    text("Font size").size(13).width(150),
                     slider(8.0_f32..=32.0, self.prefs.font_size, Message::FontSize).step(1.0_f32).width(260),
                     text(format!("{} px", self.prefs.font_size)).size(13),
                 ]
                 .spacing(12)
                 .align_y(Alignment::Center),
                 row![
-                    text("Default shell").size(13).width(120),
+                    text("Default shell").size(13).width(150),
                     text_input(&format!("platform default: {platform}"), &st.shell_input)
                         .on_input(Message::ShellInput)
                         .on_submit(Message::ShellCommit)
@@ -429,7 +429,7 @@ impl App {
         Some(picker.into())
     }
 
-    /// Windows: download TermRoost's own bash, or say where it is.
+    /// Windows: download TerminalRooster's own bash, or say where it is.
     fn bundled_bash_row<'a>(&'a self, input: &str, platform: &str) -> Element<'a, Message> {
         use crate::app::{BashInstall, shell_matching};
 
@@ -458,13 +458,13 @@ impl App {
                     Some(install("Install and use").into()),
                     muted_text(format!(
                         "Bash with coreutils, vim, less, ssh and git, from Git for Windows {version}: a {mb} MB \
-                         download, a few hundred MB unpacked into TermRoost's own folder. Nothing else on the \
+                         download, a few hundred MB unpacked into TerminalRooster's own folder. Nothing else on the \
                          system changes."
                     ))
                     .into(),
                 ),
             };
-        row![text("TermRoost bash").size(13).width(120)]
+        row![text("TerminalRooster bash").size(13).width(150)]
             .push(action)
             .push(container(status).width(Length::Fill))
             .spacing(12)

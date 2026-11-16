@@ -155,7 +155,7 @@ impl std::fmt::Display for TabChoice {
     }
 }
 
-/// Installing TermRoost's own bash (Settings → Terminal, Windows only).
+/// Installing TerminalRooster's own bash (Settings → Terminal, Windows only).
 #[derive(Clone, Debug, Default)]
 pub enum BashInstall {
     #[default]
@@ -720,7 +720,7 @@ impl App {
                 return detect_shells();
             }
             Message::BashInstall(BashInstallEvent::Done(Err(e))) => {
-                tracing::warn!(error = %e, "installing TermRoost bash failed");
+                tracing::warn!(error = %e, "installing TerminalRooster bash failed");
                 self.bash_install = BashInstall::Failed(e);
             }
             Message::Noop => {}
