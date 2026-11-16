@@ -914,7 +914,8 @@ impl App {
                 }
             }
             Message::MoveProject(project, to_index) => {
-                self.dispatch(Command::MoveProject { project, to_index });
+                let group = self.core.state().project(project).and_then(|p| p.group);
+                self.dispatch(Command::MoveProject { project, to_index, group });
             }
             Message::MoveTab(tab, to_index) => {
                 self.dispatch(Command::MoveTab { tab, to_index });

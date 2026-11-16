@@ -28,6 +28,8 @@ const KV_GUI_PREFIX: &str = "gui:";
 pub enum StoreOp {
     UpsertProject(Project),
     DeleteProject(ProjectId),
+    UpsertGroup(ProjectGroup),
+    DeleteGroup(GroupId),
     UpsertTab(Tab),
     DeleteTab(TabId),
     UpsertPane(Pane),
@@ -164,11 +166,11 @@ fn apply(c: &Connection, op: &StoreOp) -> rusqlite::Result<()> {
     match op {
         StoreOp::UpsertProject(p) => {
             c.execute(
-                "INSERT INTO projects (id, name, working_dir, shell, sort_order, active_tab_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO projects (id, name, working_dir, shell, sort_order, active_tab_id, group_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET name = excluded.name, working_dir = excluded.working_dir,
                    shell = excluded.shell, sort_order = excluded.sort_order,
-                   active_tab_id = excluded.active_tab_id",
+                   active_tab_id = excluded.active_tab_id, group_id = excluded.group_id",
                 params![
                     p.id.0,
                     p.name,
@@ -176,12 +178,23 @@ fn apply(c: &Connection, op: &StoreOp) -> rusqlite::Result<()> {
                     p.shell,
                     p.sort_order,
                     p.active_tab.map(|t| t.0),
+                    p.group.map(|g| g.0),
                     p.created_at
                 ],
             )?;
         }
         StoreOp::DeleteProject(id) => {
             c.execute("DELETE FROM projects WHERE id = ?1", [id.0])?;
+        }
+        StoreOp::UpsertGroup(g) => {
+            c.execute(
+                "INSERT INTO project_groups (id, name, collapsed, created_at) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name, collapsed = excluded.collapsed",
+                params![g.id.0, g.name, g.collapsed, g.created_at],
+            )?;
+        }
+        StoreOp::DeleteGroup(id) => {
+            c.execute("DELETE FROM project_groups WHERE id = ?1", [id.0])?;
         }
         StoreOp::UpsertTab(t) => {
             c.execute(
@@ -283,8 +296,9 @@ fn set_kv(c: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
 fn load(c: &Connection) -> rusqlite::Result<AppState> {
     let mut state = AppState::default();
 
-    let mut stmt =
-        c.prepare("SELECT id, name, working_dir, shell, sort_order, active_tab_id, created_at FROM projects")?;
+    let mut stmt = c.prepare(
+        "SELECT id, name, working_dir, shell, sort_order, active_tab_id, group_id, created_at FROM projects",
+    )?;
     state.projects = stmt
         .query_map([], |r| {
             Ok(Project {
@@ -294,8 +308,16 @@ fn load(c: &Connection) -> rusqlite::Result<AppState> {
                 shell: r.get(3)?,
                 sort_order: r.get(4)?,
                 active_tab: r.get::<_, Option<i64>>(5)?.map(TabId),
-                created_at: r.get(6)?,
+                group: r.get::<_, Option<i64>>(6)?.map(GroupId),
+                created_at: r.get(7)?,
             })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut stmt = c.prepare("SELECT id, name, collapsed, created_at FROM project_groups")?;
+    state.groups = stmt
+        .query_map([], |r| {
+            Ok(ProjectGroup { id: GroupId(r.get(0)?), name: r.get(1)?, collapsed: r.get(2)?, created_at: r.get(3)? })
         })?
         .collect::<rusqlite::Result<_>>()?;
 
@@ -400,6 +422,7 @@ mod tests {
             shell: None,
             sort_order: 0,
             active_tab: Some(TabId(10)),
+            group: None,
             created_at: 1,
         };
         let t = Tab {
@@ -511,6 +534,7 @@ mod tests {
             shell: None,
             sort_order: 0,
             active_tab: Some(TabId(10)),
+            group: None,
             created_at: 1,
         };
         store.write(vec![StoreOp::UpsertProject(p.clone())]);
@@ -522,6 +546,37 @@ mod tests {
         assert_eq!(state.projects[0].name, "renamed2");
         assert_eq!(state.tabs.len(), 1);
         assert_eq!(state.tasks.len(), 1);
+    }
+
+    #[test]
+    fn groups_round_trip_and_deleting_one_frees_its_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = sample(dir.path());
+        let group = ProjectGroup { id: GroupId(20), name: "work".into(), collapsed: true, created_at: 2 };
+        let mut p = Project {
+            id: ProjectId(1),
+            name: "api".into(),
+            working_dir: "/tmp/api".into(),
+            shell: None,
+            sort_order: 0,
+            active_tab: Some(TabId(10)),
+            group: Some(group.id),
+            created_at: 1,
+        };
+        store.write(vec![StoreOp::UpsertGroup(group.clone()), StoreOp::UpsertProject(p.clone())]);
+        store.flush();
+        drop(store);
+        let (store, state) = Store::open(&dir.path().join("t.db")).unwrap();
+        assert_eq!(state.groups, vec![group.clone()]);
+        assert_eq!(state.projects[0].group, Some(group.id));
+
+        store.write(vec![StoreOp::DeleteGroup(group.id)]);
+        store.flush();
+        drop(store);
+        let (_s, state) = Store::open(&dir.path().join("t.db")).unwrap();
+        assert!(state.groups.is_empty());
+        p.group = None;
+        assert_eq!(state.projects, [p], "the project stays, outside any group");
     }
 
     #[test]

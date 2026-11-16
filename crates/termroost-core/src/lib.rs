@@ -49,6 +49,9 @@ use paths::InstanceLock;
 use session::{Background, SpawnSpec};
 use store::{Store, StoreOp};
 
+/// The name of a group made by [`Command::GroupProjects`].
+pub const NEW_GROUP_NAME: &str = "New group";
+
 /// Options for [`Core::open`].
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -326,6 +329,7 @@ impl Core {
                     shell: shell.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()),
                     sort_order,
                     active_tab: None,
+                    group: None,
                     created_at: model::now(),
                 };
                 ops.push(StoreOp::UpsertProject(project.clone()));
@@ -365,6 +369,7 @@ impl Core {
                 self.state.tasks.retain(|t| t.project != project);
                 self.state.projects.remove(index);
                 ops.push(StoreOp::DeleteProject(project));
+                self.drop_empty_groups(ops);
                 if self.state.selected_project == Some(project) {
                     let next = self
                         .state
@@ -376,20 +381,66 @@ impl Core {
                 }
                 Ok(Outcome::None)
             }
-            C::MoveProject { project, to_index } => {
+            C::MoveProject { project, to_index, group } => {
+                if let Some(g) = group {
+                    self.state.group(g).ok_or(Error::NotFound("group"))?;
+                }
                 let mut ids: Vec<ProjectId> = self.state.projects.iter().map(|p| p.id).collect();
                 reorder(&mut ids, project, to_index).ok_or(Error::NotFound("project"))?;
-                for (i, id) in ids.iter().enumerate() {
-                    let p = self.state.project_mut(*id).expect("exists");
-                    p.sort_order = i as i64;
-                    ops.push(StoreOp::UpsertProject(p.clone()));
-                }
-                self.state.sort();
+                self.arrange(ids, &[(project, group)], None, ops)?;
                 Ok(Outcome::None)
             }
             C::SelectProject(project) => {
                 self.state.project(project).ok_or(Error::NotFound("project"))?;
                 self.select_project(Some(project), ops);
+                Ok(Outcome::None)
+            }
+
+            C::GroupProjects { project, with } => {
+                self.state.project(project).ok_or(Error::NotFound("project"))?;
+                let joined = self.state.project(with).ok_or(Error::NotFound("project"))?.group;
+                if project == with {
+                    return Err(Error::Invalid("a project can't be grouped with itself".into()));
+                }
+                let mut ids: Vec<ProjectId> =
+                    self.state.projects.iter().map(|p| p.id).filter(|p| *p != project).collect();
+                let at = ids.iter().position(|p| *p == with).expect("listed") + 1;
+                ids.insert(at, project);
+                let (group, new) = match joined {
+                    Some(g) => (g, None),
+                    None => {
+                        let id = GroupId(self.alloc());
+                        let name = NEW_GROUP_NAME.to_owned();
+                        (id, Some(ProjectGroup { id, name, collapsed: false, created_at: model::now() }))
+                    }
+                };
+                let outcome = if new.is_some() { Outcome::Group(group) } else { Outcome::None };
+                self.arrange(ids, &[(project, Some(group)), (with, Some(group))], new, ops)?;
+                Ok(outcome)
+            }
+            C::MoveGroup { group, to_index } => {
+                self.state.group(group).ok_or(Error::NotFound("group"))?;
+                let members: Vec<ProjectId> = self.state.projects_in(group).map(|p| p.id).collect();
+                let mut ids: Vec<ProjectId> =
+                    self.state.projects.iter().map(|p| p.id).filter(|p| !members.contains(p)).collect();
+                let at = to_index.min(ids.len());
+                ids.splice(at..at, members);
+                self.arrange(ids, &[], None, ops)?;
+                Ok(Outcome::None)
+            }
+            C::RenameGroup { group, name } => {
+                let name = non_empty(&name, "group name")?;
+                let g = self.state.group_mut(group).ok_or(Error::NotFound("group"))?;
+                g.name = name;
+                ops.push(StoreOp::UpsertGroup(g.clone()));
+                Ok(Outcome::None)
+            }
+            C::SetGroupCollapsed { group, collapsed } => {
+                let g = self.state.group_mut(group).ok_or(Error::NotFound("group"))?;
+                if g.collapsed != collapsed {
+                    g.collapsed = collapsed;
+                    ops.push(StoreOp::UpsertGroup(g.clone()));
+                }
                 Ok(Outcome::None)
             }
 
@@ -765,6 +816,54 @@ impl Core {
         }
     }
 
+    /// Puts the projects in the order of `ids` (all of them), moving those
+    /// in `regroup` into the given groups, and creates `new` first if some
+    /// join it. Refused, with nothing changed, if a group's projects wouldn't
+    /// be together. Groups left without projects are deleted.
+    fn arrange(
+        &mut self,
+        ids: Vec<ProjectId>,
+        regroup: &[(ProjectId, Option<GroupId>)],
+        new: Option<ProjectGroup>,
+        ops: &mut Vec<StoreOp>,
+    ) -> Result<()> {
+        let group_of = |id: ProjectId| match regroup.iter().find(|(p, _)| *p == id) {
+            Some((_, g)) => *g,
+            None => self.state.project(id).and_then(|p| p.group),
+        };
+        let groups: Vec<Option<GroupId>> = ids.iter().map(|p| group_of(*p)).collect();
+        if !together(&groups) {
+            return Err(Error::Invalid("a group's projects have to stay together".into()));
+        }
+        if let Some(g) = new {
+            // Saved before the projects that refer to it.
+            ops.push(StoreOp::UpsertGroup(g.clone()));
+            self.state.groups.push(g);
+        }
+        for (i, (id, group)) in ids.iter().zip(groups).enumerate() {
+            let p = self.state.project_mut(*id).expect("exists");
+            if p.sort_order != i as i64 || p.group != group {
+                p.sort_order = i as i64;
+                p.group = group;
+                ops.push(StoreOp::UpsertProject(p.clone()));
+            }
+        }
+        self.drop_empty_groups(ops);
+        self.state.sort();
+        Ok(())
+    }
+
+    fn drop_empty_groups(&mut self, ops: &mut Vec<StoreOp>) {
+        let projects = &self.state.projects;
+        self.state.groups.retain(|g| {
+            let used = projects.iter().any(|p| p.group == Some(g.id));
+            if !used {
+                ops.push(StoreOp::DeleteGroup(g.id));
+            }
+            used
+        });
+    }
+
     /// Starts the terminals of a tab that are not running yet.
     fn activate_tab(&mut self, tab: TabId) {
         let Some(panes) = self.state.tab(tab).map(|t| t.layout.panes()) else { return };
@@ -967,12 +1066,30 @@ fn reorder<T: PartialEq + Copy>(ids: &mut Vec<T>, id: T, to: usize) -> Option<()
     Some(())
 }
 
+/// Whether each group's projects are next to each other, given the group of
+/// each project in list order.
+fn together(groups: &[Option<GroupId>]) -> bool {
+    let mut passed = HashSet::new();
+    let mut current = None;
+    for &g in groups {
+        if g != current {
+            passed.extend(current);
+            if g.is_some_and(|g| passed.contains(&g)) {
+                return false;
+            }
+            current = g;
+        }
+    }
+    true
+}
+
 fn max_id(s: &AppState) -> i64 {
     let p = s.projects.iter().map(|x| x.id.0);
+    let g = s.groups.iter().map(|x| x.id.0);
     let t = s.tabs.iter().map(|x| x.id.0);
     let pa = s.panes.keys().map(|x| x.0);
     let ta = s.tasks.iter().map(|x| x.id.0);
-    p.chain(t).chain(pa).chain(ta).max().unwrap_or(0)
+    p.chain(g).chain(t).chain(pa).chain(ta).max().unwrap_or(0)
 }
 
 /// Fixes saved state that does not hang together (e.g. after a crash between
@@ -1038,6 +1155,23 @@ fn repair(state: &mut AppState, next_id: &mut i64) -> Vec<StoreOp> {
             ops.push(StoreOp::UpsertTask(task.clone()));
         }
     }
+
+    let group_ids: HashSet<GroupId> = state.groups.iter().map(|g| g.id).collect();
+    for project in &mut state.projects {
+        if project.group.is_some_and(|g| !group_ids.contains(&g)) {
+            project.group = None;
+            ops.push(StoreOp::UpsertProject(project.clone()));
+        }
+    }
+    let projects = &state.projects;
+    state.groups.retain(|g| {
+        let used = projects.iter().any(|p| p.group == Some(g.id));
+        if !used {
+            ops.push(StoreOp::DeleteGroup(g.id));
+        }
+        used
+    });
+    state.sort();
 
     let selected_ok = state.selected_project.is_some_and(|p| project_ids.contains(&p));
     if !selected_ok {
