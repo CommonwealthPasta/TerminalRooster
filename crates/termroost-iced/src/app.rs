@@ -613,6 +613,9 @@ impl App {
             }),
             iced::time::every(GIT_POLL).map(|_| Message::GitPoll),
         ];
+        if self.files_shown() && self.window_focused {
+            subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Files(FilesMsg::Poll)));
+        }
         if self.task_drag.is_some() {
             // Only while a task is held, so moving the mouse doesn't redraw the app otherwise.
             // A drop on a session arrives from that widget before this end does.
@@ -736,7 +739,7 @@ impl App {
             self.activity.remove(&tab);
         }
         self.ensure_active_grid();
-        Task::batch([self.focus_active(), self.read_git()])
+        Task::batch([self.focus_active(), self.read_git(), self.refresh_files()])
     }
 
     fn grid_pane(&self, pane: pane_grid::Pane) -> Option<(TabId, PaneId)> {
@@ -1405,7 +1408,7 @@ impl App {
                 return match tab {
                     SideTab::Tasks => operation::focus(TASK_INPUT),
                     // Looking at files doesn't take the keyboard from the terminal.
-                    SideTab::Files => self.focus_active(),
+                    SideTab::Files => Task::batch([self.refresh_files(), self.focus_active()]),
                 };
             }
             Message::ClosePanel => {

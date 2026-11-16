@@ -4,24 +4,30 @@
 //! slow network drive), and kept by their full path, so sessions in the same
 //! folder share what was read.
 //!
+//! While the tab is on screen, the folders shown are read again every few
+//! seconds, since agents add and remove files all the time.
+//!
 //! What git leaves out (`.gitignore`, `.git/info/exclude`, the global
 //! excludes file) is dimmed, along with everything inside it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use iced::widget::{button, column, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
 use crate::side_panel::SideTab;
-use crate::sidebar::{muted_text, short_dir};
+use crate::sidebar::{icon_button, muted_text, short_dir};
 use crate::theme;
 
 /// Entries shown per folder; the rest are counted.
 const MAX_ENTRIES: usize = 1000;
 /// Indent per folder level, in pixels.
 const INDENT: f32 = 14.0;
+/// How often the folders shown are read again.
+pub const POLL: Duration = Duration::from_secs(3);
 
 /// One file or folder in a listing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +61,10 @@ pub enum FilesMsg {
     Toggle(PathBuf),
     /// Folders were read.
     Listed(Vec<(PathBuf, Result<Vec<Entry>, String>)>),
+    /// Time to read the folders shown again.
+    Poll,
+    /// The refresh button.
+    Refresh,
 }
 
 /// The files and folders in `dir`: folders first, then by name ignoring case.
@@ -113,6 +123,15 @@ pub fn rows<'a>(root: &Path, state: &'a FilesState) -> Vec<Row<'a>> {
     out
 }
 
+/// `dir` and the open folders shown below it, which are what a refresh reads.
+pub fn shown_dirs(dir: &Path, state: &FilesState) -> Vec<PathBuf> {
+    let open = rows(dir, state).into_iter().filter_map(|r| match r {
+        Row::Entry { entry, open: true, .. } => Some(entry.path.clone()),
+        _ => None,
+    });
+    std::iter::once(dir.to_path_buf()).chain(open).collect()
+}
+
 /// `dim`: `dir` is ignored. Git's rules don't say so of the things inside an
 /// ignored folder (`target/` doesn't match `target/debug`), so they inherit it.
 fn push_rows<'a>(dir: &Path, depth: usize, dim: bool, state: &'a FilesState, out: &mut Vec<Row<'a>>) {
@@ -148,7 +167,8 @@ impl App {
         }
     }
 
-    fn files_shown(&self) -> bool {
+    /// The Files tab is on screen.
+    pub(crate) fn files_shown(&self) -> bool {
         self.prefs.panel_open && self.prefs.side_tab == SideTab::Files && self.settings.is_none()
     }
 
@@ -163,6 +183,14 @@ impl App {
             return None;
         }
         Some(self.read_dirs(vec![root]))
+    }
+
+    /// Reads the folders the Files tab shows again, if it is on screen.
+    pub(crate) fn refresh_files(&mut self) -> Task<Message> {
+        match self.files_root().filter(|_| self.files_shown()) {
+            Some(root) => self.read_dirs(shown_dirs(&root, &self.files)),
+            None => Task::none(),
+        }
     }
 
     /// Reads folders on a thread; those already being read are skipped.
@@ -189,7 +217,9 @@ impl App {
                     Task::none()
                 } else {
                     self.files.expanded.insert(dir.clone());
-                    if self.files.listings.contains_key(&dir) { Task::none() } else { self.read_dirs(vec![dir]) }
+                    // What was read before may be old: read it again, with the
+                    // folders inside it that are still open.
+                    self.read_dirs(shown_dirs(&dir, &self.files))
                 };
                 // The click took the keyboard from the terminal.
                 Task::batch([read, self.focus_active()])
@@ -205,6 +235,8 @@ impl App {
                 }
                 Task::none()
             }
+            FilesMsg::Poll => self.refresh_files(),
+            FilesMsg::Refresh => Task::batch([self.refresh_files(), self.focus_active()]),
         }
     }
 
@@ -212,12 +244,12 @@ impl App {
     pub(crate) fn view_files(&self) -> Element<'_, Message> {
         let Some(root) = self.files_root() else { return space::horizontal().width(0).into() };
         let lines = rows(&root, &self.files).into_iter().map(file_row);
-        column![
-            muted_text(short_dir(&root, 44)).wrapping(text::Wrapping::None),
-            scrollable(column(lines).width(Length::Fill)).height(Length::Fill),
+        let top = row![
+            muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill),
+            icon_button("↻", Message::Files(FilesMsg::Refresh), "Read the folders again"),
         ]
-        .spacing(8)
-        .into()
+        .align_y(Alignment::Center);
+        column![top, scrollable(column(lines).width(Length::Fill)).height(Length::Fill),].spacing(8).into()
     }
 }
 
@@ -359,6 +391,19 @@ mod tests {
             ["0:▾src", "1:▾lib", "2:(Loading…)", "0:▸docs", "0:x.md"],
             "an open folder not read yet says so; files never open"
         );
+    }
+
+    #[test]
+    fn a_refresh_reads_the_open_folders_on_screen() {
+        let mut state = FilesState::default();
+        state.listings.insert("/r".into(), Listing::Ready(vec![entry("/r/a", true), entry("/r/b", true)]));
+        state.listings.insert("/r/a".into(), Listing::Ready(vec![entry("/r/a/x", true)]));
+        state.listings.insert("/r/b".into(), Listing::Ready(vec![entry("/r/b/y", true)]));
+        // b/y is open but b isn't, so it isn't on screen; a/x is, but not read yet.
+        state.expanded.extend(["/r/a".into(), "/r/a/x".into(), "/r/b/y".into()]);
+        let dirs: Vec<PathBuf> = ["/r", "/r/a", "/r/a/x"].into_iter().map(PathBuf::from).collect();
+        assert_eq!(shown_dirs(Path::new("/r"), &state), dirs);
+        assert_eq!(shown_dirs(Path::new("/r/a"), &state), dirs[1..]);
     }
 
     #[test]
