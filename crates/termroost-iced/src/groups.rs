@@ -62,7 +62,18 @@ fn move_project(all: &[Entry], project: ProjectId, to_index: usize, group: Optio
 /// can't go there.
 pub fn drop_command(all: &[Entry], rows: &[Row], from: usize, target: Target) -> Option<Command> {
     match (*rows.get(from)?, target) {
-        (Row::Project(_), Target::Onto(_)) => None,
+        (Row::Project(p), Target::Onto(i)) => match *rows.get(i)? {
+            // Onto a project of its own group, it is already with it.
+            Row::Project(q) if q != p && (group_of(all, p).is_none() || group_of(all, p) != group_of(all, q)) => {
+                Some(Command::GroupProjects { project: p, with: q })
+            }
+            Row::Group(g) if group_of(all, p) != Some(g) => {
+                let rest: Vec<Entry> = all.iter().copied().filter(|e| e.0 != p).collect();
+                let last = rest.iter().rposition(|e| e.1 == Some(g))?;
+                move_project(all, p, last + 1, Some(g))
+            }
+            _ => None,
+        },
         (Row::Project(p), Target::Between { above, below, depth }) => {
             let rest: Vec<Entry> = all.iter().copied().filter(|e| e.0 != p).collect();
             if depth > 0 {
@@ -241,6 +252,18 @@ mod tests {
     }
 
     #[test]
+    fn dropping_a_project_onto_a_row() {
+        let rows = rows_of("aBCd", &[]);
+        let drop = |from, onto| after("aBCd", drop_command(&list("aBCd"), &rows, from, Target::Onto(onto)));
+        assert_eq!(drop(0, 4), "group a with d");
+        assert_eq!(drop(0, 2), "group a with b", "into b's group");
+        assert_eq!(drop(4, 1), "aBCD", "onto a group: its last");
+        assert_eq!(drop(2, 3), "unchanged", "already with it");
+        assert_eq!(drop(2, 1), "unchanged", "already in it");
+        assert_eq!(drop(0, 0), "unchanged");
+    }
+
+    #[test]
     fn dropping_a_group() {
         // Rows: a, G, B, C, H, 1, d.
         let rows = rows_of("aBC1d", &[]);
@@ -269,6 +292,7 @@ mod tests {
         assert_eq!(drop(3, between(Some(2), None, 1)), "aBCEd", "just below C, in G");
         assert_eq!(drop(3, between(Some(1), Some(2), 1)), "aBECd", "just above C");
         assert_eq!(drop(0, between(Some(2), Some(3), 0)), "BCdae", "just above e");
+        assert_eq!(drop(3, Target::Onto(1)), "aBCEd", "onto G: after all of its projects");
     }
 
     #[test]
