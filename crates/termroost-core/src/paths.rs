@@ -9,6 +9,8 @@ use crate::error::{Error, Result};
 
 /// Environment variable overriding the data directory (used by tests).
 pub const DATA_DIR_ENV: &str = "TERMINALROOSTER_DATA_DIR";
+/// The app's folder name in the platform's data directories.
+pub const APP_DIR: &str = "TerminalRooster";
 /// The database, in the data directory.
 pub const DB_FILE: &str = "terminalrooster.db";
 const LOCK_FILE: &str = "terminalrooster.lock";
@@ -23,9 +25,7 @@ pub fn default_data_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os(DATA_DIR_ENV) {
         return Ok(PathBuf::from(dir));
     }
-    directories::ProjectDirs::from("", "", "TerminalRooster")
-        .map(|d| d.data_dir().to_path_buf())
-        .ok_or(Error::NoDataDir)
+    directories::ProjectDirs::from("", "", APP_DIR).map(|d| d.data_dir().to_path_buf()).ok_or(Error::NoDataDir)
 }
 
 /// The data directory used while the app was called TermRoost:

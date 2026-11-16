@@ -47,13 +47,13 @@ pub fn download_size() -> u64 {
     ASSET.size
 }
 
-/// Where the bash lives: `%LOCALAPPDATA%\termroost\data\bash` (local, not
-/// roaming: it is a few hundred MB), or `bash` in `TERMROOST_DATA_DIR`.
+/// Where the bash lives: `%LOCALAPPDATA%\TerminalRooster\data\bash` (local,
+/// not roaming: it is a few hundred MB), or `bash` in `TERMINALROOSTER_DATA_DIR`.
 pub fn install_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(crate::paths::DATA_DIR_ENV) {
         return Some(PathBuf::from(dir).join("bash"));
     }
-    directories::ProjectDirs::from("", "", "termroost").map(|d| d.data_local_dir().join("bash"))
+    directories::ProjectDirs::from("", "", crate::paths::APP_DIR).map(|d| d.data_local_dir().join("bash"))
 }
 
 /// The installed `bash.exe`, if the install finished.

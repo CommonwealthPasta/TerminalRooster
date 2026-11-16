@@ -3,7 +3,7 @@
 //! Usage: `cargo run -p termroost-core --example shells [-- --install]`
 //!
 //! `--install` first installs TermRoost's own bash (Windows), like Settings
-//! does. Set `TERMROOST_DATA_DIR` to try it without touching the real data.
+//! does. Set `TERMINALROOSTER_DATA_DIR` to try it without touching the real data.
 
 use termroost_core::session::{bundled_bash, shell};
 
