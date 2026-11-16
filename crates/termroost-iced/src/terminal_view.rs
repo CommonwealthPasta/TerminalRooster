@@ -3,6 +3,8 @@
 //! The widget talks to the [`TerminalHandle`] directly for I/O (keys, paste,
 //! selection, scrolling, resize), so typing does not go through app messages.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use iced::advanced::clipboard::Kind as ClipboardKind;
@@ -30,6 +32,7 @@ const LINE_FACTOR: f32 = 1.25;
 pub struct TerminalView<M> {
     handle: TerminalHandle,
     keymap: Arc<Keymap>,
+    focus: KeyboardFocus,
     id: widget::Id,
     /// This is the focused pane of the visible tab.
     active: bool,
@@ -42,13 +45,19 @@ impl<M: Clone> TerminalView<M> {
     pub fn new(
         handle: TerminalHandle,
         keymap: Arc<Keymap>,
+        focus: KeyboardFocus,
         active: bool,
         font_size: f32,
         on_focus: M,
         on_restart: M,
     ) -> Self {
         let id = widget_id(handle.pane());
-        Self { handle, keymap, id, active, font_size, on_focus, on_restart }
+        Self { handle, keymap, focus, id, active, font_size, on_focus, on_restart }
+    }
+
+    /// Takes key presses: it has the keyboard and is the focused pane of the visible session.
+    fn has_keyboard(&self) -> bool {
+        self.active && self.focus.has(self.handle.pane())
     }
 }
 
@@ -86,7 +95,6 @@ impl Metrics {
 
 #[derive(Default)]
 struct State {
-    focused: bool,
     metrics: Option<Metrics>,
     selecting: bool,
     mouse_held: Option<CoreButton>,
@@ -96,15 +104,49 @@ struct State {
     modifiers: keyboard::Modifiers,
 }
 
-impl operation::Focusable for State {
+/// Which terminal has the keyboard, shared by the app and all terminal
+/// widgets.
+///
+/// It can't live in the widgets' own state: iced recreates that state, and a
+/// `pane_grid` drops the state of all its panes on the first rebuild after it
+/// is created (its record of the pane order starts out empty). That happens at
+/// startup and whenever the widget tree above the terminals changes shape, so
+/// a terminal focused just before lost the keyboard.
+#[derive(Clone, Debug, Default)]
+pub struct KeyboardFocus(Rc<Cell<Option<core::PaneId>>>);
+
+impl KeyboardFocus {
+    fn has(&self, pane: core::PaneId) -> bool {
+        self.0.get() == Some(pane)
+    }
+
+    fn take(&self, pane: core::PaneId) {
+        self.0.set(Some(pane));
+    }
+
+    /// Lets go of the keyboard, if `pane` has it.
+    fn release(&self, pane: core::PaneId) {
+        if self.has(pane) {
+            self.0.set(None);
+        }
+    }
+}
+
+/// One terminal's keyboard focus, as iced's focus operations see it.
+struct PaneFocus<'a> {
+    focus: &'a KeyboardFocus,
+    pane: core::PaneId,
+}
+
+impl operation::Focusable for PaneFocus<'_> {
     fn is_focused(&self) -> bool {
-        self.focused
+        self.focus.has(self.pane)
     }
     fn focus(&mut self) {
-        self.focused = true;
+        self.focus.take(self.pane);
     }
     fn unfocus(&mut self) {
-        self.focused = false;
+        self.focus.release(self.pane);
     }
 }
 
@@ -189,13 +231,13 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for TerminalView<M> {
 
     fn operate(
         &mut self,
-        tree: &mut widget::Tree,
+        _tree: &mut widget::Tree,
         layout: Layout<'_>,
         _renderer: &iced::Renderer,
         operation: &mut dyn widget::Operation,
     ) {
-        let state = tree.state.downcast_mut::<State>();
-        operation.focusable(Some(&self.id), layout.bounds(), state);
+        let mut focus = PaneFocus { focus: &self.focus, pane: self.handle.pane() };
+        operation.focusable(Some(&self.id), layout.bounds(), &mut focus);
     }
 
     fn update(
@@ -217,7 +259,7 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for TerminalView<M> {
         match event {
             Event::Keyboard(keyboard::Event::ModifiersChanged(mods)) => state.modifiers = *mods,
             Event::Keyboard(keyboard::Event::KeyPressed { key, physical_key, modifiers, text, .. }) => {
-                if !(state.focused && self.active) {
+                if !self.has_keyboard() {
                     return;
                 }
                 if let Some(action) = self.keymap.action(key, *physical_key, *modifiers) {
@@ -259,10 +301,10 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for TerminalView<M> {
                 // terminal the user is looking at (also across sessions and
                 // when the window loses focus).
                 let Some(p) = cursor.position_in(bounds) else {
-                    state.focused = false;
+                    self.focus.release(handle.pane());
                     return;
                 };
-                state.focused = true;
+                self.focus.take(handle.pane());
                 if !self.active {
                     shell.publish(self.on_focus.clone());
                 }
@@ -380,7 +422,7 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for TerminalView<M> {
         let state = tree.state.downcast_ref::<State>();
         let m = self.metrics(state);
         let bounds = layout.bounds();
-        let focused = state.focused && self.active;
+        let focused = self.has_keyboard();
         let exited = self.handle.exit_status();
 
         self.handle.with_content(|c| {
@@ -552,5 +594,46 @@ fn decorate(r: &mut iced::Renderer, style: core::CellStyle, x: f32, y: f32, widt
 impl<'a, M: Clone + 'a> From<TerminalView<M>> for Element<'a, M, Theme, iced::Renderer> {
     fn from(w: TerminalView<M>) -> Self {
         Element::new(w)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use operation::Focusable as _;
+
+    use super::*;
+
+    /// What iced's `focus` operation does: `focus()` on the target and
+    /// `unfocus()` on every other focusable, in tree order. `None` stands for
+    /// a text field getting the focus.
+    fn focus_op(focus: &KeyboardFocus, panes: &[core::PaneId], target: Option<core::PaneId>) {
+        for &pane in panes {
+            let mut f = PaneFocus { focus, pane };
+            if Some(pane) == target { f.focus() } else { f.unfocus() }
+        }
+    }
+
+    #[test]
+    fn one_terminal_has_the_keyboard() {
+        let focus = KeyboardFocus::default();
+        let (a, b) = (core::PaneId(1), core::PaneId(2));
+        // Visited after the target, `a` must not take the focus away from `b`.
+        focus_op(&focus, &[b, a], Some(b));
+        assert!(focus.has(b) && !focus.has(a));
+        focus_op(&focus, &[a, b], Some(a));
+        assert!(focus.has(a) && !focus.has(b));
+        focus_op(&focus, &[a, b], None);
+        assert!(!focus.has(a) && !focus.has(b), "a text field took the keyboard");
+    }
+
+    #[test]
+    fn the_focus_outlives_the_widgets() {
+        // Widgets (and their state) come and go with every rebuild; the
+        // focus is kept by the app and handed to each new widget.
+        let focus = KeyboardFocus::default();
+        let pane = core::PaneId(7);
+        focus_op(&focus, &[pane], Some(pane));
+        let handed_to_new_widget = focus.clone();
+        assert!(handed_to_new_widget.has(pane));
     }
 }

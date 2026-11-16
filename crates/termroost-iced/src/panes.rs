@@ -110,6 +110,7 @@ impl App {
             Some(h) => TerminalView::new(
                 h,
                 self.keymap.clone(),
+                self.keyboard_focus.clone(),
                 active && self.dialog.is_none(),
                 self.prefs.font_size,
                 Message::FocusPane(pane),

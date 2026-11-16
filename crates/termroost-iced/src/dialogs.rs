@@ -12,7 +12,7 @@ use termroost_core::session::shell;
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message};
 use crate::keymap::Keymap;
 use crate::sidebar::{BOLD, muted_text};
-use crate::terminal_view::TerminalView;
+use crate::terminal_view::{KeyboardFocus, TerminalView};
 use crate::theme;
 
 pub(crate) fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
@@ -47,9 +47,11 @@ fn modal<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> 
 fn codex_window<'a>(
     handle: &'a termroost_core::TerminalHandle,
     keymap: &Arc<Keymap>,
+    focus: &KeyboardFocus,
     font_size: f32,
 ) -> Element<'a, Message> {
-    let term = TerminalView::new(handle.clone(), keymap.clone(), true, font_size, Message::Noop, Message::Noop);
+    let term =
+        TerminalView::new(handle.clone(), keymap.clone(), focus.clone(), true, font_size, Message::Noop, Message::Noop);
     let content = column![
         row![
             text("Type /hooks and trust the TerminalRooster hook.").size(14).width(Length::Fill),
@@ -191,7 +193,9 @@ impl App {
                 .push(actions("Quit", true))
                 .into()
             }
-            Dialog::CodexTrust(handle) => return codex_window(handle, &self.keymap, self.prefs.font_size),
+            Dialog::CodexTrust(handle) => {
+                return codex_window(handle, &self.keymap, &self.keyboard_focus, self.prefs.font_size);
+            }
             Dialog::Worktree(form) => self.view_worktree(form),
             Dialog::CodexHook => column![
                 text("Track Codex sessions?").size(18).font(BOLD),

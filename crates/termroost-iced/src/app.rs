@@ -17,7 +17,7 @@ use crate::color_picker::{ColorPicker, Hsl};
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
-use crate::terminal_view;
+use crate::terminal_view::{self, KeyboardFocus};
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
 use crate::worktree::{WorktreeForm, WorktreeMsg};
@@ -383,6 +383,8 @@ pub struct App {
     pub(crate) codex_hook: termroost_core::CodexHookStatus,
     /// Shortcuts in effect (from `prefs.shortcuts`); shared with the terminals.
     pub(crate) keymap: Arc<Keymap>,
+    /// Which terminal has the keyboard; shared with the terminals.
+    pub(crate) keyboard_focus: KeyboardFocus,
     /// A task held with the mouse, to be dropped on a session.
     pub(crate) task_drag: Option<TaskDrag>,
     /// Alerts in terminals the user has not looked at since.
@@ -473,6 +475,7 @@ impl App {
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
             keymap,
+            keyboard_focus: KeyboardFocus::default(),
             task_drag: None,
             notices: HashMap::new(),
             toasts: Vec::new(),
