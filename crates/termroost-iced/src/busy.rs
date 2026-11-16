@@ -1,5 +1,7 @@
 //! What goes on in the terminals of a list item (a session, a project or a
-//! closed group): a spinner while a coding agent is in the middle of a turn.
+//! closed group): a spinner while a coding agent is in the middle of a turn,
+//! else a pulse while programs run (a dev server, a build, an editor,
+//! commands an agent left running). The tooltip says which.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -8,7 +10,7 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Tree, Widget};
 use iced::advanced::{Clipboard, Shell, renderer, svg};
 use iced::time::Instant;
-use iced::widget::{container, space, text, tooltip};
+use iced::widget::{container, space, svg as svg_widget, text, tooltip};
 use iced::{Color, Element, Event, Length, Radians, Rectangle, Size, Theme, mouse, window};
 use termroost_core::PaneId;
 
@@ -19,6 +21,8 @@ use crate::app::{App, Message};
 pub struct Busy {
     /// The coding agents in the middle of a turn, by name.
     pub working: Vec<String>,
+    /// The programs running, by name; those an agent started say so.
+    pub running: Vec<String>,
 }
 
 impl App {
@@ -37,6 +41,15 @@ impl App {
                     busy.working.push(name);
                 }
             }
+            for p in activity.busy_programs() {
+                let name = match p.started_by {
+                    Some(agent) => format!("{} (started by {agent})", p.name),
+                    None => p.name.clone(),
+                };
+                if !busy.running.contains(&name) {
+                    busy.running.push(name);
+                }
+            }
         }
         busy
     }
@@ -45,20 +58,42 @@ impl App {
 /// Size of the mark, in pixels.
 const MARK_SIZE: f32 = 12.0;
 
-/// A spinner while an agent works, with a tooltip saying which; nothing
-/// otherwise. `ink` is its color.
+/// A spinner while an agent works, else a pulse while programs run, with a
+/// tooltip saying which; nothing when all is quiet. `ink` is its color.
 pub fn busy_mark<'a>(busy: Busy, ink: impl Fn(&Theme) -> Color + 'a) -> Element<'a, Message> {
-    if busy.working.is_empty() {
+    let mark: Element<'a, Message> = if !busy.working.is_empty() {
+        Element::new(Spinner { ink: Box::new(ink) })
+    } else if !busy.running.is_empty() {
+        svg_widget(LazyLock::force(&PULSE).clone())
+            .width(MARK_SIZE)
+            .height(MARK_SIZE)
+            .style(move |t, _| svg_widget::Style { color: Some(ink(t)) })
+            .into()
+    } else {
         return space::horizontal().width(0).into();
+    };
+    let mut tip = Vec::new();
+    if !busy.working.is_empty() {
+        tip.push(format!("Working: {}", busy.working.join(", ")));
     }
-    let tip = format!("Working: {}", busy.working.join(", "));
+    if !busy.running.is_empty() {
+        tip.push(format!("Running: {}", busy.running.join(", ")));
+    }
     tooltip(
-        Element::new(Spinner { ink: Box::new(ink) }),
-        container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),
+        mark,
+        container(text(tip.join("\n")).size(12)).padding([4, 8]).style(container::rounded_box),
         tooltip::Position::Bottom,
     )
     .into()
 }
+
+/// A pulse line, as on a heart monitor: something is alive in there.
+static PULSE: LazyLock<svg::Handle> = LazyLock::new(|| {
+    svg::Handle::from_memory(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><polyline points="1,8.5 4.5,8.5 6.5,3 9.5,13 11.5,8.5 15,8.5" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"##
+            .as_slice(),
+    )
+});
 
 /// A faint ring with a quarter of it drawn solid; it turns.
 static SPINNER: LazyLock<svg::Handle> = LazyLock::new(|| {
