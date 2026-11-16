@@ -6,8 +6,9 @@ use std::path::Path;
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input, tooltip};
 use iced::{Alignment, Element, Font, Length, Padding, font};
 use termroost_core::git::Head;
-use termroost_core::{PaneId, Project, ProjectId, Tab, TabId};
+use termroost_core::{AgentKind, PaneId, Project, ProjectId, Tab, TabId};
 
+use crate::agent_icon::agent_icon;
 use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget, place};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
@@ -45,10 +46,16 @@ pub fn branch_label<'a>(head: &Head, size: f32, max: usize) -> Element<'a, Messa
     .into()
 }
 
+/// Width of the glyph in an [`icon_button`], and the padding on either side of it.
+const ICON_GLYPH_WIDTH: f32 = 18.0;
+const ICON_PADDING: f32 = 4.0;
+/// Width of an [`icon_button`].
+pub const ICON_BUTTON_WIDTH: f32 = ICON_GLYPH_WIDTH + 2.0 * ICON_PADDING;
+
 pub fn icon_button<'a>(label: &'a str, msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     tooltip(
-        button(text(label).size(14).align_x(Alignment::Center).width(18))
-            .padding([2, 4])
+        button(text(label).size(14).align_x(Alignment::Center).width(ICON_GLYPH_WIDTH))
+            .padding([2.0, ICON_PADDING])
             .style(theme::icon_button)
             .on_press(msg),
         container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),
@@ -106,6 +113,22 @@ pub fn matches_search(name: &str, dir: &Path, query: &str) -> bool {
     words.all(|w| name.contains(&w) || folder.contains(&w))
 }
 
+/// Text size of a list item's name.
+const NAME_SIZE: f32 = 14.0;
+
+/// `content` centered on the first line of a list item's name, where it
+/// stays when the name wraps.
+fn on_first_line<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let line = text::LineHeight::default().to_absolute(NAME_SIZE.into());
+    container(content).height(line).align_y(Alignment::Center).into()
+}
+
+/// The text color of a list item.
+fn item_text(t: &iced::Theme, selected: bool) -> iced::Color {
+    let p = t.extended_palette();
+    if selected { p.primary.weak.text } else { p.background.base.text }
+}
+
 /// A list item; `drop_target` outlines it while a task is held over it.
 fn item_style(selected: bool, drop_target: bool) -> impl Fn(&iced::Theme) -> container::Style {
     move |t| {
@@ -113,7 +136,7 @@ fn item_style(selected: bool, drop_target: bool) -> impl Fn(&iced::Theme) -> con
         let border = iced::Border::default().rounded(4);
         container::Style {
             background: selected.then_some(iced::Background::Color(p.primary.weak.color)),
-            text_color: Some(if selected { p.primary.weak.text } else { p.background.base.text }),
+            text_color: Some(item_text(t, selected)),
             border: if drop_target { border.width(2.0).color(p.primary.base.color) } else { border },
             ..container::Style::default()
         }
@@ -323,16 +346,25 @@ impl App {
         } else {
             space::horizontal().width(0).into()
         };
-        let mut label = column![
-            row![
-                marker(self.tab_notice(tab), self.activity.contains(&tab.id)),
-                text(&tab.title).size(14).width(Length::Fill),
-                badge
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(1);
+        let mut marks =
+            row![marker(self.tab_notice(tab), self.activity.contains(&tab.id))].spacing(4).align_y(Alignment::Center);
+        // One logo per kind of agent, in terminal order.
+        let mut kinds: Vec<AgentKind> = Vec::new();
+        for kind in panes.iter().filter_map(|p| Some(s.pane(*p)?.agent.as_ref()?.kind)) {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        for kind in kinds {
+            marks = marks.push(tooltip(
+                agent_icon(kind, NAME_SIZE, move |t| item_text(t, selected)),
+                container(text(kind.label()).size(12)).padding([4, 8]).style(container::rounded_box),
+                tooltip::Position::Bottom,
+            ));
+        }
+        // A long name wraps, breaking inside a word too when one doesn't fit.
+        let name = text(&tab.title).size(NAME_SIZE).width(Length::Fill).wrapping(text::Wrapping::WordOrGlyph);
+        let mut label = column![row![on_first_line(marks), name, on_first_line(badge)].spacing(4)].spacing(1);
         if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
             label = label.push(branch_label(head, 11.0, 24));
         }

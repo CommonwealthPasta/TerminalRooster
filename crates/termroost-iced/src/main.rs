@@ -1,6 +1,7 @@
 // Release builds on Windows should not open a console window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod agent_icon;
 mod app;
 mod color_picker;
 #[cfg(target_os = "linux")]
@@ -9,6 +10,7 @@ mod dialogs;
 mod git_panel;
 mod keymap;
 mod layout_conv;
+mod leave_room;
 mod logging;
 mod notify;
 mod on_escape;
