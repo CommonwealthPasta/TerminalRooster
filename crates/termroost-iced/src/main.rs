@@ -24,7 +24,7 @@ use termroost_core::{Config, Core};
 use crate::app::{App, Prefs};
 
 /// Desktop application id (also the .desktop and AppStream file names).
-pub const APP_ID: &str = "io.github.Davenport_Physics.TermRoost";
+pub const APP_ID: &str = "io.github.Davenport_Physics.TerminalRooster";
 
 fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
@@ -37,7 +37,7 @@ fn main() -> iced::Result {
     #[cfg(target_os = "linux")]
     if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
         tracing::error!("no display: neither WAYLAND_DISPLAY nor DISPLAY is set");
-        eprintln!("termroost: no graphical session found (neither WAYLAND_DISPLAY nor DISPLAY is set)");
+        eprintln!("terminalrooster: no graphical session found (neither WAYLAND_DISPLAY nor DISPLAY is set)");
         std::process::exit(1);
     }
 

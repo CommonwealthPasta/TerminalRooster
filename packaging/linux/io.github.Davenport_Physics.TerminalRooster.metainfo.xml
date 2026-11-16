@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.Davenport_Physics.TermRoost</id>
+  <id>io.github.Davenport_Physics.TerminalRooster</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>TerminalRooster</name>
@@ -20,9 +20,9 @@
   </developer>
   <url type="homepage">https://github.com/Davenport-Physics/TermRoost</url>
   <url type="bugtracker">https://github.com/Davenport-Physics/TermRoost/issues</url>
-  <launchable type="desktop-id">io.github.Davenport_Physics.TermRoost.desktop</launchable>
+  <launchable type="desktop-id">io.github.Davenport_Physics.TerminalRooster.desktop</launchable>
   <provides>
-    <binary>termroost</binary>
+    <binary>terminalrooster</binary>
   </provides>
   <supports>
     <control>keyboard</control>

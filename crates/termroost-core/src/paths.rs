@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::error::{Error, Result};
 
 /// Environment variable overriding the data directory (used by tests).
-pub const DATA_DIR_ENV: &str = "TERMROOST_DATA_DIR";
+pub const DATA_DIR_ENV: &str = "TERMINALROOSTER_DATA_DIR";
 
 /// `~/.local/share/termroost` on Linux, `%APPDATA%\termroost\data` on Windows.
 pub fn default_data_dir() -> Result<PathBuf> {

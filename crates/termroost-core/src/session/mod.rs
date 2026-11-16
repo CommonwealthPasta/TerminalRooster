@@ -90,7 +90,7 @@ impl Background {
 
     pub fn spawn(self, stop: mpsc::Receiver<()>, interval: Duration) -> JoinHandle<()> {
         std::thread::Builder::new()
-            .name("termroost-autosave".into())
+            .name("terminalrooster-autosave".into())
             .spawn(move || {
                 // Runs until the core sends a stop signal (or is dropped).
                 while let Err(mpsc::RecvTimeoutError::Timeout) = stop.recv_timeout(interval) {

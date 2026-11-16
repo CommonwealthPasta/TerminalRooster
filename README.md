@@ -17,7 +17,7 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 cargo run --release -p termroost-iced
 ```
 
-Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show TerminalRooster's icon for its window on Wayland. Once a package is installed, TerminalRooster removes this entry again. Set `TERMROOST_NO_DESKTOP_ENTRY=1` to skip it.
+Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show TerminalRooster's icon for its window on Wayland. Once a package is installed, TerminalRooster removes this entry again. Set `TERMINALROOSTER_NO_DESKTOP_ENTRY=1` to skip it.
 
 ### Windows (installer)
 
@@ -27,11 +27,11 @@ Run `TerminalRooster-<version>-x64-setup.exe` (see [Packaging (Windows)](#packag
 
 1. Install Rust with [rustup](https://rustup.rs) (default MSVC toolchain).
 2. Install the Visual Studio Build Tools with the "Desktop development with C++" workload. SQLite is compiled from source.
-3. In the `termroost` folder, run:
+3. In the repository folder, run:
 
    ```powershell
    cargo build --release
-   .\target\release\termroost.exe
+   .\target\release\terminalrooster.exe
    ```
 
 Windows 10 1809 or newer is required, for ConPTY. Terminals use `pwsh` if it is installed, otherwise Windows PowerShell, otherwise `cmd`. Release builds do not open a console window.
@@ -43,7 +43,7 @@ Windows 10 1809 or newer is required, for ConPTY. Terminals use `pwsh` if it is 
 | Linux | `~/.local/share/termroost/termroost.db` |
 | Windows | `%APPDATA%\termroost\data\termroost.db` |
 
-Set `TERMROOST_DATA_DIR` to use another directory. Only one instance can run per data directory.
+Set `TERMINALROOSTER_DATA_DIR` to use another directory. Only one instance can run per data directory.
 
 Before TermRoost, the app was called *agentdeck*. On first start it moves the old `agentdeck` data folder's database into the folder above. Close the old app first; TerminalRooster waits and says so if it is still running.
 
@@ -69,7 +69,7 @@ TerminalRooster logs with `tracing`, to stderr and to a daily file that keeps th
 | Linux | `~/.local/share/termroost/logs/` |
 | Windows | `%APPDATA%\termroost\data\logs\` |
 
-Panics are written to the log with a backtrace. The level comes from `TERMROOST_LOG`, then `RUST_LOG`; the default is `info`. For example, `TERMROOST_LOG=debug` logs every command, and `TERMROOST_LOG=termroost=trace` logs every UI message. Keystrokes are never logged.
+Panics are written to the log with a backtrace. The level comes from `TERMINALROOSTER_LOG`, then `RUST_LOG`; the default is `info`. For example, `TERMINALROOSTER_LOG=debug` logs every command, and `TERMINALROOSTER_LOG=terminalrooster=trace` logs every UI message. Keystrokes are never logged.
 
 ## Restoring after a restart or crash
 
@@ -132,7 +132,7 @@ Cargo workspace with two crates:
 
 ## Packaging (Linux)
 
-The `.deb` and `.rpm` packages install the `termroost` binary, a desktop entry, icons and AppStream metadata.
+The `.deb` and `.rpm` packages install the `terminalrooster` binary, a desktop entry, icons and AppStream metadata.
 
 **Locally:**
 
@@ -147,13 +147,13 @@ The packages land in `dist/`. A binary only runs on systems whose glibc is at le
 
 **New version:**
 1. Bump `version` in `Cargo.toml`.
-2. Add a `<release>` entry to `packaging/linux/io.github.Davenport_Physics.TermRoost.metainfo.xml` (the build checks for it).
+2. Add a `<release>` entry to `packaging/linux/io.github.Davenport_Physics.TerminalRooster.metainfo.xml` (the build checks for it).
 
-**Icons:** they live in `packaging/icons/`. The `termroost-<size>.png` files are the hicolor icons for the packages, `termroost-64.png` is also the window icon, and `termroost.ico` is embedded in the Windows `.exe`.
+**Icons:** they live in `packaging/icons/`. The `terminalrooster-<size>.png` files are the hicolor icons for the packages, `terminalrooster-64.png` is also the window icon, and `terminalrooster.ico` is embedded in the Windows `.exe`.
 
 ## Packaging (Windows)
 
-The installer is built with [NSIS](https://nsis.sourceforge.io) from `packaging/windows/terminalrooster.nsi`. It installs `termroost.exe` along with the license files. It also adds Start menu and desktop shortcuts and an *Apps* entry with an uninstaller.
+The installer is built with [NSIS](https://nsis.sourceforge.io) from `packaging/windows/terminalrooster.nsi`. It installs `terminalrooster.exe` along with the license files. It also adds Start menu and desktop shortcuts and an *Apps* entry with an uninstaller.
 
 ```powershell
 winget install NSIS.NSIS    # once; or set MAKENSIS to makensis.exe
@@ -166,7 +166,7 @@ The installer lands in `dist/TerminalRooster-<version>-x64-setup.exe`. On Window
 
 ```sh
 cargo test --workspace          # unit tests + real-PTY/real-DB integration tests, including an abort() crash test
-cargo run -p termroost-core --example seed -- /some/dir   # demo data (use with TERMROOST_DATA_DIR)
+cargo run -p termroost-core --example seed -- /some/dir   # demo data (use with TERMINALROOSTER_DATA_DIR)
 ```
 
 ## License

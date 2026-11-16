@@ -88,7 +88,8 @@ impl Store {
         schema::configure(&reader)?;
 
         let (tx, rx) = mpsc::channel();
-        let writer = std::thread::Builder::new().name("termroost-db".into()).spawn(move || writer_loop(conn, rx))?;
+        let writer =
+            std::thread::Builder::new().name("terminalrooster-db".into()).spawn(move || writer_loop(conn, rx))?;
         Ok((Store { writer_handle: StoreWriter { tx }, writer: Some(writer), reader }, state))
     }
 

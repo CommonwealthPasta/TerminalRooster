@@ -702,8 +702,8 @@ impl Core {
         let shell = session::shell::resolve(project.shell.as_deref(), self.state.settings.default_shell.as_deref());
         let cwd = self.state.tab_working_dir(tab);
         let mut env = base_env();
-        env.insert("TERMROOST_PANE_ID".to_owned(), pane.to_string());
-        env.insert("TERMROOST_PROJECT".to_owned(), project.name.clone());
+        env.insert("TERMINALROOSTER_PANE_ID".to_owned(), pane.to_string());
+        env.insert("TERMINALROOSTER_PROJECT".to_owned(), project.name.clone());
         Some(SpawnSpec { shell, cwd, env })
     }
 
@@ -832,7 +832,7 @@ fn base_env() -> HashMap<String, String> {
     #[cfg(not(windows))]
     env.insert("TERM".to_owned(), "xterm-256color".to_owned());
     env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
-    env.insert("TERM_PROGRAM".to_owned(), "termroost".to_owned());
+    env.insert("TERM_PROGRAM".to_owned(), "terminalrooster".to_owned());
     env
 }
 

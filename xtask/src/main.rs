@@ -18,8 +18,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
-const APP_ID: &str = "io.github.Davenport_Physics.TermRoost";
-/// hicolor sizes shipped; each comes from `packaging/icons/termroost-<size>.png`.
+const APP_ID: &str = "io.github.Davenport_Physics.TerminalRooster";
+/// hicolor sizes shipped; each comes from `packaging/icons/terminalrooster-<size>.png`.
 const ICON_SIZES: [u32; 10] = [16, 24, 32, 48, 64, 96, 128, 192, 256, 512];
 
 type Result<T> = std::result::Result<T, String>;
@@ -125,7 +125,7 @@ fn package(deb: bool, rpm: bool) -> Result<()> {
 /// Builds `dist/TerminalRooster-<version>-<arch>-setup.exe` with NSIS.
 fn package_windows() -> Result<()> {
     if !cfg!(windows) {
-        return Err("the Windows installer packages the native termroost.exe; build it on Windows".into());
+        return Err("the Windows installer packages the native terminalrooster.exe; build it on Windows".into());
     }
     let makensis = find_makensis()?;
     let root = root();
@@ -191,8 +191,8 @@ fn stage(root: &Path) -> Result<()> {
         std::fs::copy(&from, &to).map_err(|e| format!("copying {}: {e}", from.display()))?;
         Ok(())
     };
-    let exe = if cfg!(windows) { "termroost.exe" } else { "termroost" };
-    copy(root.join("target/release").join(exe), "usr/bin/termroost")?;
+    let exe = if cfg!(windows) { "terminalrooster.exe" } else { "terminalrooster" };
+    copy(root.join("target/release").join(exe), "usr/bin/terminalrooster")?;
     copy(root.join(format!("packaging/linux/{APP_ID}.desktop")), &format!("usr/share/applications/{APP_ID}.desktop"))?;
     copy(
         root.join(format!("packaging/linux/{APP_ID}.metainfo.xml")),
@@ -200,7 +200,7 @@ fn stage(root: &Path) -> Result<()> {
     )?;
 
     for size in ICON_SIZES {
-        let src = root.join(format!("packaging/icons/termroost-{size}.png"));
+        let src = root.join(format!("packaging/icons/terminalrooster-{size}.png"));
         let icon = image::open(&src).map_err(|e| format!("{}: {e}", src.display()))?;
         if (icon.width(), icon.height()) != (size, size) {
             return Err(format!("{} is {}x{}, expected {size}x{size}", src.display(), icon.width(), icon.height()));

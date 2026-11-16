@@ -27,14 +27,14 @@ ManifestDPIAware true
   !define ROOT "..\.."
 !endif
 !ifndef EXE
-  !define EXE "${ROOT}\target\release\termroost.exe"
+  !define EXE "${ROOT}\target\release\terminalrooster.exe"
 !endif
 !ifndef OUTFILE
   !define OUTFILE "${ROOT}\dist\TerminalRooster-${VERSION}-x64-setup.exe"
 !endif
 
 !define APP_NAME "TerminalRooster"
-!define EXE_NAME "termroost.exe"
+!define EXE_NAME "terminalrooster.exe"
 !define PUBLISHER "Emma Davenport"
 !define HOMEPAGE "https://github.com/Davenport-Physics/TermRoost"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
@@ -60,8 +60,8 @@ VIAddVersionKey "FileDescription" "${APP_NAME} Setup"
 VIAddVersionKey "CompanyName" "${PUBLISHER}"
 VIAddVersionKey "LegalCopyright" "Copyright (c) 2026 ${PUBLISHER}"
 
-!define MUI_ICON "${ROOT}\packaging\icons\termroost.ico"
-!define MUI_UNICON "${ROOT}\packaging\icons\termroost.ico"
+!define MUI_ICON "${ROOT}\packaging\icons\terminalrooster.ico"
+!define MUI_UNICON "${ROOT}\packaging\icons\terminalrooster.ico"
 !define MUI_ABORTWARNING
 
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE_NAME}"

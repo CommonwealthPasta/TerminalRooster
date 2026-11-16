@@ -96,7 +96,7 @@ fn snake_case(event: &str) -> String {
 fn posix_command(dir: &Path) -> String {
     let quoted = format!("'{}'", dir.display().to_string().replace('\'', r"'\''"));
     format!(
-        r#"sh -c 'd="$1"; [ -f "$d/{RUNNING}" ] || {{ cat >/dev/null; exit 0; }}; f="$d/${{TERMROOST_PANE_ID:-x}}-$$-$(date +%s)"; cat > "$f.tmp" && mv "$f.tmp" "$f.json"; exit 0' {MARKER} {quoted}"#
+        r#"sh -c 'd="$1"; [ -f "$d/{RUNNING}" ] || {{ cat >/dev/null; exit 0; }}; f="$d/${{TERMINALROOSTER_PANE_ID:-x}}-$$-$(date +%s)"; cat > "$f.tmp" && mv "$f.tmp" "$f.json"; exit 0' {MARKER} {quoted}"#
     )
 }
 
@@ -107,7 +107,7 @@ fn windows_command(dir: &Path) -> String {
     let script = format!(
         "$d = '{d}'\n$in = [Console]::In.ReadToEnd()\n\
          if (-not (Test-Path (Join-Path $d '{RUNNING}'))) {{ exit 0 }}\n\
-         $p = if ($env:TERMROOST_PANE_ID) {{ $env:TERMROOST_PANE_ID }} else {{ 'x' }}\n\
+         $p = if ($env:TERMINALROOSTER_PANE_ID) {{ $env:TERMINALROOSTER_PANE_ID }} else {{ 'x' }}\n\
          $f = Join-Path $d ('{{0}}-{{1}}-{{2}}' -f $p, $PID, [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())\n\
          [IO.File]::WriteAllText($f + '.tmp', $in)\nMove-Item -Force ($f + '.tmp') ($f + '.json')\nexit 0\n"
     );
@@ -160,7 +160,7 @@ pub(crate) fn install(codex_home: &Path, data_dir: &Path) -> io::Result<PathBuf>
     std::fs::create_dir_all(&dir)?;
     let mut root: Value = match std::fs::read_to_string(&file) {
         Ok(text) => {
-            let backup = codex_home.join("hooks.json.termroost-backup");
+            let backup = codex_home.join("hooks.json.terminalrooster-backup");
             if !backup.exists() {
                 std::fs::write(&backup, &text)?;
             }
@@ -234,7 +234,7 @@ pub(crate) struct HookReport {
     pub cwd: PathBuf,
     pub event: String,
     pub at: SystemTime,
-    /// `TERMROOST_PANE_ID` as the hook saw it. Codex's shared daemon may run
+    /// `TERMINALROOSTER_PANE_ID` as the hook saw it. Codex's shared daemon may run
     /// hooks with another terminal's environment, so this is only a hint.
     pub env_pane: Option<PaneId>,
 }
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
         assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
         assert_eq!(v["hooks"]["SessionStart"][0]["hooks"][0]["command"], "echo hi");
-        assert!(codex.join("hooks.json.termroost-backup").is_file());
+        assert!(codex.join("hooks.json.terminalrooster-backup").is_file());
 
         remove(&codex).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
@@ -371,9 +371,9 @@ mod tests {
         let run = |pane: Option<&str>| {
             let mut cmd = std::process::Command::new("sh");
             cmd.arg("-c").arg(posix_command(&reports_dir(&data))).stdin(std::process::Stdio::piped());
-            cmd.env_remove("TERMROOST_PANE_ID");
+            cmd.env_remove("TERMINALROOSTER_PANE_ID");
             if let Some(p) = pane {
-                cmd.env("TERMROOST_PANE_ID", p);
+                cmd.env("TERMINALROOSTER_PANE_ID", p);
             }
             let mut child = cmd.spawn().unwrap();
             child

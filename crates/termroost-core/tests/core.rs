@@ -70,7 +70,7 @@ fn only_pane(core: &Core) -> PaneId {
 fn terminal_runs_and_reports_exit() {
     let dir = tempfile::tempdir().unwrap();
     let mut core = open(dir.path());
-    core.dispatch(Command::SetDefaultShell(Some(printer("hello termroost", Some(3))))).unwrap();
+    core.dispatch(Command::SetDefaultShell(Some(printer("hello terminalrooster", Some(3))))).unwrap();
     core.dispatch(Command::CreateProject { name: "p".into(), working_dir: dir.path().into(), shell: None }).unwrap();
     let pane = only_pane(&core);
 
@@ -88,7 +88,7 @@ fn terminal_runs_and_reports_exit() {
     let handle = core.terminal(pane).unwrap();
     assert!(!handle.is_running());
     assert_eq!(handle.exit_status(), Some(Some(3)));
-    assert!(screen_text(&core, pane).contains("hello termroost"));
+    assert!(screen_text(&core, pane).contains("hello terminalrooster"));
 
     // Resizing updates the grid.
     handle.resize(GridSize { cols: 40, rows: 10, cell_width: 8, cell_height: 16 });
@@ -231,7 +231,7 @@ fn delete_semantics() {
     assert!(core.state().projects.is_empty());
 }
 
-const CRASH_CHILD_ENV: &str = "TERMROOST_TEST_CRASH_CHILD";
+const CRASH_CHILD_ENV: &str = "TERMINALROOSTER_TEST_CRASH_CHILD";
 
 /// Runs in a child process: builds some state, then aborts without cleanup.
 fn crash_child(dir: &Path) -> ! {

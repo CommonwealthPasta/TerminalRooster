@@ -18,7 +18,7 @@ pub enum Error {
     NotFound(&'static str),
     #[error("{0}")]
     Invalid(String),
-    #[error("could not determine a data directory; set TERMROOST_DATA_DIR")]
+    #[error("could not determine a data directory; set TERMINALROOSTER_DATA_DIR")]
     NoDataDir,
 }
 

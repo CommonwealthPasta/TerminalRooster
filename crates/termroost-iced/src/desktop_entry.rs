@@ -8,26 +8,26 @@
 //! `~/.local/share`. Once a package provides the entry, the user-level copy is
 //! removed again, since it would shadow the packaged one.
 //!
-//! Set `TERMROOST_NO_DESKTOP_ENTRY=1` to turn this off.
+//! Set `TERMINALROOSTER_NO_DESKTOP_ENTRY=1` to turn this off.
 
 use std::path::{Path, PathBuf};
 
 use crate::APP_ID;
 
 const MARKER: &str = "# Written by TerminalRooster for a build that is not installed";
-const TEMPLATE: &str = include_str!("../../../packaging/linux/io.github.Davenport_Physics.TermRoost.desktop");
+const TEMPLATE: &str = include_str!("../../../packaging/linux/io.github.Davenport_Physics.TerminalRooster.desktop");
 const ICONS: [(u32, &[u8]); 7] = [
-    (16, include_bytes!("../../../packaging/icons/termroost-16.png")),
-    (24, include_bytes!("../../../packaging/icons/termroost-24.png")),
-    (32, include_bytes!("../../../packaging/icons/termroost-32.png")),
-    (48, include_bytes!("../../../packaging/icons/termroost-48.png")),
-    (64, include_bytes!("../../../packaging/icons/termroost-64.png")),
-    (128, include_bytes!("../../../packaging/icons/termroost-128.png")),
-    (256, include_bytes!("../../../packaging/icons/termroost-256.png")),
+    (16, include_bytes!("../../../packaging/icons/terminalrooster-16.png")),
+    (24, include_bytes!("../../../packaging/icons/terminalrooster-24.png")),
+    (32, include_bytes!("../../../packaging/icons/terminalrooster-32.png")),
+    (48, include_bytes!("../../../packaging/icons/terminalrooster-48.png")),
+    (64, include_bytes!("../../../packaging/icons/terminalrooster-64.png")),
+    (128, include_bytes!("../../../packaging/icons/terminalrooster-128.png")),
+    (256, include_bytes!("../../../packaging/icons/terminalrooster-256.png")),
 ];
 
 pub fn ensure() {
-    if std::env::var_os("TERMROOST_NO_DESKTOP_ENTRY").is_some() {
+    if std::env::var_os("TERMINALROOSTER_NO_DESKTOP_ENTRY").is_some() {
         return;
     }
     let Some(data_home) = directories::BaseDirs::new().map(|d| d.data_dir().to_path_buf()) else { return };
@@ -54,7 +54,7 @@ pub fn ensure() {
     let Ok(exe) = std::env::current_exe() else { return };
     let entry = format!(
         "{MARKER}, so it gets its icon. Safe to delete.\n{}NoDisplay=true\n",
-        TEMPLATE.replace("Exec=termroost", &format!("Exec={}", exec_quote(&exe)))
+        TEMPLATE.replace("Exec=terminalrooster", &format!("Exec={}", exec_quote(&exe)))
     );
     let mut changed = write_if_changed(&user_entry, entry.as_bytes());
     for (size, png) in ICONS {
@@ -130,14 +130,17 @@ mod tests {
 
     #[test]
     fn exec_quoting() {
-        assert_eq!(exec_quote(Path::new("/opt/term-roost/termroost")), "/opt/term-roost/termroost");
-        assert_eq!(exec_quote(Path::new("/home/me/My Apps/termroost")), "\"/home/me/My Apps/termroost\"");
+        assert_eq!(
+            exec_quote(Path::new("/opt/terminal-rooster/terminalrooster")),
+            "/opt/terminal-rooster/terminalrooster"
+        );
+        assert_eq!(exec_quote(Path::new("/home/me/My Apps/terminalrooster")), "\"/home/me/My Apps/terminalrooster\"");
         assert_eq!(exec_quote(Path::new("/x/a$b")), "\"/x/a\\\\$b\"");
     }
 
     #[test]
     fn template_has_the_exec_line_to_replace() {
-        assert!(TEMPLATE.contains("\nExec=termroost\n"));
+        assert!(TEMPLATE.contains("\nExec=terminalrooster\n"));
         assert!(TEMPLATE.contains(&format!("Icon={APP_ID}")));
     }
 }

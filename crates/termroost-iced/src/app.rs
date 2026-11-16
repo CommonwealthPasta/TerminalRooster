@@ -259,7 +259,7 @@ struct Events(async_channel::Receiver<Event>);
 
 impl Hash for Events {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        "termroost-core-events".hash(state);
+        "terminalrooster-core-events".hash(state);
     }
 }
 
