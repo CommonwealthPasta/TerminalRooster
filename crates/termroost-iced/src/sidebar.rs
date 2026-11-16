@@ -1,11 +1,14 @@
-//! Project and tab columns. Both lists can be reordered by dragging.
+//! Project and tab columns. Both lists can be reordered by dragging, and a
+//! search box filters the projects.
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text, text_input, tooltip};
-use iced::{Alignment, Element, Font, Length, font};
+use std::path::Path;
+
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input, tooltip};
+use iced::{Alignment, Element, Font, Length, Padding, font};
 use termroost_core::git::Head;
 use termroost_core::{PaneId, Project, ProjectId, Tab, TabId};
 
-use crate::app::{App, DropTarget, Message, RENAME_INPUT, RenameTarget};
+use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
 use crate::reorder::reorder;
@@ -87,6 +90,19 @@ pub fn short_dir(path: &std::path::Path, max: usize) -> String {
         out = candidate;
     }
     format!("…/{out}")
+}
+
+/// Whether a project matches the projects search: each word of `query` is in
+/// its name or its folder's name, ignoring case. An empty query matches all.
+pub fn matches_search(name: &str, dir: &Path, query: &str) -> bool {
+    let mut words = query.split_whitespace().map(str::to_lowercase).peekable();
+    if words.peek().is_none() {
+        return true;
+    }
+    let name = name.to_lowercase();
+    // Not the whole path: its first folders are often shared by every project.
+    let folder = dir.file_name().map(|f| f.to_string_lossy().to_lowercase()).unwrap_or_default();
+    words.all(|w| name.contains(&w) || folder.contains(&w))
 }
 
 /// A list item; `drop_target` outlines it while a task is held over it.
@@ -176,18 +192,47 @@ impl App {
         .align_y(Alignment::Center)
         .padding([8, 10]);
 
-        let ids: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
-        let list = reorder(s.projects.iter().map(|p| self.project_item(p)))
+        let shown: Vec<&Project> = self.listed_projects().collect();
+        let ids: Vec<ProjectId> = shown.iter().map(|p| p.id).collect();
+        // While searching, places in the list aren't places among all projects.
+        let searching = !self.project_search.trim().is_empty();
+        let list = reorder(shown.iter().map(|p| self.project_item(p)))
             .spacing(LIST_SPACING)
-            .on_move_if(self.rename.is_none(), move |from, to| Message::MoveProject(ids[from], to));
-        let items = column![list, add_item(Message::NewProject, self.keymap.hint("New project", Action::NewProject))]
-            .spacing(LIST_SPACING)
-            .padding([0, 6]);
-        container(column![header, scrollable(items).height(Length::Fill)])
+            .on_move_if(self.rename.is_none() && !searching, move |from, to| Message::MoveProject(ids[from], to));
+        let mut items = column![list].spacing(LIST_SPACING).padding([0, 6]);
+        if shown.is_empty() && !s.projects.is_empty() {
+            items = items.push(container(muted_text("No projects match")).padding([6, 8]));
+        }
+        let items = items.push(add_item(Message::NewProject, self.keymap.hint("New project", Action::NewProject)));
+        container(column![header, self.project_search_box(), scrollable(items).height(Length::Fill)])
             .width(190)
             .height(Length::Fill)
             .style(theme::sidebar_deep)
             .into()
+    }
+
+    /// The projects the list shows: those matching the search, in their order.
+    pub(crate) fn listed_projects(&self) -> impl Iterator<Item = &Project> {
+        let query = self.project_search.as_str();
+        self.core.state().projects.iter().filter(move |p| matches_search(&p.name, &p.working_dir, query))
+    }
+
+    /// The box that filters the projects list, with a ✕ to empty it.
+    fn project_search_box(&self) -> Element<'_, Message> {
+        // Room on the right for the ✕, so the text doesn't run under it.
+        let input = text_input("Search", &self.project_search)
+            .id(PROJECT_SEARCH)
+            .on_input(Message::ProjectSearch)
+            .on_submit(Message::ProjectSearchSubmit)
+            .size(13)
+            .padding(Padding { right: 28.0, ..Padding::new(5.0) });
+        // The input stays the first layer, so it keeps its focus when the ✕ comes and goes.
+        let mut field = stack![input];
+        if !self.project_search.is_empty() {
+            let clear = icon_button("✕", Message::ProjectSearchClear, "Clear search");
+            field = field.push(container(clear).padding([0, 2]).align_right(Length::Fill).center_y(Length::Fill));
+        }
+        container(field).padding(Padding { top: 0.0, right: 6.0, bottom: 6.0, left: 6.0 }).into()
     }
 
     fn project_item<'a>(&'a self, p: &'a Project) -> Element<'a, Message> {
@@ -313,5 +358,36 @@ impl App {
                 .on_release(Message::TaskDrop(target));
         }
         item.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn dir(parts: &[&str]) -> PathBuf {
+        parts.iter().collect()
+    }
+
+    #[test]
+    fn search_matches_each_word_in_the_name_or_folder() {
+        let worktree = dir(&["projects", "TermRoost-feature-search"]);
+        let m = |query| matches_search("TerminalRooster", &worktree, query);
+        assert!(m(""), "no search: every project");
+        assert!(m("   "));
+        assert!(m("rooster"), "in the name, any case");
+        assert!(m("FEATURE"), "in the folder");
+        assert!(m("search rooster"), "each word on its own, in any order");
+        assert!(!m("rooster blog"), "every word has to match");
+        assert!(!m("projects"), "the folders above the project's own don't count");
+        assert!(!m("roosterterm"));
+    }
+
+    #[test]
+    fn search_copes_with_folders_without_a_name() {
+        assert!(matches_search("Root", Path::new("/"), "root"));
+        assert!(!matches_search("Root", Path::new("/"), "home"));
     }
 }

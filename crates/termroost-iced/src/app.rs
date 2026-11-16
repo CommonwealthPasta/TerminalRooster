@@ -27,6 +27,7 @@ const GIT_POLL: Duration = Duration::from_secs(3);
 
 const PREFS_KEY: &str = "iced.prefs";
 pub const RENAME_INPUT: &str = "rename-input";
+pub const PROJECT_SEARCH: &str = "project-search";
 pub const TASK_INPUT: &str = "task-input";
 pub const TASK_EDIT_INPUT: &str = "task-edit-input";
 pub const DIALOG_FIRST_INPUT: &str = "dialog-first-input";
@@ -248,6 +249,12 @@ pub enum Message {
     MoveProject(ProjectId, usize),
     /// Move a session to this index of its project's list without it.
     MoveTab(TabId, usize),
+    /// The text in the projects search box changed.
+    ProjectSearch(String),
+    /// Enter in the projects search box: open the first project it lists.
+    ProjectSearchSubmit,
+    /// Empty the projects search box (its ✕).
+    ProjectSearchClear,
 
     NewProject,
     EditProject(ProjectId),
@@ -359,6 +366,8 @@ pub struct App {
     prefs_dirty: bool,
     layout_dirty: HashSet<TabId>,
     pub(crate) rename: Option<Rename>,
+    /// The projects list shows only projects matching this.
+    pub(crate) project_search: String,
     pub(crate) dialog: Option<Dialog>,
     pub(crate) new_task: String,
     pub(crate) task_edit: Option<(TaskId, String)>,
@@ -458,6 +467,7 @@ impl App {
             prefs_dirty: false,
             layout_dirty: HashSet::new(),
             rename: None,
+            project_search: String::new(),
             dialog: None,
             new_task: String::new(),
             task_edit: None,
@@ -906,6 +916,19 @@ impl App {
             }
             Message::MoveTab(tab, to_index) => {
                 self.dispatch(Command::MoveTab { tab, to_index });
+            }
+            Message::ProjectSearch(query) => self.project_search = query,
+            Message::ProjectSearchSubmit => {
+                // Done searching: the whole list comes back, with the project selected.
+                let first = self.listed_projects().next().map(|p| p.id);
+                if let Some(first) = first {
+                    self.project_search.clear();
+                    return self.update(Message::SelectProject(first));
+                }
+            }
+            Message::ProjectSearchClear => {
+                self.project_search.clear();
+                return operation::focus(PROJECT_SEARCH);
             }
 
             Message::NewProject => {
