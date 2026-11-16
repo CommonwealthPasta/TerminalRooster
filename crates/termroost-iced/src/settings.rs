@@ -434,7 +434,7 @@ impl App {
                 muted_text(
                     "Neovim or Vim runs in a terminal, with your own configuration; quitting it (:q) closes the \
                      file. The file's path is added to the command. Leave it empty to use Neovim, or Vim when there \
-                     is no Neovim. Ctrl+Shift shortcuts and Alt+arrows stay with TerminalRooster; every other key \
+                     is no Neovim. Ctrl+Shift shortcuts and Alt+arrows stay with Terminal Rooster; every other key \
                      goes to the editor.",
                 ),
             ]
@@ -442,7 +442,7 @@ impl App {
         )
     }
 
-    /// Getting Neovim: on Windows TerminalRooster can install it for itself;
+    /// Getting Neovim: on Windows Terminal Rooster can install it for itself;
     /// elsewhere the system's package manager does. Nothing when the user's
     /// own Neovim is on PATH.
     fn neovim_row<'a>(&'a self, st: &'a SettingsState) -> Element<'a, Message> {
@@ -475,7 +475,7 @@ impl App {
                 (InstallState::Idle, None) => (
                     Some(install("Install and use").into()),
                     muted_text(format!(
-                        "Neovim {version}: a {mb} MB download, unpacked into TerminalRooster's own folder. Nothing \
+                        "Neovim {version}: a {mb} MB download, unpacked into Terminal Rooster's own folder. Nothing \
                          else on the system changes."
                     ))
                     .into(),

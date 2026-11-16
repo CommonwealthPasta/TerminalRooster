@@ -228,7 +228,7 @@ impl App {
             Dialog::SaveConflict { doc, name } => column![
                 text(format!("{name} changed on disk")).size(18).font(BOLD),
                 text(
-                    "It was changed outside TerminalRooster since you opened or saved it, maybe by an agent. \
+                    "It was changed outside Terminal Rooster since you opened or saved it, maybe by an agent. \
                      Overwrite replaces that version with yours; Reload shows it and drops your changes (undo \
                      brings them back).",
                 )
