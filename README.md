@@ -19,6 +19,10 @@ cargo run --release -p termroost-iced
 
 Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show TerminalRooster's icon for its window on Wayland. Once a package is installed, TerminalRooster removes this entry again. Set `TERMROOST_NO_DESKTOP_ENTRY=1` to skip it.
 
+### Windows (installer)
+
+Run `TerminalRooster-<version>-x64-setup.exe` (see [Packaging (Windows)](#packaging-windows) to build it). It installs for the current user only, so it needs no administrator rights. It installs to `%LOCALAPPDATA%\Programs\TerminalRooster` and adds a Start menu shortcut, plus an optional desktop shortcut. Uninstall it from *Settings → Apps*. Uninstalling keeps your data.
+
 ### Windows (native build)
 
 1. Install Rust with [rustup](https://rustup.rs) (default MSVC toolchain).
@@ -146,6 +150,17 @@ The packages land in `dist/`. A binary only runs on systems whose glibc is at le
 2. Add a `<release>` entry to `packaging/linux/io.github.Davenport_Physics.TermRoost.metainfo.xml` (the build checks for it).
 
 **Icons:** they live in `packaging/icons/`. The `termroost-<size>.png` files are the hicolor icons for the packages, `termroost-64.png` is also the window icon, and `termroost.ico` is embedded in the Windows `.exe`.
+
+## Packaging (Windows)
+
+The installer is built with [NSIS](https://nsis.sourceforge.io) from `packaging/windows/terminalrooster.nsi`. It installs `termroost.exe` along with the license files. It also adds Start menu and desktop shortcuts and an *Apps* entry with an uninstaller.
+
+```powershell
+winget install NSIS.NSIS    # once; or set MAKENSIS to makensis.exe
+cargo xtask package windows
+```
+
+The installer lands in `dist/TerminalRooster-<version>-x64-setup.exe`. On Windows, `cargo xtask package` with no format builds the installer. On other platforms it builds the `.deb` and `.rpm`. The installer is not code-signed, so SmartScreen warns the first time it runs.
 
 ## Development
 
