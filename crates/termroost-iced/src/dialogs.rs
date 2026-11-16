@@ -171,7 +171,7 @@ impl App {
                 if let Some(from) = &renamed.moved_from {
                     body = body.push(
                         text(format!(
-                            "Your projects, tabs, tasks, scrollback and settings were moved from {} to {}.",
+                            "Your projects, sessions, tasks, scrollback and settings were moved from {} to {}.",
                             from.display(),
                             self.core.data_dir().display()
                         ))
