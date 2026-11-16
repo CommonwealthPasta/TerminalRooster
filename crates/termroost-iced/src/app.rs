@@ -14,6 +14,7 @@ use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
+use crate::git_panel::{GitLog, LogRead, SideTab};
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
@@ -63,6 +64,8 @@ pub struct Prefs {
     pub notify_agents: Level,
     /// Ask before quitting while terminals run programs.
     pub confirm_quit: bool,
+    /// The tab the side panel shows.
+    pub side_tab: SideTab,
 }
 
 impl Default for Prefs {
@@ -84,6 +87,7 @@ impl Default for Prefs {
             notify_errors: Level::Subtle,
             notify_agents: Level::Prominent,
             confirm_quit: true,
+            side_tab: SideTab::Tasks,
         }
     }
 }
@@ -347,6 +351,9 @@ pub enum Message {
     /// Where each session directory stands in git (`None`: not in a repository).
     GitStatus(Vec<(PathBuf, Option<git::Status>)>),
     Worktree(WorktreeMsg),
+    /// Show a tab of the side panel.
+    SideTab(SideTab),
+    LogRead(LogRead),
 
     DismissError,
     DismissNotice,
@@ -371,6 +378,10 @@ pub struct App {
     pub(crate) git: HashMap<PathBuf, Option<git::Status>>,
     /// A periodic git read is running.
     git_polling: bool,
+    /// The log in the side panel's Git tab.
+    pub(crate) git_log: Option<GitLog>,
+    /// The log is being read.
+    pub(crate) log_reading: bool,
     pub(crate) themes: ThemeStore,
     themes_dirty: bool,
     pub(crate) settings: Option<SettingsState>,
@@ -466,6 +477,8 @@ impl App {
             notice: None,
             git: HashMap::new(),
             git_polling: false,
+            git_log: None,
+            log_reading: false,
             themes,
             themes_dirty: false,
             settings: None,
@@ -1348,6 +1361,9 @@ impl App {
             Message::ToggleTasks => {
                 self.prefs.tasks_open = !self.prefs.tasks_open;
                 self.mark_prefs();
+                if self.git_tab_shown() {
+                    return Task::batch([self.refresh_log(), self.focus_active()]);
+                }
                 if self.prefs.tasks_open {
                     return operation::focus(TASK_INPUT);
                 }
@@ -1438,8 +1454,16 @@ impl App {
             Message::GitStatus(statuses) => {
                 self.git_polling = false;
                 self.git.extend(statuses);
+                // The session on screen may be in another repository now.
+                return self.refresh_log();
             }
             Message::Worktree(msg) => return self.update_worktree(msg),
+            Message::SideTab(tab) => {
+                self.prefs.side_tab = tab;
+                self.mark_prefs();
+                return Task::batch([self.refresh_log(), self.focus_active()]);
+            }
+            Message::LogRead(read) => return self.log_read(read),
             Message::DismissError => self.error = None,
             Message::DismissNotice => self.notice = None,
         }

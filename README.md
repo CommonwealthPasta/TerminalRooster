@@ -9,6 +9,7 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 - **Reordering:** drag a project or session up or down its list; a line shows where it will land. Dropping it outside the list cancels. The move shortcuts below do the same from the keyboard.
 - **Tasks** per project in the right panel. You can mark them done and link each one to a session, with its dropdown or by dragging the task onto a session in the list or onto the terminals on screen. Sessions show a badge with their open-task count.
 - **Git:** each session shows the branch its directory is on. **Worktrees** (at the top of a session) lists the repository's worktrees; **Switch** moves the session to one, **New session** opens another session in it. Its **New worktree** part runs `git worktree add` beside the repository, so on the same drive (`app` → `app-feature-x`), and opens the worktree in a new session named after the branch, or moves this session there when **Move … into it** is checked. When a session moves, idle terminals restart in the worktree with their scrollback kept. Terminals running a program or an agent are left alone.
+- **Git log:** for a session in a repository, the right panel has a **Git** tab next to **Tasks**. It lists the latest 200 commits of the session's branch: subject, id, author, age, and the branches and tags on each.
 - **Everything is persisted in SQLite** as it changes: projects, sessions, split layouts, focus, tasks, window geometry and terminal scrollback. After a crash or a normal close, the app reopens as you left it.
 
 ## Running

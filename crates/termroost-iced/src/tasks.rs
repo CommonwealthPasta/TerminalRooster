@@ -9,7 +9,7 @@ use termroost_core::Task;
 
 use crate::app::{App, DropTarget, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
 use crate::keymap::Action;
-use crate::sidebar::{BOLD, icon_button, muted_text, section_title};
+use crate::sidebar::{BOLD, icon_button, muted_text};
 use crate::theme;
 
 /// Width of the label that follows the pointer while a task is dragged.
@@ -89,7 +89,24 @@ impl App {
         area.into()
     }
 
+    /// The side panel: the project's tasks, or the git log of the session on screen.
     pub(crate) fn view_tasks(&self) -> Element<'_, Message> {
+        let header = row![
+            self.side_tabs(),
+            space::horizontal(),
+            icon_button("✕", Message::ToggleTasks, self.keymap.hint("Hide panel", Action::ToggleTasks)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let body = if self.git_tab_shown() { self.view_git_log() } else { self.view_task_list() };
+        container(column![header, body].spacing(10).padding([10, 10]))
+            .width(300)
+            .height(Length::Fill)
+            .style(theme::sidebar)
+            .into()
+    }
+
+    fn view_task_list(&self) -> Element<'_, Message> {
         let s = self.core.state();
         let Some(project) = s.selected_project else { return space::horizontal().width(0).into() };
         let active_tab = self.active_tab_id();
@@ -98,14 +115,7 @@ impl App {
         choices.extend(s.tabs_of(project).map(|t| TabChoice { id: Some(t.id), label: t.title.clone() }));
 
         let (open, done) = s.tasks_of(project).fold((0, 0), |(o, d), t| if t.done { (o, d + 1) } else { (o + 1, d) });
-        let header = row![
-            section_title("TASKS"),
-            muted_text(format!("{open} open · {done} done")),
-            space::horizontal(),
-            icon_button("✕", Message::ToggleTasks, self.keymap.hint("Hide tasks", Action::ToggleTasks)),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
+        let counts = muted_text(format!("{open} open · {done} done"));
 
         let filters = row![
             checkbox(self.prefs.show_done).label("Show done").on_toggle(Message::ShowDone).size(14).text_size(12),
@@ -132,11 +142,7 @@ impl App {
             .filter(|t| (self.prefs.show_done || !t.done) && (!self.prefs.tasks_this_tab_only || t.tab == active_tab));
         let list = column(visible.map(|t| self.task_item(t, &choices, active_tab))).spacing(6);
 
-        container(column![header, filters, input, scrollable(list).height(Length::Fill)].spacing(10).padding([10, 10]))
-            .width(300)
-            .height(Length::Fill)
-            .style(theme::sidebar)
-            .into()
+        column![counts, filters, input, scrollable(list).height(Length::Fill)].spacing(10).into()
     }
 
     fn task_item<'a>(

@@ -108,6 +108,37 @@ pub fn badge(theme: &Theme) -> container::Style {
     }
 }
 
+/// A badge that stands out, such as the branch checked out in the git log.
+pub fn accent_badge(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.primary.weak.color)),
+        text_color: Some(p.primary.weak.text),
+        border: Border::default().rounded(8),
+        ..container::Style::default()
+    }
+}
+
+/// A tab at the top of the side panel (Tasks, Git).
+pub fn side_tab(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let p = theme.extended_palette();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: if selected {
+                Some(Background::Color(p.background.strong.color))
+            } else if hovered {
+                Some(Background::Color(p.background.weak.color))
+            } else {
+                None
+            },
+            text_color: if selected || hovered { p.background.base.text } else { muted(theme) },
+            border: Border::default().rounded(4),
+            ..button::Style::default()
+        }
+    }
+}
+
 pub fn title_bar(active: bool) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let p = theme.extended_palette();
