@@ -10,6 +10,7 @@ mod keymap;
 mod layout_conv;
 mod logging;
 mod panes;
+mod reorder;
 mod settings;
 mod sidebar;
 mod tasks;

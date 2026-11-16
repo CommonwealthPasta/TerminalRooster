@@ -231,6 +231,44 @@ fn delete_semantics() {
     assert!(core.state().projects.is_empty());
 }
 
+#[test]
+fn reordering_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(printer("x", None)))).unwrap();
+    let mut project = |name: &str| match core
+        .dispatch(Command::CreateProject { name: name.into(), working_dir: dir.path().into(), shell: None })
+        .unwrap()
+    {
+        Outcome::Project(p) => p,
+        _ => panic!(),
+    };
+    let (a, b, c) = (project("a"), project("b"), project("c"));
+    let tab1 = core.state().active_tab().unwrap().id;
+    let Outcome::Tab(tab2) = core.dispatch(Command::CreateTab { project: c, title: None }).unwrap() else { panic!() };
+    let Outcome::Tab(tab3) = core.dispatch(Command::CreateTab { project: c, title: None }).unwrap() else { panic!() };
+    let projects = |core: &Core| core.state().projects.iter().map(|p| p.id).collect::<Vec<_>>();
+    let tabs = |core: &Core| core.state().tabs_of(c).map(|t| t.id).collect::<Vec<_>>();
+
+    // `to_index` is the place in the list without the moved item.
+    core.dispatch(Command::MoveProject { project: c, to_index: 0 }).unwrap();
+    assert_eq!(projects(&core), [c, a, b]);
+    core.dispatch(Command::MoveProject { project: a, to_index: 2 }).unwrap();
+    assert_eq!(projects(&core), [c, b, a]);
+    core.dispatch(Command::MoveProject { project: b, to_index: 99 }).unwrap();
+    assert_eq!(projects(&core), [c, a, b], "past the end means last");
+
+    core.dispatch(Command::MoveTab { tab: tab3, to_index: 0 }).unwrap();
+    core.dispatch(Command::MoveTab { tab: tab1, to_index: 2 }).unwrap();
+    assert_eq!(tabs(&core), [tab3, tab2, tab1]);
+    assert_eq!(core.state().active_tab().unwrap().id, tab3, "moving doesn't change what is shown");
+
+    drop(core);
+    let core = open(dir.path());
+    assert_eq!(projects(&core), [c, a, b]);
+    assert_eq!(tabs(&core), [tab3, tab2, tab1]);
+}
+
 const CRASH_CHILD_ENV: &str = "TERMINALROOSTER_TEST_CRASH_CHILD";
 
 /// Runs in a child process: builds some state, then aborts without cleanup.

@@ -192,6 +192,10 @@ pub enum Message {
     SelectProject(ProjectId),
     SelectTab(TabId),
     NewTab,
+    /// Move a project to this index of the list without it (dragged there).
+    MoveProject(ProjectId, usize),
+    /// Move a session to this index of its project's list without it.
+    MoveTab(TabId, usize),
 
     NewProject,
     EditProject(ProjectId),
@@ -624,6 +628,12 @@ impl App {
                     self.dispatch(Command::CreateTab { project, title: None });
                     return self.after_select();
                 }
+            }
+            Message::MoveProject(project, to_index) => {
+                self.dispatch(Command::MoveProject { project, to_index });
+            }
+            Message::MoveTab(tab, to_index) => {
+                self.dispatch(Command::MoveTab { tab, to_index });
             }
 
             Message::NewProject => {
@@ -1313,6 +1323,24 @@ impl App {
                     return self.update(Message::SelectProject(next));
                 }
             }
+            Action::MoveSessionUp | Action::MoveSessionDown => {
+                if let Some(project) = s.selected_project
+                    && let Some(tab) = self.active_tab_id()
+                {
+                    let tabs: Vec<TabId> = s.tabs_of(project).map(|t| t.id).collect();
+                    if let Some(to) = step(&tabs, tab, action == Action::MoveSessionDown) {
+                        return self.update(Message::MoveTab(tab, to));
+                    }
+                }
+            }
+            Action::MoveProjectUp | Action::MoveProjectDown => {
+                if let Some(project) = s.selected_project {
+                    let projects: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
+                    if let Some(to) = step(&projects, project, action == Action::MoveProjectDown) {
+                        return self.update(Message::MoveProject(project, to));
+                    }
+                }
+            }
             Action::FocusLeft | Action::FocusRight | Action::FocusUp | Action::FocusDown => {
                 let d = match action {
                     Action::FocusLeft => pane_grid::Direction::Left,
@@ -1389,6 +1417,13 @@ fn cycle<T: Copy + PartialEq>(items: &[T], current: Option<T>, forward: bool) ->
     Some(items[if forward { (i + 1) % n } else { (i + n - 1) % n }])
 }
 
+/// The index `item` gets when moved one place down (or up); `None` at the end
+/// of the list, where it stays.
+fn step<T: PartialEq>(items: &[T], item: T, down: bool) -> Option<usize> {
+    let i = items.iter().position(|x| *x == item)?;
+    if down { (i + 1 < items.len()).then_some(i + 1) } else { i.checked_sub(1) }
+}
+
 fn expand_home(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~")
         && (rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
@@ -1405,5 +1440,21 @@ fn fill_name_from_dir(name: &mut String, dir: &str) {
         && let Some(base) = PathBuf::from(dir.trim_end_matches(['/', '\\'])).file_name()
     {
         *name = base.to_string_lossy().into_owned();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moving_one_place_stops_at_the_ends() {
+        let items = ['a', 'b', 'c'];
+        assert_eq!(step(&items, 'a', true), Some(1));
+        assert_eq!(step(&items, 'b', true), Some(2));
+        assert_eq!(step(&items, 'c', true), None);
+        assert_eq!(step(&items, 'c', false), Some(1));
+        assert_eq!(step(&items, 'a', false), None);
+        assert_eq!(step(&items, 'x', false), None);
     }
 }

@@ -20,6 +20,10 @@ pub enum Action {
     PrevSession,
     NextProject,
     PrevProject,
+    MoveSessionUp,
+    MoveSessionDown,
+    MoveProjectUp,
+    MoveProjectDown,
     ToggleTasks,
     SplitRight,
     SplitDown,
@@ -50,13 +54,17 @@ struct Info {
 
 impl Action {
     /// In the order Settings lists them.
-    pub const ALL: [Action; 23] = [
+    pub const ALL: [Action; 27] = [
         Action::NewProject,
         Action::NewSession,
         Action::NextSession,
         Action::PrevSession,
         Action::NextProject,
         Action::PrevProject,
+        Action::MoveSessionUp,
+        Action::MoveSessionDown,
+        Action::MoveProjectUp,
+        Action::MoveProjectDown,
         Action::ToggleTasks,
         Action::SplitRight,
         Action::SplitDown,
@@ -89,6 +97,12 @@ impl Action {
             }
             Action::NextProject => ("next_project", "Next project", GENERAL, &["Ctrl+Shift+PageDown"]),
             Action::PrevProject => ("previous_project", "Previous project", GENERAL, &["Ctrl+Shift+PageUp"]),
+            Action::MoveSessionUp => ("move_session_up", "Move session up", GENERAL, &["Ctrl+Alt+PageUp"]),
+            Action::MoveSessionDown => ("move_session_down", "Move session down", GENERAL, &["Ctrl+Alt+PageDown"]),
+            Action::MoveProjectUp => ("move_project_up", "Move project up", GENERAL, &["Ctrl+Shift+Alt+PageUp"]),
+            Action::MoveProjectDown => {
+                ("move_project_down", "Move project down", GENERAL, &["Ctrl+Shift+Alt+PageDown"])
+            }
             Action::ToggleTasks => ("toggle_tasks", "Show / hide tasks", GENERAL, &["Ctrl+Shift+K"]),
             Action::SplitRight => ("split_right", "Split right", TERMINALS, &["Ctrl+Shift+E"]),
             Action::SplitDown => ("split_down", "Split down", TERMINALS, &["Ctrl+Shift+O"]),

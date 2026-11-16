@@ -6,6 +6,7 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 
 - **Projects** on the left, each with a working directory.
 - **Sessions** per project: vertical, renamable (double-click). Each session holds terminals in horizontal/vertical **splits**.
+- **Reordering:** drag a project or session up or down its list; a line shows where it will land. Dropping it outside the list cancels. The move shortcuts below do the same from the keyboard.
 - **Tasks** per project in the right panel. You can mark them done and link each one to a session; sessions show a badge with their open-task count.
 - **Everything is persisted in SQLite** as it changes: projects, sessions, split layouts, focus, tasks, window geometry and terminal scrollback. After a crash or a normal close, the app reopens as you left it.
 
@@ -112,6 +113,8 @@ Every keyboard shortcut can be changed in **Settings → Keyboard shortcuts**: c
 | Ctrl+Shift+W | Close terminal (the last one in a session can't be closed; delete the session) |
 | Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | Next / previous session |
 | Ctrl+Shift+PgDn / Ctrl+Shift+PgUp | Next / previous project |
+| Ctrl+Alt+PgDn / Ctrl+Alt+PgUp | Move the session down / up |
+| Ctrl+Shift+Alt+PgDn / Ctrl+Shift+Alt+PgUp | Move the project down / up |
 | Alt+Arrows | Move between terminals |
 | Ctrl+Shift+C / Ctrl+Shift+V, Ctrl+Insert / Shift+Insert | Copy / paste |
 | Shift+PgUp / Shift+PgDn, Shift+Home / Shift+End | Scroll history by a page / to the top or bottom |

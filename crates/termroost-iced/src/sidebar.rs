@@ -1,15 +1,18 @@
-//! Project and tab columns.
+//! Project and tab columns. Both lists can be reordered by dragging.
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text, text_input, tooltip};
 use iced::{Alignment, Element, Font, Length, font};
-use termroost_core::{Project, Tab};
+use termroost_core::{Project, ProjectId, Tab, TabId};
 
 use crate::app::{App, Message, RENAME_INPUT, RenameTarget};
 use crate::keymap::Action;
+use crate::reorder::reorder;
 use crate::theme;
 
 /// Width of the edit/delete button column next to the selected list item.
 const ACTIONS_WIDTH: f32 = 26.0;
+/// Space between the items of the project and session lists.
+const LIST_SPACING: f32 = 2.0;
 
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
 
@@ -120,9 +123,12 @@ impl App {
         .align_y(Alignment::Center)
         .padding([8, 10]);
 
-        let items = column(s.projects.iter().map(|p| self.project_item(p)))
-            .push(add_item(Message::NewProject, self.keymap.hint("New project", Action::NewProject)))
-            .spacing(2)
+        let ids: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
+        let list = reorder(s.projects.iter().map(|p| self.project_item(p)))
+            .spacing(LIST_SPACING)
+            .on_move_if(self.rename.is_none(), move |from, to| Message::MoveProject(ids[from], to));
+        let items = column![list, add_item(Message::NewProject, self.keymap.hint("New project", Action::NewProject))]
+            .spacing(LIST_SPACING)
             .padding([0, 6]);
         container(column![header, scrollable(items).height(Length::Fill)])
             .width(190)
@@ -175,9 +181,12 @@ impl App {
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
-        let items = column(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
-            .push(add_item(Message::NewTab, self.keymap.hint("New session", Action::NewSession)))
-            .spacing(2)
+        let ids: Vec<TabId> = s.tabs_of(project.id).map(|t| t.id).collect();
+        let list = reorder(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
+            .spacing(LIST_SPACING)
+            .on_move_if(self.rename.is_none(), move |from, to| Message::MoveTab(ids[from], to));
+        let items = column![list, add_item(Message::NewTab, self.keymap.hint("New session", Action::NewSession))]
+            .spacing(LIST_SPACING)
             .padding([0, 6]);
         container(
             column![
