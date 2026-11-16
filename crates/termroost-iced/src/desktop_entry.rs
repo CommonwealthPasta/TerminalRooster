@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use crate::APP_ID;
 
 const MARKER: &str = "# Written by TerminalRooster for a build that is not installed";
+/// Desktop id and marker used while the app was called TermRoost.
+const LEGACY_APP_ID: &str = "io.github.Davenport_Physics.TermRoost";
+const LEGACY_MARKER: &str = "# Written by TermRoost for a build that is not installed";
 const TEMPLATE: &str = include_str!("../../../packaging/linux/io.github.Davenport_Physics.TerminalRooster.desktop");
 const ICONS: [(u32, &[u8]); 7] = [
     (16, include_bytes!("../../../packaging/icons/terminalrooster-16.png")),
@@ -31,6 +34,7 @@ pub fn ensure() {
         return;
     }
     let Some(data_home) = directories::BaseDirs::new().map(|d| d.data_dir().to_path_buf()) else { return };
+    remove_legacy(&data_home);
     let file_name = format!("{APP_ID}.desktop");
     let user_entry = data_home.join("applications").join(&file_name);
 
@@ -39,7 +43,7 @@ pub fn ensure() {
         if std::fs::read_to_string(&user_entry).is_ok_and(|t| t.starts_with(MARKER)) {
             let _ = std::fs::remove_file(&user_entry);
             for (size, _) in ICONS {
-                let _ = std::fs::remove_file(icon_path(&data_home, size));
+                let _ = std::fs::remove_file(icon_path(&data_home, APP_ID, size));
             }
             refresh_menus();
             tracing::info!("removed the desktop entry for the uninstalled build; the package provides it");
@@ -58,7 +62,7 @@ pub fn ensure() {
     );
     let mut changed = write_if_changed(&user_entry, entry.as_bytes());
     for (size, png) in ICONS {
-        changed |= write_if_changed(&icon_path(&data_home, size), png);
+        changed |= write_if_changed(&icon_path(&data_home, APP_ID, size), png);
     }
     if changed {
         tracing::info!(entry = %user_entry.display(), "installed a desktop entry so the window shows its icon");
@@ -66,8 +70,21 @@ pub fn ensure() {
     }
 }
 
-fn icon_path(data_home: &Path, size: u32) -> PathBuf {
-    data_home.join(format!("icons/hicolor/{size}x{size}/apps/{APP_ID}.png"))
+fn icon_path(data_home: &Path, app_id: &str, size: u32) -> PathBuf {
+    data_home.join(format!("icons/hicolor/{size}x{size}/apps/{app_id}.png"))
+}
+
+/// Removes the hidden entry and icons a TermRoost build wrote under the old id.
+fn remove_legacy(data_home: &Path) {
+    let entry = data_home.join("applications").join(format!("{LEGACY_APP_ID}.desktop"));
+    if std::fs::read_to_string(&entry).is_ok_and(|t| t.starts_with(LEGACY_MARKER)) {
+        let _ = std::fs::remove_file(&entry);
+        for (size, _) in ICONS {
+            let _ = std::fs::remove_file(icon_path(data_home, LEGACY_APP_ID, size));
+        }
+        refresh_menus();
+        tracing::info!("removed the desktop entry TermRoost wrote under its old name");
+    }
 }
 
 /// Whether a desktop entry exists in a system data directory (not ours).
