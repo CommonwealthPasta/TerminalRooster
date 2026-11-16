@@ -96,6 +96,8 @@ pub struct Core {
     data_dir: PathBuf,
     homes: AgentHomes,
     renamed: Renamed,
+    /// Where the shell integration scripts are, if they could be written.
+    integration: Option<PathBuf>,
     _lock: InstanceLock,
 }
 
@@ -126,6 +128,9 @@ impl Core {
             Err(e) => tracing::warn!(error = %e, "could not update TermRoost's Codex hook"),
         }
         let (store, mut state) = Store::open(&data_dir.join(paths::DB_FILE))?;
+        let integration = session::integration::install(&data_dir)
+            .map_err(|e| tracing::warn!(error = %e, "could not write the shell integration scripts"))
+            .ok();
 
         let mut next_id = max_id(&state) + 1;
         let repairs = repair(&mut state, &mut next_id);
@@ -164,6 +169,7 @@ impl Core {
             data_dir,
             homes: config.agent_homes,
             renamed,
+            integration,
             _lock: lock,
         };
         tracing::info!(
@@ -630,6 +636,13 @@ impl Core {
                 ops.push(StoreOp::Settings(self.state.settings.clone()));
                 Ok(Outcome::None)
             }
+            C::SetShellIntegration(on) => {
+                if self.state.settings.shell_integration != on {
+                    self.state.settings.shell_integration = on;
+                    ops.push(StoreOp::Settings(self.state.settings.clone()));
+                }
+                Ok(Outcome::None)
+            }
             C::SetGuiValue { key, value } => {
                 if self.state.gui.get(&key) != Some(&value) {
                     ops.push(StoreOp::Gui(key.clone(), value.clone()));
@@ -735,11 +748,16 @@ impl Core {
     fn spawn_spec(&self, pane: PaneId) -> Option<SpawnSpec> {
         let tab = self.state.tab(self.state.pane(pane)?.tab)?;
         let project = self.state.project(tab.project)?;
-        let shell = session::shell::resolve(project.shell.as_deref(), self.state.settings.default_shell.as_deref());
+        let mut shell = session::shell::resolve(project.shell.as_deref(), self.state.settings.default_shell.as_deref());
         let cwd = self.state.tab_working_dir(tab);
         let mut env = base_env();
         env.insert("TERMINALROOSTER_PANE_ID".to_owned(), pane.to_string());
         env.insert("TERMINALROOSTER_PROJECT".to_owned(), project.name.clone());
+        if self.state.settings.shell_integration
+            && let Some(dir) = &self.integration
+        {
+            session::integration::apply(&mut shell, &mut env, dir);
+        }
         Some(SpawnSpec { shell, cwd, env })
     }
 

@@ -108,11 +108,14 @@ pub struct Settings {
     pub saved_scrollback_lines: usize,
     /// Lines of scrollback kept in memory per terminal.
     pub scrollback_lines: usize,
+    /// Start bash and PowerShell with TerminalRooster's integration, which
+    /// reports each command's exit status (see `session::integration`).
+    pub shell_integration: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { default_shell: None, saved_scrollback_lines: 5_000, scrollback_lines: 10_000 }
+        Self { default_shell: None, saved_scrollback_lines: 5_000, scrollback_lines: 10_000, shell_integration: true }
     }
 }
 

@@ -4,7 +4,8 @@
 //! Each terminal has a [`Tracker`] fed with what its program sends:
 //!
 //! * **Failed commands** come from shell integration (`OSC 133 ; D ; <status>`),
-//!   which the shell sends after each command.
+//!   which TerminalRooster sets up for bash and PowerShell (see
+//!   [`crate::session::integration`]). Other shells can send it themselves.
 //! * **Claude Code** puts its state in the terminal title: `◐`/`◑` in front
 //!   while it works, `✳` when it is idle or waiting for an answer.
 //! * **Codex** reports its state with `OSC 7501` (`working`, `done`, `error`,

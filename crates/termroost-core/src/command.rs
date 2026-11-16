@@ -112,6 +112,9 @@ pub enum Command {
     DeleteTask(TaskId),
 
     SetDefaultShell(Option<String>),
+    /// Turns the bash and PowerShell integration that reports failed commands
+    /// on or off, for shells started from now on.
+    SetShellIntegration(bool),
     /// Stores an opaque front-end value (window geometry, panel widths...).
     SetGuiValue {
         key: String,
