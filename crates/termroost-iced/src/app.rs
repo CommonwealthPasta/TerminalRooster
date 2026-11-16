@@ -9,8 +9,8 @@ use std::time::Duration;
 use iced::widget::{column, container, operation, pane_grid, row, stack};
 use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
-use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
+use termroost_core::session::{bundled_bash, bundled_nvim};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
@@ -213,6 +213,8 @@ pub struct SettingsState {
     /// The terminal editor files open in when no command is set (looked
     /// for when settings open).
     pub editor_found: Option<PathBuf>,
+    /// The user's own Neovim, on PATH.
+    pub nvim_on_path: Option<PathBuf>,
 }
 
 /// Choice in a task's "linked session" dropdown.
@@ -228,18 +230,18 @@ impl std::fmt::Display for TabChoice {
     }
 }
 
-/// Installing TerminalRooster's own bash (Settings → Terminal, Windows only).
+/// Installing TerminalRooster's own bash or Neovim (Settings, Windows only).
 #[derive(Clone, Debug, Default)]
-pub enum BashInstall {
+pub enum InstallState {
     #[default]
     Idle,
     Running(bundled_bash::Progress),
     Failed(String),
 }
 
-/// News from the thread installing the bash.
+/// News from the thread installing the bash or Neovim.
 #[derive(Clone, Debug)]
-pub enum BashInstallEvent {
+pub enum InstallEvent {
     Progress(bundled_bash::Progress),
     Done(Result<PathBuf, String>),
 }
@@ -391,7 +393,9 @@ pub enum Message {
     /// A shell picked from the list in settings becomes the default.
     PickDefaultShell(ShellOption),
     InstallBash,
-    BashInstall(BashInstallEvent),
+    BashInstall(InstallEvent),
+    InstallNvim,
+    NvimInstall(InstallEvent),
 
     /// Time to read the visible sessions' branches again.
     GitPoll,
@@ -439,7 +443,8 @@ pub struct App {
     pub(crate) settings: Option<SettingsState>,
     /// Shells installed on this machine, for the shell pickers.
     pub(crate) shells: Vec<ShellOption>,
-    pub(crate) bash_install: BashInstall,
+    pub(crate) bash_install: InstallState,
+    pub(crate) nvim_install: InstallState,
     pub(crate) system_mode: iced::theme::Mode,
     ui_theme: iced::Theme,
     /// Cached Codex integration state (reads files, so refreshed on demand).
@@ -539,7 +544,8 @@ impl App {
             themes_dirty: false,
             settings: None,
             shells: Vec::new(),
-            bash_install: BashInstall::Idle,
+            bash_install: InstallState::Idle,
+            nvim_install: InstallState::Idle,
             system_mode: iced::theme::Mode::None,
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
@@ -1059,7 +1065,10 @@ impl App {
                 self.task_edit = None;
                 let shell_input = self.core.state().settings.default_shell.clone().unwrap_or_default();
                 let editor_found = shell::find_terminal_editor().map(|e| e.program);
-                self.settings = Some(SettingsState { shell_input, editor_found, ..SettingsState::default() });
+                let path = std::env::var_os("PATH").unwrap_or_default();
+                let nvim_on_path = shell::find_program("nvim", &path);
+                self.settings =
+                    Some(SettingsState { shell_input, editor_found, nvim_on_path, ..SettingsState::default() });
                 self.codex_hook = self.core.codex_hook_status();
                 // Pick up shells installed since the last look.
                 return detect_shells();
@@ -1096,28 +1105,47 @@ impl App {
                 self.dispatch(Command::SetDefaultShell(Some(option.command)));
             }
             Message::InstallBash => {
-                if matches!(self.bash_install, BashInstall::Running(_)) {
+                if matches!(self.bash_install, InstallState::Running(_)) {
                     return Task::none();
                 }
                 let total = bundled_bash::download_size();
-                self.bash_install = BashInstall::Running(bundled_bash::Progress::Downloading { done: 0, total });
-                let (tx, rx) = async_channel::unbounded();
-                std::thread::spawn(move || {
-                    let report = tx.clone();
-                    let result = bundled_bash::install(move |p| {
-                        let _ = report.send_blocking(BashInstallEvent::Progress(p));
-                    });
-                    let _ = tx.send_blocking(BashInstallEvent::Done(result.map_err(|e| e.to_string())));
-                });
-                return Task::run(rx, Message::BashInstall);
+                self.bash_install = InstallState::Running(bundled_bash::Progress::Downloading { done: 0, total });
+                return Task::run(run_install(|p| bundled_bash::install(p)), Message::BashInstall);
             }
-            Message::BashInstall(BashInstallEvent::Progress(p)) => {
-                if matches!(self.bash_install, BashInstall::Running(_)) {
-                    self.bash_install = BashInstall::Running(p);
+            Message::InstallNvim => {
+                if matches!(self.nvim_install, InstallState::Running(_)) {
+                    return Task::none();
+                }
+                let total = bundled_nvim::download_size();
+                self.nvim_install = InstallState::Running(bundled_nvim::Progress::Downloading { done: 0, total });
+                return Task::run(run_install(|p| bundled_nvim::install(p)), Message::NvimInstall);
+            }
+            Message::NvimInstall(InstallEvent::Progress(p)) => {
+                if matches!(self.nvim_install, InstallState::Running(_)) {
+                    self.nvim_install = InstallState::Running(p);
                 }
             }
-            Message::BashInstall(BashInstallEvent::Done(Ok(exe))) => {
-                self.bash_install = BashInstall::Idle;
+            Message::NvimInstall(InstallEvent::Done(Ok(_))) => {
+                self.nvim_install = InstallState::Idle;
+                // The button says "Install and use": files open in Neovim now.
+                self.prefs.file_editor = FileEditor::Terminal;
+                self.prefs.editor_command.clear();
+                self.mark_prefs();
+                if let Some(st) = &mut self.settings {
+                    st.editor_found = shell::find_terminal_editor().map(|e| e.program);
+                }
+            }
+            Message::NvimInstall(InstallEvent::Done(Err(e))) => {
+                tracing::warn!(error = %e, "installing Neovim failed");
+                self.nvim_install = InstallState::Failed(e);
+            }
+            Message::BashInstall(InstallEvent::Progress(p)) => {
+                if matches!(self.bash_install, InstallState::Running(_)) {
+                    self.bash_install = InstallState::Running(p);
+                }
+            }
+            Message::BashInstall(InstallEvent::Done(Ok(exe))) => {
+                self.bash_install = InstallState::Idle;
                 // The button says "Install and use": new terminals start bash.
                 let command = bundled_bash::shell_option(&exe).command;
                 if let Some(st) = &mut self.settings {
@@ -1126,9 +1154,9 @@ impl App {
                 self.dispatch(Command::SetDefaultShell(Some(command)));
                 return detect_shells();
             }
-            Message::BashInstall(BashInstallEvent::Done(Err(e))) => {
+            Message::BashInstall(InstallEvent::Done(Err(e))) => {
                 tracing::warn!(error = %e, "installing TerminalRooster bash failed");
-                self.bash_install = BashInstall::Failed(e);
+                self.bash_install = InstallState::Failed(e);
             }
             Message::Noop => {}
             Message::RemoveCodexHook => {
@@ -2037,6 +2065,22 @@ impl App {
             None => column![base].into(),
         }
     }
+}
+
+/// Runs an install of TerminalRooster's own bash or Neovim on a thread,
+/// passing on its progress and then how it ended.
+fn run_install(
+    install: impl FnOnce(&dyn Fn(bundled_bash::Progress)) -> termroost_core::Result<PathBuf> + Send + 'static,
+) -> async_channel::Receiver<InstallEvent> {
+    let (tx, rx) = async_channel::unbounded();
+    std::thread::spawn(move || {
+        let report = tx.clone();
+        let result = install(&move |p| {
+            let _ = report.send_blocking(InstallEvent::Progress(p));
+        });
+        let _ = tx.send_blocking(InstallEvent::Done(result.map_err(|e| e.to_string())));
+    });
+    rx
 }
 
 /// Looks for installed shells on a thread (it may wait on `wsl.exe`).

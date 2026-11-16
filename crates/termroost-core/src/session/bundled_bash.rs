@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 pub use super::bundle::Progress;
-use super::bundle::{self, Asset};
+use super::bundle::{self, Asset, Layout};
 use crate::session::shell::ShellOption;
 
 /// Whether TerminalRooster can install its own bash on this platform.
@@ -72,7 +72,7 @@ pub fn install(progress: impl Fn(Progress)) -> crate::Result<PathBuf> {
         return Ok(exe);
     }
     let dir = install_dir().ok_or(crate::Error::NoDataDir)?;
-    bundle::install(&ASSET, &dir, &progress)?;
+    bundle::install(&ASSET, &dir, Layout::Flat, &progress)?;
     std::fs::write(dir.join(VERSION_FILE), GIT_VERSION)?;
     tracing::info!(dir = %dir.display(), version = GIT_VERSION, "installed TerminalRooster bash");
     installed().ok_or_else(|| crate::Error::Invalid("the download did not contain bin\\bash.exe".into()))

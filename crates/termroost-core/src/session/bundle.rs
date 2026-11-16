@@ -33,6 +33,15 @@ impl std::fmt::Display for Progress {
     }
 }
 
+/// How an archive holds its files.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Layout {
+    /// Its top level is what goes into the install folder (Git for Windows).
+    Flat,
+    /// It holds one folder, which becomes the install folder (Neovim's zips).
+    SingleFolder,
+}
+
 /// `name` in the local (not roaming: these are large) data directory,
 /// `%LOCALAPPDATA%\TerminalRooster\data\<name>`, or in `TERMINALROOSTER_DATA_DIR`.
 pub(crate) fn local_data_subdir(name: &str) -> Option<PathBuf> {
@@ -45,8 +54,8 @@ pub(crate) fn local_data_subdir(name: &str) -> Option<PathBuf> {
 /// Downloads `asset`, checks it and unpacks it into `dir`, replacing what
 /// was there. Blocks for as long as the download takes, so run it on its
 /// own thread.
-pub(crate) fn install(asset: &Asset, dir: &Path, progress: &dyn Fn(Progress)) -> crate::Result<()> {
-    imp::install(asset, dir, progress)
+pub(crate) fn install(asset: &Asset, dir: &Path, layout: Layout, progress: &dyn Fn(Progress)) -> crate::Result<()> {
+    imp::install(asset, dir, layout, progress)
 }
 
 /// The archive's file name ending, which also says how to unpack it.
@@ -55,20 +64,30 @@ fn archive_ext(url: &str) -> Option<&'static str> {
 }
 
 /// Moves what was unpacked into `staging` to `dir`, replacing `dir`.
-fn promote(staging: &Path, dir: &Path) -> crate::Result<()> {
+fn promote(staging: &Path, dir: &Path, layout: Layout) -> crate::Result<()> {
+    let from = match layout {
+        Layout::Flat => staging.to_path_buf(),
+        Layout::SingleFolder => {
+            let entries: Vec<std::fs::DirEntry> = std::fs::read_dir(staging)?.collect::<Result<_, _>>()?;
+            match entries.as_slice() {
+                [only] if only.file_type()?.is_dir() => only.path(),
+                _ => return Err(crate::Error::Invalid("the download is not laid out as expected".into())),
+            }
+        }
+    };
     // Leftovers of an install that stopped half way, or an older version.
     if dir.exists() {
         std::fs::remove_dir_all(dir)?;
     }
-    std::fs::rename(staging, dir)?;
+    std::fs::rename(&from, dir)?;
     Ok(())
 }
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{Asset, Progress};
+    use super::{Asset, Layout, Progress};
 
-    pub(super) fn install(_: &Asset, _: &std::path::Path, _: &dyn Fn(Progress)) -> crate::Result<()> {
+    pub(super) fn install(_: &Asset, _: &std::path::Path, _: Layout, _: &dyn Fn(Progress)) -> crate::Result<()> {
         Err(crate::Error::Invalid("TerminalRooster only installs programs for itself on Windows".into()))
     }
 }
@@ -83,11 +102,11 @@ mod imp {
 
     use sha2::{Digest, Sha256};
 
-    use super::{Asset, Progress, archive_ext, promote};
+    use super::{Asset, Layout, Progress, archive_ext, promote};
     use crate::Error;
     use crate::session::shell::CREATE_NO_WINDOW;
 
-    pub(super) fn install(asset: &Asset, dir: &Path, progress: &dyn Fn(Progress)) -> crate::Result<()> {
+    pub(super) fn install(asset: &Asset, dir: &Path, layout: Layout, progress: &dyn Fn(Progress)) -> crate::Result<()> {
         let parent = dir.parent().ok_or(Error::NoDataDir)?;
         let name = dir.file_name().ok_or(Error::NoDataDir)?.to_string_lossy();
         let ext = archive_ext(asset.url).ok_or_else(|| Error::Invalid(format!("unknown archive: {}", asset.url)))?;
@@ -107,7 +126,7 @@ mod imp {
                 std::fs::create_dir_all(&staging)?;
                 unpack(&archive, ext, &staging)
             })
-            .and_then(|()| promote(&staging, dir));
+            .and_then(|()| promote(&staging, dir, layout));
         let _ = std::fs::remove_file(&archive);
         let _ = std::fs::remove_dir_all(&staging);
         result
@@ -213,9 +232,29 @@ mod tests {
         let (staging, dir) = (root.path().join("x-unpacking"), root.path().join("x"));
         std::fs::create_dir_all(staging.join("bin")).unwrap();
         std::fs::create_dir_all(dir.join("old")).unwrap();
-        promote(&staging, &dir).unwrap();
+        promote(&staging, &dir, Layout::Flat).unwrap();
         assert!(dir.join("bin").is_dir());
         assert!(!dir.join("old").exists(), "what was there is replaced");
         assert!(!staging.exists());
+    }
+
+    #[test]
+    fn an_archive_with_one_folder_has_that_folder_moved() {
+        let root = tempfile::tempdir().unwrap();
+        let (staging, dir) = (root.path().join("nvim-unpacking"), root.path().join("nvim"));
+        std::fs::create_dir_all(staging.join("nvim-win64").join("bin")).unwrap();
+        std::fs::write(staging.join("nvim-win64").join("bin").join("nvim.exe"), "").unwrap();
+        promote(&staging, &dir, Layout::SingleFolder).unwrap();
+        assert!(dir.join("bin").join("nvim.exe").is_file());
+
+        // Anything else is refused, and nothing is replaced.
+        std::fs::create_dir_all(staging.join("a")).unwrap();
+        std::fs::create_dir_all(staging.join("b")).unwrap();
+        assert!(promote(&staging, &dir, Layout::SingleFolder).is_err(), "two folders");
+        assert!(dir.join("bin").join("nvim.exe").is_file());
+        let lone_file = root.path().join("f-unpacking");
+        std::fs::create_dir_all(&lone_file).unwrap();
+        std::fs::write(lone_file.join("readme.txt"), "").unwrap();
+        assert!(promote(&lone_file, &root.path().join("f"), Layout::SingleFolder).is_err(), "a file");
     }
 }

@@ -92,27 +92,41 @@ pub struct EditorProgram {
 
 impl EditorProgram {
     /// `program`, with what it needs to run here: a Vim built for MSYS (Git
-    /// for Windows has one in `usr\bin`) reads `TERM`, which Windows doesn't set.
+    /// for Windows has one in `usr\bin`) reads `TERM`, which Windows doesn't
+    /// set, and TerminalRooster's own Neovim gets its folder on `PATH`, for
+    /// the tools that come with it (`win32yank.exe` for the clipboard).
     pub fn new(program: PathBuf) -> EditorProgram {
-        let msys = cfg!(windows) && program.parent().is_some_and(|d| d.ends_with(Path::new("usr").join("bin")));
-        let env = if msys { vec![("TERM".to_owned(), "xterm-256color".to_owned())] } else { Vec::new() };
+        let mut env = Vec::new();
+        if cfg!(windows) && program.parent().is_some_and(|d| d.ends_with(Path::new("usr").join("bin"))) {
+            env.push(("TERM".to_owned(), "xterm-256color".to_owned()));
+        }
+        if let Some(bin) = program.parent().filter(|_| super::bundled_nvim::installed().as_ref() == Some(&program)) {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let dirs = std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&path));
+            if let Ok(joined) = std::env::join_paths(dirs) {
+                env.push(("PATH".to_owned(), joined.to_string_lossy().into_owned()));
+            }
+        }
         EditorProgram { program, env }
     }
 }
 
 /// The editor files open in when they are edited in a terminal editor and
-/// no command is set: Neovim on PATH, else Vim on PATH; on Windows then the
-/// Vim of Git for Windows, else the one of TerminalRooster's own bash.
+/// no command is set: Neovim on PATH, else TerminalRooster's own Neovim
+/// (Windows), else Vim on PATH; on Windows then the Vim of Git for Windows,
+/// else the one of TerminalRooster's own bash.
 pub fn find_terminal_editor() -> Option<EditorProgram> {
     let path = std::env::var_os("PATH").unwrap_or_default();
-    pick_editor(&path, &fallback_editors()).map(EditorProgram::new)
+    let ours: Vec<PathBuf> = super::bundled_nvim::installed().into_iter().collect();
+    pick_editor(&path, &ours, &fallback_editors()).map(EditorProgram::new)
 }
 
-fn pick_editor(path: &OsStr, fallbacks: &[PathBuf]) -> Option<PathBuf> {
-    ["nvim", "vim"]
-        .into_iter()
-        .find_map(|name| find_program(name, path))
-        .or_else(|| fallbacks.iter().find(|p| p.is_file()).cloned())
+fn pick_editor(path: &OsStr, ours: &[PathBuf], fallbacks: &[PathBuf]) -> Option<PathBuf> {
+    let existing = |list: &[PathBuf]| list.iter().find(|p| p.is_file()).cloned();
+    find_program("nvim", path)
+        .or_else(|| existing(ours))
+        .or_else(|| find_program("vim", path))
+        .or_else(|| existing(fallbacks))
 }
 
 #[cfg(windows)]
@@ -358,13 +372,15 @@ mod tests {
         let both = std::env::join_paths([a.path(), b.path()]).unwrap();
         assert_eq!(find_program("vim", &both), Some(vim.clone()));
         assert_eq!(find_program("emacs", &both), None);
-        assert_eq!(pick_editor(&both, &[]), Some(nvim), "Neovim first, wherever it is on the path");
+        let ours = program(a.path(), "our-nvim");
+        assert_eq!(pick_editor(&both, std::slice::from_ref(&ours), &[]), Some(nvim), "Neovim on the path first");
         let only_vim = std::env::join_paths([a.path()]).unwrap();
-        assert_eq!(pick_editor(&only_vim, &[]), Some(vim));
+        assert_eq!(pick_editor(&only_vim, std::slice::from_ref(&ours), &[]), Some(ours), "then our own Neovim");
+        assert_eq!(pick_editor(&only_vim, &[], &[]), Some(vim), "then Vim");
         let fallback = program(a.path(), "fallback");
         let none = OsStr::new("");
-        assert_eq!(pick_editor(none, &[a.path().join("missing"), fallback.clone()]), Some(fallback));
-        assert_eq!(pick_editor(none, &[]), None);
+        assert_eq!(pick_editor(none, &[], &[a.path().join("missing"), fallback.clone()]), Some(fallback));
+        assert_eq!(pick_editor(none, &[], &[]), None);
         let relative = std::env::join_paths(["relative-dir"]).unwrap();
         assert_eq!(find_program("vim", &relative), None, "folders that aren't absolute are skipped");
     }

@@ -2,6 +2,7 @@
 
 mod bundle;
 pub mod bundled_bash;
+pub mod bundled_nvim;
 pub mod input;
 pub mod integration;
 pub(crate) mod osc;
