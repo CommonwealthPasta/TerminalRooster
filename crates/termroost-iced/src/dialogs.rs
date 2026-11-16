@@ -54,7 +54,7 @@ fn codex_window<'a>(
         TerminalView::new(handle.clone(), keymap.clone(), focus.clone(), true, font_size, Message::Noop, Message::Noop);
     let content = column![
         row![
-            text("Type /hooks and trust the TerminalRooster hook.").size(14).width(Length::Fill),
+            text("Type /hooks and trust the Terminal Rooster hook.").size(14).width(Length::Fill),
             button(text("Done")).padding([5, 14]).style(button::primary).on_press(Message::DialogCancel),
         ]
         .spacing(12)
@@ -167,7 +167,7 @@ impl App {
                 }))
                 .spacing(6);
                 let mut col = column![
-                    text("Quit TerminalRooster?").size(18).font(BOLD),
+                    text("Quit Terminal Rooster?").size(18).font(BOLD),
                     text(if n == 1 {
                         "A terminal is still running a program. Quitting stops it.".to_owned()
                     } else {
@@ -179,7 +179,7 @@ impl App {
                 .spacing(12);
                 if running.iter().any(|r| r.agent) {
                     col = col.push(muted_text(
-                        "Coding agents come back in the same conversation when TerminalRooster starts again, but a \
+                        "Coding agents come back in the same conversation when Terminal Rooster starts again, but a \
                          reply they are writing now is cut off.",
                     ));
                 }
@@ -200,7 +200,7 @@ impl App {
             Dialog::RemoveWorktree(form) => self.view_remove(form),
             Dialog::CodexHook => column![
                 text("Track Codex sessions?").size(18).font(BOLD),
-                text("Add a small hook to Codex so TerminalRooster always resumes the right conversation in each terminal.",)
+                text("Add a small hook to Codex so Terminal Rooster always resumes the right conversation in each terminal.",)
                     .size(13),
                 muted_text("You can change this later in Settings."),
                 row![
@@ -213,7 +213,7 @@ impl App {
             .spacing(12)
             .into(),
             Dialog::Renamed(renamed) => {
-                let mut body = column![text("TermRoost is now TerminalRooster").size(18).font(BOLD)].spacing(12);
+                let mut body = column![text("TermRoost is now Terminal Rooster").size(18).font(BOLD)].spacing(12);
                 if let Some(from) = &renamed.moved_from {
                     body = body.push(
                         text(format!(
@@ -290,7 +290,7 @@ impl App {
                     start,
                     muted_text(
                         "Claude Code, Codex and Grok are detected automatically, also when you start them yourself, \
-                         and TerminalRooster follows the session they are in (including /clear). After a restart each \
+                         and Terminal Rooster follows the session they are in (including /clear). After a restart each \
                          terminal resumes its own conversation, not just the most recent one.",
                     ),
                     field(

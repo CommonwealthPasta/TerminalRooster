@@ -3,10 +3,10 @@ use std::path::PathBuf;
 /// Errors returned by the core.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("TerminalRooster is already running (lock held on {0})")]
+    #[error("Terminal Rooster is already running (lock held on {0})")]
     AlreadyRunning(PathBuf),
     #[error(
-        "TermRoost (TerminalRooster's old name) is still running and using {0}. Close it, then start TerminalRooster \
+        "TermRoost (Terminal Rooster's old name) is still running and using {0}. Close it, then start Terminal Rooster \
          again to move your projects over."
     )]
     LegacyRunning(PathBuf),

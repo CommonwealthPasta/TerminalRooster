@@ -205,7 +205,7 @@ mod platform {
         }
         let key =
             windows_registry::CURRENT_USER.create(format!(r"Software\Classes\AppUserModelId\{}", crate::APP_ID))?;
-        key.set_string("DisplayName", "TerminalRooster")?;
+        key.set_string("DisplayName", crate::DISPLAY_NAME)?;
         key.set_string("IconUri", icon.display().to_string())?;
         Ok(())
     }
@@ -246,7 +246,7 @@ mod platform {
         clicked: async_channel::Sender<PaneId>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let handle = Notification::new()
-            .appname("TerminalRooster")
+            .appname(crate::DISPLAY_NAME)
             .summary(title)
             .body(body)
             .icon(crate::APP_ID)

@@ -16,7 +16,7 @@ use crate::session::shell::ShellOption;
 pub const SUPPORTED: bool = cfg!(windows);
 
 /// Name of the bundled bash in the shell lists.
-pub const NAME: &str = "TerminalRooster bash";
+pub const NAME: &str = "Terminal Rooster bash";
 
 /// The Git for Windows release the bash comes from.
 pub const GIT_VERSION: &str = "2.56.1";
@@ -111,7 +111,7 @@ mod imp {
     use super::Progress;
 
     pub(super) fn install(_dir: &std::path::Path, _progress: &dyn Fn(Progress)) -> crate::Result<()> {
-        Err(crate::Error::Invalid("TerminalRooster only installs its own bash on Windows".into()))
+        Err(crate::Error::Invalid("Terminal Rooster only installs its own bash on Windows".into()))
     }
 }
 

@@ -35,6 +35,9 @@ use crate::app::{App, Prefs};
 
 /// Desktop application id (also the .desktop and AppStream file names).
 pub const APP_ID: &str = "io.github.Davenport_Physics.TerminalRooster";
+/// The app's name as people read it: window title, dialogs, notifications.
+/// Folders, ids and environment variables keep `TerminalRooster`.
+pub const DISPLAY_NAME: &str = "Terminal Rooster";
 
 fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
@@ -64,7 +67,7 @@ fn main() -> iced::Result {
         Err(e) => {
             tracing::error!(error = %e, "could not open the core");
             let _ = rfd::MessageDialog::new()
-                .set_title("TerminalRooster")
+                .set_title(DISPLAY_NAME)
                 .set_description(e.to_string())
                 .set_level(rfd::MessageLevel::Error)
                 .show();

@@ -595,8 +595,7 @@ impl App {
     }
 
     pub fn title(&self) -> String {
-        /// The app's name in the window title (and so the taskbar and Alt+Tab).
-        const NAME: &str = "Terminal Rooster";
+        use crate::DISPLAY_NAME as NAME;
         let s = self.core.state();
         match (s.selected_project.and_then(|p| s.project(p)), s.active_tab()) {
             (Some(p), Some(t)) => format!("{} · {} — {NAME}", t.title, p.name),
@@ -840,7 +839,7 @@ impl App {
             Message::TestNotification => {
                 let pane = self.core.state().active_tab().and_then(|t| t.focused_pane).unwrap_or(PaneId(0));
                 notify::desktop(
-                    "TerminalRooster".into(),
+                    crate::DISPLAY_NAME.into(),
                     "Desktop notifications work. Clicking one brings its terminal into view.".into(),
                     pane,
                     self.clicks.0.clone(),

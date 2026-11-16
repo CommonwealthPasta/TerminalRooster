@@ -32,8 +32,8 @@ fn main() {
     if bundled_bash::SUPPORTED {
         let dir = bundled_bash::install_dir().map(|d| d.display().to_string()).unwrap_or_default();
         match bundled_bash::installed() {
-            Some(exe) => println!("\nTerminalRooster bash: installed ({})", exe.display()),
-            None => println!("\nTerminalRooster bash: not installed (would go to {dir})"),
+            Some(exe) => println!("\nTerminal Rooster bash: installed ({})", exe.display()),
+            None => println!("\nTerminal Rooster bash: not installed (would go to {dir})"),
         }
     }
 }

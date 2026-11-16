@@ -19,8 +19,8 @@ fn main() {
         println!("cargo:rerun-if-changed={}", ico.display());
         let mut res = winresource::WindowsResource::new();
         res.set_icon(&ico.to_string_lossy());
-        res.set("ProductName", "TerminalRooster");
-        res.set("FileDescription", "TerminalRooster");
+        res.set("ProductName", "Terminal Rooster");
+        res.set("FileDescription", "Terminal Rooster");
         if let Err(e) = res.compile() {
             // Missing resource compiler: build anyway, just without the .exe icon.
             println!("cargo:warning=could not embed the Windows icon: {e}");

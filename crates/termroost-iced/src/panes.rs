@@ -27,7 +27,7 @@ impl App {
         let Some(project) = s.selected_project.and_then(|p| s.project(p)) else {
             return center(
                 column![
-                    text("TerminalRooster").size(30).font(BOLD),
+                    text(crate::DISPLAY_NAME).size(30).font(BOLD),
                     text("Projects keep their terminals, splits and tasks, even across restarts and crashes."),
                     button(text("New project")).padding([6, 14]).on_press(Message::NewProject),
                 ]

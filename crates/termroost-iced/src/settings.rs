@@ -363,7 +363,7 @@ impl App {
                 muted_text(
                     "Subtle marks the terminal, its session and its project until you look at the terminal. \
                      Prominent also pops up a note when the terminal is out of view, and a desktop notification with \
-                     a flashing taskbar entry while TerminalRooster is in the background. The terminal you are \
+                     a flashing taskbar entry while Terminal Rooster is in the background. The terminal you are \
                      looking at never notifies.",
                 ),
                 row![
@@ -378,8 +378,8 @@ impl App {
                     .size(16)
                     .text_size(13),
                 muted_text(
-                    "Lets TerminalRooster see how each command ends, which failed commands need. It is loaded when a \
-                     terminal starts, from TerminalRooster's own folder; your startup files are not changed. Other \
+                    "Lets Terminal Rooster see how each command ends, which failed commands need. It is loaded when a \
+                     terminal starts, from Terminal Rooster's own folder; your startup files are not changed. Other \
                      shells can report a command's status themselves with OSC 133;D. Applies to terminals started \
                      from now on.",
                 ),
@@ -432,7 +432,7 @@ impl App {
             "Integrations",
             column![
                 text("Codex session hook").size(14).font(BOLD),
-                muted_text("Lets TerminalRooster resume the right Codex conversation in each terminal."),
+                muted_text("Lets Terminal Rooster resume the right Codex conversation in each terminal."),
                 text(status).size(13),
                 row(actions).spacing(8),
             ]
@@ -497,7 +497,7 @@ impl App {
         Some(picker.into())
     }
 
-    /// Windows: download TerminalRooster's own bash, or say where it is.
+    /// Windows: download Terminal Rooster's own bash, or say where it is.
     fn bundled_bash_row<'a>(&'a self, input: &str, platform: &str) -> Element<'a, Message> {
         use crate::app::{BashInstall, shell_matching};
 
@@ -526,13 +526,13 @@ impl App {
                     Some(install("Install and use").into()),
                     muted_text(format!(
                         "Bash with coreutils, vim, less, ssh and git, from Git for Windows {version}: a {mb} MB \
-                         download, a few hundred MB unpacked into TerminalRooster's own folder. Nothing else on the \
+                         download, a few hundred MB unpacked into Terminal Rooster's own folder. Nothing else on the \
                          system changes."
                     ))
                     .into(),
                 ),
             };
-        row![text("TerminalRooster bash").size(13).width(150)]
+        row![text(bundled_bash::NAME).size(13).width(150)]
             .push(action)
             .push(container(status).width(Length::Fill))
             .spacing(12)
