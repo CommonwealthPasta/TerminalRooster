@@ -263,13 +263,21 @@ impl TerminalHandle {
         if let Some(old) = shared.sender.lock().unwrap().take() {
             let _ = old.send(Msg::Shutdown);
         }
-        // `..Default::default()` fills Windows-only fields (`escape_args`).
+        // On Windows the command line is built by joining the program and the
+        // arguments: quote a program path with spaces (`C:\Program Files\…`),
+        // and arguments too (their quotes were removed when splitting).
+        #[cfg(windows)]
+        let program = quote_program(&spec.shell.program);
+        #[cfg(not(windows))]
+        let program = spec.shell.program.clone();
         #[allow(clippy::needless_update)]
         let options = tty::Options {
-            shell: Some(tty::Shell::new(spec.shell.program.clone(), spec.shell.args.clone())),
+            shell: Some(tty::Shell::new(program, spec.shell.args.clone())),
             working_directory: Some(spec.cwd.clone()),
             drain_on_exit: true,
             env: spec.env.clone(),
+            #[cfg(windows)]
+            escape_args: true,
             ..Default::default()
         };
         let size = *shared.size.lock().unwrap();
@@ -532,5 +540,28 @@ impl TerminalHandle {
     /// Serialized scrollback, or `None` while the alternate screen is active.
     pub(crate) fn snapshot(&self, max_lines: usize) -> Option<Vec<u8>> {
         snapshot::serialize(&*self.0.term.lock(), max_lines)
+    }
+}
+
+/// The program as the start of a Windows command line. Unquoted, a path like
+/// `C:\Program Files\Git\bin\bash.exe` is split at the space and Windows
+/// would first look for `C:\Program.exe`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn quote_program(program: &str) -> String {
+    if program.contains(char::is_whitespace) && !program.starts_with('"') {
+        format!("\"{program}\"")
+    } else {
+        program.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn quote_program() {
+        use super::quote_program;
+        assert_eq!(quote_program(r"C:\Program Files\Git\bin\bash.exe"), r#""C:\Program Files\Git\bin\bash.exe""#);
+        assert_eq!(quote_program("pwsh.exe"), "pwsh.exe");
+        assert_eq!(quote_program(r#""C:\a b\c.exe""#), r#""C:\a b\c.exe""#);
     }
 }
