@@ -1,9 +1,9 @@
 //! `tracing` setup: logs go to stderr and to a daily-rotated file in the data
-//! directory (`<data dir>/logs/termroost.YYYY-MM-DD.log`, last 7 days kept).
+//! directory (`<data dir>/logs/terminalrooster.YYYY-MM-DD.log`, last 7 days kept).
 //! The file matters on Windows, where release builds have no console.
 //!
-//! The level is taken from `TERMROOST_LOG`, then `RUST_LOG`, e.g.
-//! `TERMROOST_LOG=debug` or `TERMROOST_LOG=termroost_core=trace`.
+//! The level is taken from `TERMINALROOSTER_LOG`, then `RUST_LOG`, e.g.
+//! `TERMINALROOSTER_LOG=debug` or `TERMINALROOSTER_LOG=termroost_core=trace`.
 
 use std::path::{Path, PathBuf};
 
@@ -13,9 +13,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
 
-pub const LOG_ENV: &str = "TERMROOST_LOG";
-/// Our binary's target is `termroost`; the core's is `termroost_core`.
-const DEFAULT_FILTER: &str = "warn,wgpu_hal=error,wgpu_core=error,naga=error,termroost=info,termroost_core=info";
+pub const LOG_ENV: &str = "TERMINALROOSTER_LOG";
+/// Our binary's target is `terminalrooster`; the core's is `termroost_core`.
+const DEFAULT_FILTER: &str = "warn,wgpu_hal=error,wgpu_core=error,naga=error,terminalrooster=info,termroost_core=info";
 
 fn filter() -> EnvFilter {
     EnvFilter::try_from_env(LOG_ENV)
@@ -38,7 +38,7 @@ pub fn init(data_dir: Option<&Path>) -> Option<WorkerGuard> {
         let appender = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| {
             RollingFileAppender::builder()
                 .rotation(Rotation::DAILY)
-                .filename_prefix("termroost")
+                .filename_prefix("terminalrooster")
                 .filename_suffix("log")
                 .max_log_files(7)
                 .build(&dir)
@@ -51,7 +51,7 @@ pub fn init(data_dir: Option<&Path>) -> Option<WorkerGuard> {
                 Some(fmt::layer().with_ansi(false).with_writer(writer).with_filter(filter()))
             }
             Err(e) => {
-                eprintln!("termroost: cannot write logs to {}: {e}", dir.display());
+                eprintln!("terminalrooster: cannot write logs to {}: {e}", dir.display());
                 None
             }
         }

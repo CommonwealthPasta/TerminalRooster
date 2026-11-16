@@ -9,7 +9,7 @@ description = "Project-based terminals for running coding agents side by side"
 repository = "https://github.com/Davenport-Physics/TermRoost"
 
 [[bin]]
-name = "termroost"
+name = "terminalrooster"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,10 +21,23 @@ async-channel.workspace = true
 serde_json.workspace = true
 directories.workspace = true
 ttf-parser = "0.25"
+# The Files tab dims what .gitignore leaves out.
+ignore = "0.4"
 chrono.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender = "0.2"
+
+# Desktop notifications: Windows toasts (with a click handler), and D-Bus elsewhere.
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.8"
+windows-registry = "0.6"
+
+[target.'cfg(not(windows))'.dependencies]
+notify-rust = "4.19"
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
@@ -34,52 +47,52 @@ winresource = "0.1"
 # lists refer to (under target/release/packaging-root) and then calls cargo-deb and
 # cargo-generate-rpm.
 [package.metadata.deb]
-name = "termroost"
+name = "terminalrooster"
 maintainer = "Emma Davenport <davenport.physics@gmail.com>"
 copyright = "2026, Emma Davenport <davenport.physics@gmail.com>"
 license-file = ["../../LICENSE", "0"]
-extended-description = "TermRoost organizes terminals by project in renamable, splittable tabs, so you can run Claude Code, Codex and Grok side by side with per-project tasks. Layouts, scrollback and each agent's own conversation are restored after a restart or crash."
+extended-description = "Terminal Rooster organizes terminals by project in renamable, splittable sessions, so you can run Claude Code, Codex and Grok side by side with per-project tasks. Layouts, scrollback and each agent's own conversation are restored after a restart or crash."
 section = "devel"
 priority = "optional"
 depends = "$auto, libxkbcommon0"
 recommends = "libvulkan1, libwayland-client0"
 assets = [
-    ["target/release/packaging-root/usr/bin/termroost", "usr/bin/", "755"],
-    ["target/release/packaging-root/usr/share/applications/io.github.Davenport_Physics.TermRoost.desktop", "usr/share/applications/", "644"],
-    ["target/release/packaging-root/usr/share/metainfo/io.github.Davenport_Physics.TermRoost.metainfo.xml", "usr/share/metainfo/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/16x16/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/24x24/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/32x32/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/48x48/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/64x64/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/96x96/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/96x96/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/128x128/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/192x192/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/192x192/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/256x256/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
-    ["target/release/packaging-root/usr/share/icons/hicolor/512x512/apps/io.github.Davenport_Physics.TermRoost.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
-    ["../../README.md", "usr/share/doc/termroost/README.md", "644"],
+    ["target/release/packaging-root/usr/bin/terminalrooster", "usr/bin/", "755"],
+    ["target/release/packaging-root/usr/share/applications/io.github.Davenport_Physics.TerminalRooster.desktop", "usr/share/applications/", "644"],
+    ["target/release/packaging-root/usr/share/metainfo/io.github.Davenport_Physics.TerminalRooster.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/16x16/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/16x16/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/24x24/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/24x24/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/32x32/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/32x32/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/48x48/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/48x48/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/64x64/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/64x64/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/96x96/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/96x96/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/128x128/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/192x192/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/192x192/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/256x256/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/256x256/apps/", "644"],
+    ["target/release/packaging-root/usr/share/icons/hicolor/512x512/apps/io.github.Davenport_Physics.TerminalRooster.png", "usr/share/icons/hicolor/512x512/apps/", "644"],
+    ["../../README.md", "usr/share/doc/terminalrooster/README.md", "644"],
 ]
 
 [package.metadata.generate-rpm]
-name = "termroost"
+name = "terminalrooster"
 summary = "Project-based terminals for running coding agents side by side"
 url = "https://github.com/Davenport-Physics/TermRoost"
 assets = [
-    { source = "target/release/packaging-root/usr/bin/termroost", dest = "/usr/bin/termroost", mode = "755" },
-    { source = "target/release/packaging-root/usr/share/applications/io.github.Davenport_Physics.TermRoost.desktop", dest = "/usr/share/applications/io.github.Davenport_Physics.TermRoost.desktop", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/metainfo/io.github.Davenport_Physics.TermRoost.metainfo.xml", dest = "/usr/share/metainfo/io.github.Davenport_Physics.TermRoost.metainfo.xml", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/16x16/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/16x16/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/24x24/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/24x24/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/32x32/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/32x32/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/48x48/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/48x48/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/64x64/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/64x64/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/96x96/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/96x96/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/128x128/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/128x128/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/192x192/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/192x192/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/256x256/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/256x256/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "target/release/packaging-root/usr/share/icons/hicolor/512x512/apps/io.github.Davenport_Physics.TermRoost.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.Davenport_Physics.TermRoost.png", mode = "644" },
-    { source = "../../README.md", dest = "/usr/share/doc/termroost/README.md", mode = "644", doc = true },
-    { source = "../../LICENSE", dest = "/usr/share/licenses/termroost/LICENSE", mode = "644", doc = true },
+    { source = "target/release/packaging-root/usr/bin/terminalrooster", dest = "/usr/bin/terminalrooster", mode = "755" },
+    { source = "target/release/packaging-root/usr/share/applications/io.github.Davenport_Physics.TerminalRooster.desktop", dest = "/usr/share/applications/io.github.Davenport_Physics.TerminalRooster.desktop", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/metainfo/io.github.Davenport_Physics.TerminalRooster.metainfo.xml", dest = "/usr/share/metainfo/io.github.Davenport_Physics.TerminalRooster.metainfo.xml", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/16x16/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/16x16/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/24x24/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/24x24/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/32x32/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/32x32/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/48x48/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/48x48/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/64x64/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/64x64/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/96x96/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/96x96/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/128x128/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/128x128/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/192x192/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/192x192/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/256x256/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/256x256/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "target/release/packaging-root/usr/share/icons/hicolor/512x512/apps/io.github.Davenport_Physics.TerminalRooster.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.Davenport_Physics.TerminalRooster.png", mode = "644" },
+    { source = "../../README.md", dest = "/usr/share/doc/terminalrooster/README.md", mode = "644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/terminalrooster/LICENSE", mode = "644", doc = true },
 ]
 
 [package.metadata.generate-rpm.requires]

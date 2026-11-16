@@ -1,23 +1,42 @@
 //! Application state, messages and update logic.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iced::widget::{column, container, operation, pane_grid, row, stack};
 use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
-use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId};
+use termroost_core::session::shell::{self, ShellOption};
+use termroost_core::session::{bundled_bash, bundled_nvim};
+use termroost_core::{
+    Activity, AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git,
+};
 
-use crate::keymap::{self, Direction, Shortcut};
+use crate::color_picker::{ColorPicker, Hsl};
+use crate::editor::{DocId, EditorMsg, FileEditor, SessionFiles};
+use crate::files::{FilesMsg, FilesState};
+use crate::git_panel::{GitLog, GitSync, LogRead, SyncOp};
+use crate::groups;
+use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
-use crate::terminal_view;
+use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
+use crate::side_panel::SideTab;
+use crate::terminal_view::{self, KeyboardFocus};
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
+use crate::worktree::{WorktreeForm, WorktreeMsg};
+use crate::worktree_remove::{RemoveForm, RemoveMsg};
+
+/// How often the branches of the visible sessions, and the git log when it
+/// shows, are checked again.
+const GIT_POLL: Duration = Duration::from_secs(2);
 
 const PREFS_KEY: &str = "iced.prefs";
 pub const RENAME_INPUT: &str = "rename-input";
+pub const PROJECT_SEARCH: &str = "project-search";
 pub const TASK_INPUT: &str = "task-input";
 pub const TASK_EDIT_INPUT: &str = "task-edit-input";
 pub const DIALOG_FIRST_INPUT: &str = "dialog-first-input";
@@ -27,7 +46,11 @@ pub const DIALOG_FIRST_INPUT: &str = "dialog-first-input";
 #[serde(default)]
 pub struct Prefs {
     pub font_size: f32,
-    pub tasks_open: bool,
+    /// The right panel is shown (its old name is from when it only held tasks).
+    #[serde(rename = "tasks_open")]
+    pub panel_open: bool,
+    /// What the right panel shows.
+    pub side_tab: SideTab,
     pub show_done: bool,
     pub tasks_this_tab_only: bool,
     pub window: Option<WindowGeom>,
@@ -45,13 +68,33 @@ pub struct Prefs {
     pub terminal_theme: Option<String>,
     /// The user was already asked about the Codex hook at startup.
     pub codex_hook_asked: bool,
+    /// Keyboard shortcuts the user changed: action id -> its shortcuts, such
+    /// as `"Ctrl+Shift+T"`. Actions not listed use their defaults.
+    pub shortcuts: BTreeMap<String, Vec<String>>,
+    /// How to tell the user that a command failed.
+    pub notify_errors: Level,
+    /// How to tell the user that a coding agent finished or needs them.
+    pub notify_agents: Level,
+    /// Ask before quitting while terminals run programs.
+    pub confirm_quit: bool,
+    /// The git log shows every branch, not just the session's.
+    pub log_all_branches: bool,
+    /// Pull rebases the branch's own commits on top of what came in,
+    /// instead of merging.
+    pub pull_rebase: bool,
+    /// What files open in: the built-in editor, or Neovim/Vim in a terminal.
+    pub file_editor: FileEditor,
+    /// The terminal editor's command line (the file is added at the end);
+    /// empty finds Neovim or Vim.
+    pub editor_command: String,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         Self {
             font_size: theme::DEFAULT_FONT_SIZE,
-            tasks_open: true,
+            panel_open: true,
+            side_tab: SideTab::Tasks,
             show_done: true,
             tasks_this_tab_only: false,
             window: None,
@@ -62,6 +105,14 @@ impl Default for Prefs {
             dark_theme: themes::DARK.into(),
             terminal_theme: None,
             codex_hook_asked: false,
+            shortcuts: BTreeMap::new(),
+            notify_errors: Level::Subtle,
+            notify_agents: Level::Prominent,
+            confirm_quit: true,
+            log_all_branches: false,
+            pull_rebase: true,
+            file_editor: FileEditor::Builtin,
+            editor_command: String::new(),
         }
     }
 }
@@ -78,11 +129,31 @@ impl Prefs {
     pub fn load(core: &Core) -> Prefs {
         core.state().gui_value(PREFS_KEY).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default()
     }
+
+    pub fn level(&self, category: Category) -> Level {
+        match category {
+            Category::Error => self.notify_errors,
+            Category::Agent => self.notify_agents,
+        }
+    }
+}
+
+/// A terminal with programs running in it, listed when asking before quitting.
+#[derive(Clone, Debug)]
+pub struct RunningTerminal {
+    pub pane: PaneId,
+    /// "Session 2 · my-service".
+    pub place: String,
+    /// "Claude Code (working), cargo".
+    pub programs: String,
+    /// One of them is a coding agent.
+    pub agent: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenameTarget {
     Project(ProjectId),
+    Group(GroupId),
     Tab(TabId),
 }
 
@@ -112,6 +183,31 @@ pub enum Dialog {
     CodexHook,
     /// A small Codex window for trusting the hook (`/hooks`).
     CodexTrust(termroost_core::TerminalHandle),
+    /// Says once what was carried over from TermRoost, the app's old name.
+    Renamed(termroost_core::Renamed),
+    /// Switch the session to another git worktree, or make one.
+    Worktree(Box<WorktreeForm>),
+    /// Ask before removing a worktree, which closes its sessions.
+    RemoveWorktree(Box<RemoveForm>),
+    /// Quitting while terminals still run programs, or files have unsaved changes.
+    ConfirmQuit {
+        running: Vec<RunningTerminal>,
+        /// Files with unsaved changes ("src/main.rs (agents)").
+        unsaved: Vec<String>,
+        dont_ask: bool,
+    },
+    /// Closing a file with unsaved changes, or open in a terminal editor
+    /// that is still running (its name).
+    CloseFile {
+        doc: DocId,
+        name: String,
+        editor: Option<String>,
+    },
+    /// Saving a file that changed on disk since it was read.
+    SaveConflict {
+        doc: DocId,
+        name: String,
+    },
 }
 
 /// State of the settings page while it is open.
@@ -121,12 +217,23 @@ pub struct SettingsState {
     pub editing: Option<String>,
     /// Raw text of color fields (kept while not yet a valid color).
     pub inputs: HashMap<ColorField, String>,
+    /// Color picker open under one of the edited theme's colors.
+    pub picker: Option<ColorPicker>,
     pub name_input: String,
     pub name_error: Option<String>,
     pub shell_input: String,
+    /// Waiting for the keys of a new shortcut for this action.
+    pub recording: Option<Action>,
+    /// What the last shortcut change did, e.g. which action lost its keys.
+    pub shortcut_note: Option<String>,
+    /// The terminal editor files open in when no command is set (looked
+    /// for when settings open).
+    pub editor_found: Option<PathBuf>,
+    /// The user's own Neovim, on PATH.
+    pub nvim_on_path: Option<PathBuf>,
 }
 
-/// Choice in a task's "linked tab" dropdown.
+/// Choice in a task's "linked session" dropdown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabChoice {
     pub id: Option<TabId>,
@@ -139,13 +246,41 @@ impl std::fmt::Display for TabChoice {
     }
 }
 
+/// Installing TerminalRooster's own bash or Neovim (Settings, Windows only).
+#[derive(Clone, Debug, Default)]
+pub enum InstallState {
+    #[default]
+    Idle,
+    Running(bundled_bash::Progress),
+    Failed(String),
+}
+
+/// News from the thread installing the bash or Neovim.
+#[derive(Clone, Debug)]
+pub enum InstallEvent {
+    Progress(bundled_bash::Progress),
+    Done(Result<PathBuf, String>),
+}
+
 #[derive(Clone, Debug)]
 pub enum Message {
     Core(Event),
     Tick,
     WindowMoved(iced::Point),
     WindowResized(iced::Size),
+    /// The window gained (`true`) or lost focus.
+    WindowFocus(window::Id, bool),
+    WindowFound(Option<window::Id>),
     CloseRequested,
+    /// Bring a terminal into view and focus it (from a notification).
+    ShowPane(PaneId),
+    DismissToast(PaneId),
+    NotifyLevel(Category, Level),
+    ShellIntegration(bool),
+    ConfirmQuitPref(bool),
+    /// "Don't ask again" in the quit dialog.
+    DialogDontAsk(bool),
+    TestNotification,
     Key(keyboard::Event),
     /// Escape, even when a text input captured it (closes dialogs and editors).
     Escape,
@@ -155,11 +290,29 @@ pub enum Message {
     },
     /// Enter, even when captured (confirms dialogs without text fields).
     Enter,
-    Shortcut(Shortcut),
+    Shortcut(Action),
 
     SelectProject(ProjectId),
     SelectTab(TabId),
     NewTab,
+    /// Move or group projects (dragged, or moved with the keyboard): a
+    /// `MoveProject`, `MoveGroup` or `GroupProjects` command.
+    ArrangeProjects(Command),
+    /// Show or hide a group's projects.
+    ToggleGroup(GroupId),
+    /// A double click on a group: rename it. Its first click opened or
+    /// closed the group, so that is undone.
+    GroupDoubleClicked(GroupId),
+    /// Move a session to this index of its project's list without it.
+    MoveTab(TabId, usize),
+    /// The text in the projects search box changed.
+    ProjectSearch(String),
+    /// Enter in the projects search box: open the first project it lists.
+    ProjectSearchSubmit,
+    /// Empty the projects search box (its ✕).
+    ProjectSearchClear,
+    /// Escape in the projects search box: empty it and go back to the terminal.
+    ProjectSearchEscape,
 
     NewProject,
     EditProject(ProjectId),
@@ -182,9 +335,18 @@ pub enum Message {
     DeleteTheme(String),
     ThemeNameInput(String),
     ThemeColor(ColorField, String),
+    /// Open the color picker for a color of the edited theme (`None`: close it).
+    PickColor(Option<ColorField>),
+    /// A hue/saturation/lightness slider of the color picker moved.
+    PickerHsl(Hsl),
     FontSize(f32),
     ShellInput(String),
     ShellCommit,
+    /// Wait for the keys of a new shortcut for an action (`None`: stop waiting).
+    RecordShortcut(Option<Action>),
+    RemoveShortcut(Action, Combo),
+    /// Back to the default shortcuts of one action, or of all (`None`).
+    ResetShortcuts(Option<Action>),
 
     PaneSettings(PaneId),
     AskDeleteProject(ProjectId),
@@ -215,7 +377,17 @@ pub enum Message {
     RestartPane(PaneId),
     StartAgent(PaneId, AgentKind),
 
-    ToggleTasks,
+    /// Show the right panel on this tab, or hide it if it already shows it.
+    TogglePanel(SideTab),
+    /// Show the right panel on this tab.
+    ShowPanel(SideTab),
+    ClosePanel,
+    Files(FilesMsg),
+    Editor(EditorMsg),
+    /// Edit files in the built-in editor or in a terminal editor (settings).
+    FileEditor(FileEditor),
+    /// The terminal editor's command line changed (settings).
+    EditorCommand(String),
     NewTaskInput(String),
     AddTask,
     TaskDone(TaskId, bool),
@@ -227,8 +399,42 @@ pub enum Message {
     TaskEditCancel,
     ShowDone(bool),
     ThisTabOnly(bool),
+    /// A task was pressed: it may be dragged onto a session.
+    TaskGrab(TaskId),
+    /// The pointer moved while a task is held (window coordinates).
+    TaskDragMove(iced::Point),
+    /// The pointer went onto (`true`) or off a place a held task can be dropped.
+    TaskDragOver(DropTarget, bool),
+    /// A held task was let go over a session: link it to that session.
+    TaskDrop(DropTarget),
+    /// The button was let go (or the window lost focus): the task is put down.
+    TaskDragEnd,
+
+    /// Shells found on this machine (detected in the background).
+    ShellsDetected(Vec<ShellOption>),
+    /// A shell picked from the list in settings becomes the default.
+    PickDefaultShell(ShellOption),
+    InstallBash,
+    BashInstall(InstallEvent),
+    InstallNvim,
+    NvimInstall(InstallEvent),
+
+    /// Time to read the visible sessions' branches again.
+    GitPoll,
+    /// Where each session directory stands in git (`None`: not in a repository).
+    GitStatus(Vec<(PathBuf, Option<git::Status>)>),
+    Worktree(WorktreeMsg),
+    RemoveWorktree(RemoveMsg),
+    LogRead(LogRead),
+    LogAllBranches(bool),
+    /// Pull or push the Git tab's repository.
+    GitSync(SyncOp),
+    GitSynced(PathBuf, Result<String, String>),
+    PullRebase(bool),
+    DismissSync,
 
     DismissError,
+    DismissNotice,
 }
 
 pub struct App {
@@ -238,28 +444,113 @@ pub struct App {
     prefs_dirty: bool,
     layout_dirty: HashSet<TabId>,
     pub(crate) rename: Option<Rename>,
+    /// The projects list shows only projects matching this.
+    pub(crate) project_search: String,
     pub(crate) dialog: Option<Dialog>,
     pub(crate) new_task: String,
     pub(crate) task_edit: Option<(TaskId, String)>,
+    /// The folders read for the Files tab.
+    pub(crate) files: FilesState,
+    /// The files each session has open.
+    pub(crate) editors: HashMap<TabId, SessionFiles>,
+    /// The last id given to an open file.
+    pub(crate) next_doc: u64,
+    /// The last version number given to the text of an open file.
+    pub(crate) next_version: u64,
+    /// The list of open files changed since it was last saved.
+    pub(crate) open_files_dirty: bool,
+    /// Open files are being compared with the disk.
+    pub(crate) disk_polling: bool,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
+    /// What goes on in the terminals that are not idle (see [`Activity`]).
+    pub(crate) busy: HashMap<PaneId, Activity>,
     pub(crate) error: Option<String>,
+    /// Information worth a banner that is not an error.
+    pub(crate) notice: Option<String>,
+    /// Git status of session directories, read in the background.
+    pub(crate) git: HashMap<PathBuf, Option<git::Status>>,
+    /// A periodic git read is running.
+    git_polling: bool,
+    /// The log in the side panel's Git tab.
+    pub(crate) git_log: Option<GitLog>,
+    /// The Git tab's last pull or push.
+    pub(crate) git_sync: Option<GitSync>,
+    /// The log is being read.
+    pub(crate) log_reading: bool,
     pub(crate) themes: ThemeStore,
     themes_dirty: bool,
     pub(crate) settings: Option<SettingsState>,
+    /// Shells installed on this machine, for the shell pickers.
+    pub(crate) shells: Vec<ShellOption>,
+    pub(crate) bash_install: InstallState,
+    pub(crate) nvim_install: InstallState,
     pub(crate) system_mode: iced::theme::Mode,
     ui_theme: iced::Theme,
     /// Cached Codex integration state (reads files, so refreshed on demand).
     pub(crate) codex_hook: termroost_core::CodexHookStatus,
+    /// Shortcuts in effect (from `prefs.shortcuts`); shared with the terminals.
+    pub(crate) keymap: Arc<Keymap>,
+    /// Which terminal has the keyboard; shared with the terminals.
+    pub(crate) keyboard_focus: KeyboardFocus,
+    /// A task held with the mouse, to be dropped on a session.
+    pub(crate) task_drag: Option<TaskDrag>,
+    /// Alerts in terminals the user has not looked at since.
+    pub(crate) notices: HashMap<PaneId, PaneNotices>,
+    /// Pop-ups about terminals that are out of view, oldest first.
+    pub(crate) toasts: Vec<Toast>,
+    window_focused: bool,
+    window_id: Option<window::Id>,
+    /// The terminal the user is looking at: the focused one of the visible
+    /// session, while the window has focus. Programs in it are told they
+    /// have focus (if they asked to know), and its alerts are dropped.
+    attended: Option<PaneId>,
+    /// Clicks on desktop notifications, by pane.
+    clicks: (async_channel::Sender<PaneId>, async_channel::Receiver<PaneId>),
     closing: bool,
 }
+
+/// Where a task can be dropped to link it to a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropTarget {
+    /// A session in the sessions list.
+    Session(TabId),
+    /// The terminals of the session on screen.
+    Terminals,
+}
+
+/// A task being dragged from the task panel onto a session.
+#[derive(Clone, Copy, Debug)]
+pub struct TaskDrag {
+    pub task: TaskId,
+    /// Where the pointer was when it first moved after the press.
+    origin: Option<iced::Point>,
+    /// Where the pointer is now (window coordinates).
+    pub cursor: Option<iced::Point>,
+    /// Far enough from where it was picked up to be a drag rather than a click.
+    pub moving: bool,
+    /// The drop target under the pointer.
+    pub over: Option<DropTarget>,
+}
+
+/// How far the pointer moves with a task held before it counts as dragging it.
+const TASK_DRAG_THRESHOLD: f32 = 5.0;
 
 /// Hashable wrapper so the event receiver can back a subscription.
 struct Events(async_channel::Receiver<Event>);
 
 impl Hash for Events {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        "termroost-core-events".hash(state);
+        "terminalrooster-core-events".hash(state);
+    }
+}
+
+/// Hashable wrapper for the clicks on desktop notifications.
+struct Clicks(async_channel::Receiver<PaneId>);
+
+impl Hash for Clicks {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        "terminalrooster-notification-clicks".hash(state);
     }
 }
 
@@ -267,6 +558,7 @@ impl App {
     pub fn new(core: Core) -> (App, Task<Message>) {
         let prefs = Prefs::load(&core);
         let themes = ThemeStore::load(&core);
+        let keymap = Arc::new(Keymap::new(&prefs.shortcuts));
         let mut app = App {
             core,
             grids: HashMap::new(),
@@ -274,26 +566,68 @@ impl App {
             prefs_dirty: false,
             layout_dirty: HashSet::new(),
             rename: None,
+            project_search: String::new(),
             dialog: None,
             new_task: String::new(),
             task_edit: None,
+            files: FilesState::default(),
+            editors: HashMap::new(),
+            next_doc: 0,
+            next_version: 0,
+            open_files_dirty: false,
+            disk_polling: false,
             activity: HashSet::new(),
+            busy: HashMap::new(),
             error: None,
+            notice: None,
+            git: HashMap::new(),
+            git_polling: false,
+            git_log: None,
+            git_sync: None,
+            log_reading: false,
             themes,
             themes_dirty: false,
             settings: None,
+            shells: Vec::new(),
+            bash_install: InstallState::Idle,
+            nvim_install: InstallState::Idle,
             system_mode: iced::theme::Mode::None,
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
+            keymap,
+            keyboard_focus: KeyboardFocus::default(),
+            task_drag: None,
+            notices: HashMap::new(),
+            toasts: Vec::new(),
+            window_focused: true,
+            window_id: None,
+            attended: None,
+            clicks: async_channel::unbounded(),
             closing: false,
         };
+        notify::init(app.core.data_dir());
         app.apply_theme();
         app.ensure_active_grid();
+        app.restore_open_files();
         app.codex_hook = app.core.codex_hook_status();
         if app.codex_hook.codex_found && app.codex_hook.installed_in.is_none() && !app.prefs.codex_hook_asked {
             app.dialog = Some(Dialog::CodexHook);
         }
-        let task = Task::batch([app.focus_active(), iced::system::theme().map(Message::SystemTheme)]);
+        let renamed = app.core.renamed();
+        if renamed.moved_from.is_some() || renamed.codex_hook_updated {
+            app.dialog = Some(Dialog::Renamed(renamed.clone()));
+        }
+        // A file shown before the restart is read again (or its editor started).
+        let revived = app.revive_shown();
+        app.sync_attention();
+        let task = Task::batch([
+            revived,
+            app.focus_active(),
+            iced::system::theme().map(Message::SystemTheme),
+            detect_shells(),
+            app.read_git(),
+            window::latest().map(Message::WindowFound),
+        ]);
         (app, task)
     }
 
@@ -339,20 +673,22 @@ impl App {
     }
 
     pub fn title(&self) -> String {
+        use crate::DISPLAY_NAME as NAME;
         let s = self.core.state();
         match (s.selected_project.and_then(|p| s.project(p)), s.active_tab()) {
-            (Some(p), Some(t)) => format!("{} · {} — TermRoost", t.title, p.name),
-            (Some(p), None) => format!("{} — TermRoost", p.name),
-            _ => "TermRoost".to_owned(),
+            (Some(p), Some(t)) => format!("{} · {} — {NAME}", t.title, p.name),
+            (Some(p), None) => format!("{} — {NAME}", p.name),
+            _ => NAME.to_owned(),
         }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subs = vec![
             Subscription::run_with(Events(self.core.events()), |e| e.0.clone()).map(Message::Core),
+            Subscription::run_with(Clicks(self.clicks.1.clone()), |c| c.0.clone()).map(Message::ShowPane),
             keyboard::listen().map(Message::Key),
             iced::system::theme_changes().map(Message::SystemTheme),
-            iced::event::listen_with(|event, _status, _id| match event {
+            iced::event::listen_with(|event, _status, id| match event {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed {
                     key: keyboard::Key::Named(keyboard::key::Named::Escape),
                     ..
@@ -369,16 +705,43 @@ impl App {
                 iced::Event::Window(window::Event::Moved(p)) => Some(Message::WindowMoved(p)),
                 iced::Event::Window(window::Event::Resized(s)) => Some(Message::WindowResized(s)),
                 iced::Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested),
+                iced::Event::Window(window::Event::Focused) => Some(Message::WindowFocus(id, true)),
+                iced::Event::Window(window::Event::Unfocused) => Some(Message::WindowFocus(id, false)),
                 _ => None,
             }),
+            iced::time::every(GIT_POLL).map(|_| Message::GitPoll),
         ];
-        if !self.layout_dirty.is_empty() || self.prefs_dirty || self.themes_dirty {
+        if self.files_shown() && self.window_focused {
+            subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Files(FilesMsg::Poll)));
+        }
+        // Agents change open files: look at them now and then, and when coming back to the window.
+        if self.has_text_docs() && self.window_focused {
+            subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Editor(EditorMsg::DiskPoll)));
+        }
+        if self.task_drag.is_some() {
+            // Only while a task is held, so moving the mouse doesn't redraw the app otherwise.
+            // A drop on a session arrives from that widget before this end does.
+            subs.push(iced::event::listen_with(|event, _status, _id| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::TaskDragMove(position))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left))
+                | iced::Event::Window(window::Event::Unfocused) => Some(Message::TaskDragEnd),
+                _ => None,
+            }));
+        }
+        if !self.layout_dirty.is_empty()
+            || self.prefs_dirty
+            || self.themes_dirty
+            || self.open_files_dirty
+            || !self.toasts.is_empty()
+        {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
     }
 
-    fn dispatch(&mut self, cmd: Command) -> Option<Outcome> {
+    pub(crate) fn dispatch(&mut self, cmd: Command) -> Option<Outcome> {
         match self.core.dispatch(cmd) {
             Ok(o) => Some(o),
             Err(e) => {
@@ -393,6 +756,19 @@ impl App {
         self.core.state().active_tab().map(|t| t.id)
     }
 
+    /// The session a task dropped on `target` gets linked to.
+    pub(crate) fn drop_tab(&self, target: DropTarget) -> Option<TabId> {
+        match target {
+            DropTarget::Session(tab) => Some(tab),
+            DropTarget::Terminals => self.active_tab_id(),
+        }
+    }
+
+    /// Whether a task is being dragged and is over `target`.
+    pub(crate) fn is_drop_target(&self, target: DropTarget) -> bool {
+        self.task_drag.is_some_and(|d| d.moving && d.over == Some(target))
+    }
+
     fn ensure_active_grid(&mut self) {
         if let Some(tab) = self.core.state().active_tab() {
             self.grids.entry(tab.id).or_insert_with(|| layout_conv::grid_state(&tab.layout));
@@ -405,10 +781,41 @@ impl App {
         }
     }
 
-    /// Moves keyboard focus to the focused terminal of the visible tab.
-    fn focus_active(&self) -> Task<Message> {
+    /// Git status of a tab's working directory, from the last background read.
+    pub(crate) fn git_of(&self, tab: &termroost_core::Tab) -> Option<&git::Status> {
+        self.git.get(&self.core.state().tab_working_dir(tab))?.as_ref()
+    }
+
+    /// Reads the git status of the selected project's sessions on a thread
+    /// (directories may be on a slow network drive).
+    pub(crate) fn read_git(&self) -> Task<Message> {
+        let s = self.core.state();
+        let Some(project) = s.selected_project else { return Task::none() };
+        let mut dirs: Vec<PathBuf> = s.tabs_of(project).map(|t| s.tab_working_dir(t)).collect();
+        dirs.sort();
+        dirs.dedup();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let statuses = dirs
+                .into_iter()
+                .map(|d| {
+                    let status = git::Status::of(&d);
+                    (d, status)
+                })
+                .collect();
+            let _ = tx.send_blocking(statuses);
+        });
+        Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::GitStatus)
+    }
+
+    /// Moves keyboard focus to the focused terminal of the visible tab, or to
+    /// the file shown in place of its terminals.
+    pub(crate) fn focus_active(&self) -> Task<Message> {
         if self.dialog.is_some() || self.rename.is_some() || self.task_edit.is_some() {
             return Task::none();
+        }
+        if let Some(focus) = self.focus_doc() {
+            return focus;
         }
         match self.core.state().active_tab().and_then(|t| t.focused_pane) {
             Some(p) => operation::focus(terminal_view::widget_id(p)),
@@ -436,14 +843,17 @@ impl App {
             let value = self.themes.to_json();
             self.dispatch(Command::SetGuiValue { key: themes::THEMES_KEY.into(), value });
         }
+        if let Some(value) = self.take_open_files_value() {
+            self.dispatch(Command::SetGuiValue { key: App::OPEN_FILES_KEY.into(), value });
+        }
     }
 
-    fn after_select(&mut self) -> Task<Message> {
+    pub(crate) fn after_select(&mut self) -> Task<Message> {
         if let Some(tab) = self.active_tab_id() {
             self.activity.remove(&tab);
         }
         self.ensure_active_grid();
-        self.focus_active()
+        Task::batch([self.focus_active(), self.read_git(), self.refresh_files()])
     }
 
     fn grid_pane(&self, pane: pane_grid::Pane) -> Option<(TabId, PaneId)> {
@@ -453,16 +863,39 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        let revived = self.revive_shown();
+        self.sync_attention();
+        let task = Task::batch([task, revived]);
+        match self.ensure_files_root() {
+            Some(read) => Task::batch([task, read]),
+            None => task,
+        }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         if self.closing {
             return Task::none();
         }
         // Key events are never logged: they can carry what the user types.
-        if !matches!(message, Message::Core(_) | Message::Tick | Message::Key(_)) {
+        // Nor are editor actions and folder listings: what is in people's files.
+        let quiet = match &message {
+            Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
+            Message::Editor(msg) => !msg.loggable(),
+            _ => false,
+        };
+        if !quiet {
             tracing::trace!(?message, "update");
         }
         match message {
             Message::Core(ev) => {
                 self.core.apply_event(&ev);
+                // A terminal editor quit: its file closes.
+                if let Event::ProcessExited { pane, code } = ev
+                    && let Some(task) = self.editor_exited(pane, code)
+                {
+                    return task;
+                }
                 match ev {
                     Event::TerminalDirty(pane) | Event::Bell(pane) => {
                         let tab = self.core.state().pane(pane).map(|p| p.tab);
@@ -470,11 +903,71 @@ impl App {
                             self.activity.insert(tab);
                         }
                     }
+                    Event::ActivityChanged(pane) => {
+                        match self.core.terminal(pane).map(|h| h.activity()).filter(|a| !a.is_idle()) {
+                            Some(activity) => self.busy.insert(pane, activity),
+                            None => self.busy.remove(&pane),
+                        };
+                    }
                     Event::ClipboardStore(text) => return iced::clipboard::write(text),
+                    Event::Alert { pane, alert } => return self.on_notice(pane, Notice::from_alert(&alert)),
+                    Event::ProcessExited { pane, code: Some(code) } if code != 0 => {
+                        return self.on_notice(pane, Notice::shell_exited(code));
+                    }
                     _ => {}
                 }
             }
-            Message::Tick => self.flush_pending(),
+            Message::Tick => {
+                self.flush_pending();
+                self.toasts.retain(|t| t.shown.elapsed() < notify::TOAST_LIFETIME);
+            }
+            Message::WindowFocus(id, focused) => {
+                self.window_id = Some(id);
+                self.window_focused = focused;
+                if focused {
+                    return self.update(Message::Editor(EditorMsg::DiskPoll));
+                }
+            }
+            Message::WindowFound(id) => self.window_id = self.window_id.or(id),
+            Message::ShowPane(pane) => return self.show_pane(pane),
+            Message::DismissToast(pane) => self.toasts.retain(|t| t.pane != pane),
+            Message::NotifyLevel(category, level) => {
+                match category {
+                    Category::Error => self.prefs.notify_errors = level,
+                    Category::Agent => self.prefs.notify_agents = level,
+                }
+                if level == Level::Off {
+                    for n in self.notices.values_mut() {
+                        match category {
+                            Category::Error => n.error = None,
+                            Category::Agent => n.agent = None,
+                        }
+                    }
+                    self.toasts.retain(|t| t.notice.category != category);
+                }
+                self.mark_prefs();
+            }
+            Message::ShellIntegration(on) => {
+                self.dispatch(Command::SetShellIntegration(on));
+            }
+            Message::ConfirmQuitPref(on) => {
+                self.prefs.confirm_quit = on;
+                self.mark_prefs();
+            }
+            Message::DialogDontAsk(v) => {
+                if let Some(Dialog::ConfirmQuit { dont_ask, .. }) = &mut self.dialog {
+                    *dont_ask = v;
+                }
+            }
+            Message::TestNotification => {
+                let pane = self.core.state().active_tab().and_then(|t| t.focused_pane).unwrap_or(PaneId(0));
+                notify::desktop(
+                    crate::DISPLAY_NAME.into(),
+                    "Desktop notifications work. Clicking one brings its terminal into view.".into(),
+                    pane,
+                    self.clicks.0.clone(),
+                );
+            }
             Message::WindowMoved(p) => {
                 let w = self.prefs.window.get_or_insert_with(Default::default);
                 w.x = Some(p.x);
@@ -488,17 +981,40 @@ impl App {
                 self.mark_prefs();
             }
             Message::CloseRequested => {
-                self.flush_pending();
-                self.core.shutdown();
-                self.closing = true;
-                return iced::exit();
+                if matches!(self.dialog, Some(Dialog::ConfirmQuit { .. })) {
+                    return Task::none();
+                }
+                // Unsaved files are always asked about; running programs as the user chose.
+                let unsaved = self.unsaved_files();
+                let running = if self.prefs.confirm_quit {
+                    self.running_terminals().into_iter().chain(self.running_editors()).collect()
+                } else {
+                    Vec::new()
+                };
+                if !running.is_empty() || !unsaved.is_empty() {
+                    self.rename = None;
+                    self.dialog = Some(Dialog::ConfirmQuit { running, unsaved, dont_ask: false });
+                    return Task::none();
+                }
+                return self.quit();
             }
             Message::Escape => {
+                if self.task_drag.take().is_some() || self.close_files_menu() {
+                    return Task::none();
+                }
                 if matches!(self.dialog, Some(Dialog::CodexTrust(_))) {
                     return Task::none();
                 }
                 if self.dialog.is_some() {
                     return self.update(Message::DialogCancel);
+                }
+                if let Some(st) = &mut self.settings
+                    && (st.recording.is_some() || st.picker.is_some())
+                {
+                    if st.recording.take().is_none() {
+                        st.picker = None;
+                    }
+                    return Task::none();
                 }
                 if self.settings.is_some() {
                     return self.update(Message::CloseSettings);
@@ -512,7 +1028,15 @@ impl App {
             }
             Message::Enter => {
                 // Dialogs with text fields submit through the fields themselves.
-                if matches!(self.dialog, Some(Dialog::ConfirmDeleteProject(_) | Dialog::ConfirmDeleteTab(_))) {
+                if matches!(
+                    self.dialog,
+                    Some(
+                        Dialog::ConfirmDeleteProject(_)
+                            | Dialog::ConfirmDeleteTab(_)
+                            | Dialog::ConfirmQuit { .. }
+                            | Dialog::CloseFile { .. }
+                    )
+                ) {
                     return self.submit_dialog();
                 }
             }
@@ -522,8 +1046,17 @@ impl App {
                 }
             }
             Message::Key(keyboard::Event::KeyPressed { key, physical_key, modifiers, .. }) => {
-                if let Some(sc) = keymap::shortcut(&key, physical_key, modifiers) {
-                    return self.update(Message::Shortcut(sc));
+                if let Some(action) = self.settings.as_ref().and_then(|st| st.recording) {
+                    // A lone modifier or Escape isn't a shortcut: keep waiting.
+                    if let Some(combo) = Combo::from_event(&key, physical_key, modifiers) {
+                        self.record_shortcut(action, combo);
+                    }
+                    return Task::none();
+                }
+                if let Some(action) = self.keymap.action(&key, physical_key, modifiers)
+                    && !action.in_terminal()
+                {
+                    return self.update(Message::Shortcut(action));
                 }
             }
             Message::Key(_) => {}
@@ -543,9 +1076,48 @@ impl App {
             }
             Message::NewTab => {
                 if let Some(project) = self.core.state().selected_project {
-                    self.dispatch(Command::CreateTab { project, title: None });
+                    self.dispatch(Command::CreateTab { project, title: None, working_dir: None });
                     return self.after_select();
                 }
+            }
+            Message::ArrangeProjects(cmd) => {
+                // A new group gets its name right away.
+                if let Some(Outcome::Group(group)) = self.dispatch(cmd) {
+                    return self.update(Message::StartRename(RenameTarget::Group(group)));
+                }
+            }
+            Message::ToggleGroup(group) => {
+                if let Some(g) = self.core.state().group(group) {
+                    let collapsed = !g.collapsed;
+                    self.dispatch(Command::SetGroupCollapsed { group, collapsed });
+                }
+            }
+            Message::GroupDoubleClicked(group) => {
+                // While searching, clicks don't open or close groups.
+                if !self.searching_projects() {
+                    let _ = self.update(Message::ToggleGroup(group));
+                }
+                return self.update(Message::StartRename(RenameTarget::Group(group)));
+            }
+            Message::MoveTab(tab, to_index) => {
+                self.dispatch(Command::MoveTab { tab, to_index });
+            }
+            Message::ProjectSearch(query) => self.project_search = query,
+            Message::ProjectSearchSubmit => {
+                // Done searching: the whole list comes back, with the project selected.
+                let first = self.listed_projects().next().map(|p| p.id);
+                if let Some(first) = first {
+                    self.project_search.clear();
+                    return self.update(Message::SelectProject(first));
+                }
+            }
+            Message::ProjectSearchClear => {
+                self.project_search.clear();
+                return operation::focus(PROJECT_SEARCH);
+            }
+            Message::ProjectSearchEscape => {
+                self.project_search.clear();
+                return self.focus_active();
             }
 
             Message::NewProject => {
@@ -574,8 +1146,14 @@ impl App {
                 self.rename = None;
                 self.task_edit = None;
                 let shell_input = self.core.state().settings.default_shell.clone().unwrap_or_default();
-                self.settings = Some(SettingsState { shell_input, ..SettingsState::default() });
+                let editor_found = shell::find_terminal_editor().map(|e| e.program);
+                let path = std::env::var_os("PATH").unwrap_or_default();
+                let nvim_on_path = shell::find_program("nvim", &path);
+                self.settings =
+                    Some(SettingsState { shell_input, editor_found, nvim_on_path, ..SettingsState::default() });
                 self.codex_hook = self.core.codex_hook_status();
+                // Pick up shells installed since the last look.
+                return detect_shells();
             }
             Message::AddCodexHook => {
                 self.prefs.codex_hook_asked = true;
@@ -600,6 +1178,67 @@ impl App {
                 let focus = operation::focus(terminal_view::widget_id(handle.pane()));
                 self.dialog = Some(Dialog::CodexTrust(handle));
                 return focus;
+            }
+            Message::ShellsDetected(list) => self.shells = list,
+            Message::PickDefaultShell(option) => {
+                if let Some(st) = &mut self.settings {
+                    st.shell_input = option.command.clone();
+                }
+                self.dispatch(Command::SetDefaultShell(Some(option.command)));
+            }
+            Message::InstallBash => {
+                if matches!(self.bash_install, InstallState::Running(_)) {
+                    return Task::none();
+                }
+                let total = bundled_bash::download_size();
+                self.bash_install = InstallState::Running(bundled_bash::Progress::Downloading { done: 0, total });
+                return Task::run(run_install(|p| bundled_bash::install(p)), Message::BashInstall);
+            }
+            Message::InstallNvim => {
+                if matches!(self.nvim_install, InstallState::Running(_)) {
+                    return Task::none();
+                }
+                let total = bundled_nvim::download_size();
+                self.nvim_install = InstallState::Running(bundled_nvim::Progress::Downloading { done: 0, total });
+                return Task::run(run_install(|p| bundled_nvim::install(p)), Message::NvimInstall);
+            }
+            Message::NvimInstall(InstallEvent::Progress(p)) => {
+                if matches!(self.nvim_install, InstallState::Running(_)) {
+                    self.nvim_install = InstallState::Running(p);
+                }
+            }
+            Message::NvimInstall(InstallEvent::Done(Ok(_))) => {
+                self.nvim_install = InstallState::Idle;
+                // The button says "Install and use": files open in Neovim now.
+                self.prefs.file_editor = FileEditor::Terminal;
+                self.prefs.editor_command.clear();
+                self.mark_prefs();
+                if let Some(st) = &mut self.settings {
+                    st.editor_found = shell::find_terminal_editor().map(|e| e.program);
+                }
+            }
+            Message::NvimInstall(InstallEvent::Done(Err(e))) => {
+                tracing::warn!(error = %e, "installing Neovim failed");
+                self.nvim_install = InstallState::Failed(e);
+            }
+            Message::BashInstall(InstallEvent::Progress(p)) => {
+                if matches!(self.bash_install, InstallState::Running(_)) {
+                    self.bash_install = InstallState::Running(p);
+                }
+            }
+            Message::BashInstall(InstallEvent::Done(Ok(exe))) => {
+                self.bash_install = InstallState::Idle;
+                // The button says "Install and use": new terminals start bash.
+                let command = bundled_bash::shell_option(&exe).command;
+                if let Some(st) = &mut self.settings {
+                    st.shell_input = command.clone();
+                }
+                self.dispatch(Command::SetDefaultShell(Some(command)));
+                return detect_shells();
+            }
+            Message::BashInstall(InstallEvent::Done(Err(e))) => {
+                tracing::warn!(error = %e, "installing TerminalRooster bash failed");
+                self.bash_install = InstallState::Failed(e);
             }
             Message::Noop => {}
             Message::RemoveCodexHook => {
@@ -654,6 +1293,7 @@ impl App {
             Message::EditTheme(name) => {
                 if let Some(st) = &mut self.settings {
                     st.inputs.clear();
+                    st.picker = None;
                     st.name_error = None;
                     st.name_input = name.clone();
                     st.editing = Some(name);
@@ -690,6 +1330,7 @@ impl App {
                         && st.editing.as_deref() == Some(name.as_str())
                     {
                         st.editing = None;
+                        st.picker = None;
                     }
                     self.apply_theme();
                 }
@@ -697,16 +1338,29 @@ impl App {
             Message::ThemeNameInput(value) => self.rename_theme(value),
             Message::ThemeColor(field, value) => {
                 let Some(st) = &mut self.settings else { return Task::none() };
-                st.inputs.insert(field, value.clone());
-                if let (Some(hex), Some(name)) = (Hex::parse(&value), st.editing.clone())
-                    && let Some(t) = self.themes.custom_mut(&name)
-                {
-                    t.set(field, hex);
-                    self.themes_dirty = true;
-                    if self.active_theme().name == name || self.terminal_theme().name == name {
-                        self.apply_theme();
+                let hex = Hex::parse(&value);
+                st.inputs.insert(field, value);
+                if let Some(hex) = hex {
+                    if let Some(p) = st.picker.as_mut().filter(|p| p.field == field) {
+                        p.hsl = Hsl::of(hex);
                     }
+                    self.set_theme_color(field, hex);
                 }
+            }
+            Message::PickColor(field) => {
+                if let Some(st) = &mut self.settings {
+                    let theme = st.editing.as_deref().and_then(|n| self.themes.find(n));
+                    st.picker = field.zip(theme).map(|(f, t)| ColorPicker::new(f, t.get(f)));
+                }
+            }
+            Message::PickerHsl(hsl) => {
+                let Some(st) = &mut self.settings else { return Task::none() };
+                let Some(p) = &mut st.picker else { return Task::none() };
+                p.hsl = hsl;
+                let field = p.field;
+                // The text field shows the theme's color again.
+                st.inputs.remove(&field);
+                self.set_theme_color(field, hsl.to_hex());
             }
             Message::FontSize(size) => {
                 self.prefs.font_size = size.round().clamp(8.0, 32.0);
@@ -718,6 +1372,33 @@ impl App {
                 }
             }
             Message::ShellCommit => self.commit_shell(),
+            Message::RecordShortcut(action) => {
+                if let Some(st) = &mut self.settings {
+                    st.recording = action;
+                    st.shortcut_note = None;
+                }
+            }
+            Message::RemoveShortcut(action, combo) => {
+                let rest = self.keymap.combos(action).iter().copied().filter(|c| *c != combo).collect();
+                self.set_shortcuts(action, rest);
+                if let Some(st) = &mut self.settings {
+                    st.shortcut_note = None;
+                }
+            }
+            Message::ResetShortcuts(None) => {
+                self.prefs.shortcuts.clear();
+                self.shortcuts_changed();
+                if let Some(st) = &mut self.settings {
+                    st.recording = None;
+                    st.shortcut_note = None;
+                }
+            }
+            Message::ResetShortcuts(Some(action)) => {
+                let notes = self.set_shortcuts(action, action.defaults());
+                if let Some(st) = &mut self.settings {
+                    st.shortcut_note = (!notes.is_empty()).then(|| notes.join(" "));
+                }
+            }
             Message::PaneSettings(pane) => {
                 if let Some(p) = self.core.state().pane(pane) {
                     let args = p.agent.as_ref().map(|a| a.args.clone()).unwrap_or_default();
@@ -778,6 +1459,13 @@ impl App {
             Message::DialogSubmit => return self.submit_dialog(),
             Message::DialogCancel => {
                 match &self.dialog {
+                    // git is making the worktree; the result moves the session.
+                    Some(Dialog::Worktree(f)) if f.creating => return Task::none(),
+                    Some(Dialog::RemoveWorktree(f)) if f.removing => return Task::none(),
+                    Some(Dialog::RemoveWorktree(_)) => {
+                        self.cancel_remove();
+                        return self.focus_active();
+                    }
                     Some(Dialog::CodexHook) => {
                         // "Not now": don't ask again; Settings → Integrations offers it.
                         self.prefs.codex_hook_asked = true;
@@ -813,6 +1501,7 @@ impl App {
                 let s = self.core.state();
                 let value = match target {
                     RenameTarget::Project(p) => s.project(p).map(|p| p.name.clone()),
+                    RenameTarget::Group(g) => s.group(g).map(|g| g.name.clone()),
                     RenameTarget::Tab(t) => s.tab(t).map(|t| t.title.clone()),
                 };
                 if let Some(value) = value {
@@ -829,6 +1518,7 @@ impl App {
                 if let Some(r) = self.rename.take() {
                     let cmd = match r.target {
                         RenameTarget::Project(project) => Command::RenameProject { project, name: r.value },
+                        RenameTarget::Group(group) => Command::RenameGroup { group, name: r.value },
                         RenameTarget::Tab(tab) => Command::RenameTab { tab, title: r.value },
                     };
                     self.dispatch(cmd);
@@ -897,13 +1587,38 @@ impl App {
                 return self.focus_active();
             }
 
-            Message::ToggleTasks => {
-                self.prefs.tasks_open = !self.prefs.tasks_open;
-                self.mark_prefs();
-                if self.prefs.tasks_open {
-                    return operation::focus(TASK_INPUT);
+            Message::TogglePanel(tab) => {
+                if self.prefs.panel_open && self.shown_side_tab() == tab {
+                    return self.update(Message::ClosePanel);
                 }
+                return self.update(Message::ShowPanel(tab));
+            }
+            Message::ShowPanel(tab) => {
+                self.prefs.panel_open = true;
+                self.prefs.side_tab = tab;
+                self.mark_prefs();
+                return match tab {
+                    SideTab::Tasks => operation::focus(TASK_INPUT),
+                    // Looking at the log or the files doesn't take the
+                    // keyboard from the terminal.
+                    SideTab::Git => Task::batch([self.refresh_log(), self.focus_active()]),
+                    SideTab::Files => Task::batch([self.refresh_files(), self.focus_active()]),
+                };
+            }
+            Message::ClosePanel => {
+                self.prefs.panel_open = false;
+                self.mark_prefs();
                 return self.focus_active();
+            }
+            Message::Files(msg) => return self.update_files(msg),
+            Message::Editor(msg) => return self.update_editor(msg),
+            Message::FileEditor(editor) => {
+                self.prefs.file_editor = editor;
+                self.mark_prefs();
+            }
+            Message::EditorCommand(command) => {
+                self.prefs.editor_command = command;
+                self.mark_prefs();
             }
             Message::NewTaskInput(v) => self.new_task = v,
             Message::AddTask => {
@@ -953,7 +1668,63 @@ impl App {
                 self.prefs.tasks_this_tab_only = v;
                 self.mark_prefs();
             }
+            Message::TaskGrab(task) => {
+                self.task_drag = Some(TaskDrag { task, origin: None, cursor: None, moving: false, over: None });
+            }
+            Message::TaskDragMove(p) => {
+                if let Some(d) = &mut self.task_drag {
+                    let origin = *d.origin.get_or_insert(p);
+                    d.cursor = Some(p);
+                    d.moving |= origin.distance(p) >= TASK_DRAG_THRESHOLD;
+                }
+            }
+            Message::TaskDragOver(target, on) => {
+                if let Some(d) = &mut self.task_drag {
+                    if on {
+                        d.over = Some(target);
+                    } else if d.over == Some(target) {
+                        d.over = None;
+                    }
+                }
+            }
+            Message::TaskDrop(target) => {
+                if let Some(drag) = self.task_drag.take().filter(|d| d.moving)
+                    && let Some(tab) = self.drop_tab(target)
+                    && self.core.state().task(drag.task).is_some_and(|t| t.tab != Some(tab))
+                {
+                    self.dispatch(Command::AssignTask { task: drag.task, tab: Some(tab) });
+                }
+            }
+            Message::TaskDragEnd => self.task_drag = None,
+            Message::GitPoll => {
+                if !self.git_polling {
+                    self.git_polling = true;
+                    return self.read_git();
+                }
+            }
+            Message::GitStatus(statuses) => {
+                self.git_polling = false;
+                self.git.extend(statuses);
+                // The session on screen may be in another repository now.
+                return self.refresh_log();
+            }
+            Message::Worktree(msg) => return self.update_worktree(msg),
+            Message::RemoveWorktree(msg) => return self.update_remove(msg),
+            Message::LogRead(read) => return self.log_read(read),
+            Message::GitSync(op) => return self.start_sync(op),
+            Message::GitSynced(worktree, result) => return self.sync_done(worktree, result),
+            Message::PullRebase(on) => {
+                self.prefs.pull_rebase = on;
+                self.mark_prefs();
+            }
+            Message::DismissSync => self.git_sync = None,
+            Message::LogAllBranches(all) => {
+                self.prefs.log_all_branches = all;
+                self.mark_prefs();
+                return self.refresh_log();
+            }
             Message::DismissError => self.error = None,
+            Message::DismissNotice => self.notice = None,
         }
         Task::none()
     }
@@ -995,6 +1766,7 @@ impl App {
                 for t in tabs {
                     self.grids.remove(&t);
                     self.activity.remove(&t);
+                    self.drop_session_files(t);
                 }
                 return self.after_select();
             }
@@ -1002,6 +1774,7 @@ impl App {
                 self.dispatch(Command::DeleteTab(tab));
                 self.grids.remove(&tab);
                 self.activity.remove(&tab);
+                self.drop_session_files(tab);
                 return self.after_select();
             }
             Dialog::Pane { pane, resume, .. } => {
@@ -1012,8 +1785,172 @@ impl App {
                 self.dialog = Some(Dialog::CodexTrust(h));
                 return self.update(Message::DialogCancel);
             }
+            Dialog::Renamed(renamed) if renamed.codex_hook_updated => return self.update(Message::TrustCodexHook),
+            Dialog::Renamed(_) => {}
+            Dialog::Worktree(form) => {
+                self.dialog = Some(Dialog::Worktree(form));
+                return self.update_worktree(WorktreeMsg::Submit);
+            }
+            Dialog::RemoveWorktree(form) => {
+                self.dialog = Some(Dialog::RemoveWorktree(form));
+                return self.update_remove(RemoveMsg::Confirm);
+            }
+            Dialog::CloseFile { doc, editor: None, .. } => return self.save_doc(doc, true, false),
+            Dialog::CloseFile { doc, editor: Some(_), .. } => {
+                return self.update(Message::Editor(EditorMsg::Discard(doc)));
+            }
+            Dialog::SaveConflict { doc, .. } => return self.update(Message::Editor(EditorMsg::SaveAnyway(doc))),
+            Dialog::ConfirmQuit { dont_ask, .. } => {
+                if dont_ask {
+                    self.prefs.confirm_quit = false;
+                    self.mark_prefs();
+                }
+                return self.quit();
+            }
         }
         self.focus_active()
+    }
+
+    /// Saves everything, stops the terminals and exits.
+    fn quit(&mut self) -> Task<Message> {
+        self.flush_pending();
+        self.core.shutdown();
+        self.closing = true;
+        iced::exit()
+    }
+
+    /// Terminals running programs, in sidebar order, for asking before quitting.
+    pub(crate) fn running_terminals(&self) -> Vec<RunningTerminal> {
+        let s = self.core.state();
+        let mut out: Vec<(usize, RunningTerminal)> = self
+            .core
+            .running_programs()
+            .into_iter()
+            .filter_map(|(pane, found)| {
+                let tab = s.pane(pane)?.tab;
+                let rank = s.tabs.iter().position(|t| t.id == tab).unwrap_or(usize::MAX);
+                let working = self.core.terminal(pane).is_some_and(|h| h.agent_working());
+                let programs = found
+                    .iter()
+                    .map(|p| match (p.agent, p.started_by) {
+                        (Some(_), _) if working => format!("{} (working)", p.name),
+                        (None, Some(by)) => format!("{} (started by {by})", p.name),
+                        _ => p.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let agent = found.iter().any(|p| p.agent.is_some());
+                Some((rank, RunningTerminal { pane, place: self.place_of(pane)?, programs, agent }))
+            })
+            .collect();
+        out.sort_by_key(|(rank, t)| (*rank, t.pane));
+        out.into_iter().map(|(_, t)| t).collect()
+    }
+
+    /// Where a terminal is, for notifications: "Session 2 · my-service".
+    pub(crate) fn place_of(&self, pane: PaneId) -> Option<String> {
+        let s = self.core.state();
+        let tab = s.tab(s.pane(pane)?.tab)?;
+        let project = s.project(tab.project)?;
+        Some(format!("{} · {}", tab.title, project.name))
+    }
+
+    /// The terminal is on screen: in the visible session, settings closed, no
+    /// file shown in place of the terminals.
+    fn pane_visible(&self, pane: PaneId) -> bool {
+        self.settings.is_none()
+            && self.shown_doc().is_none()
+            && self.core.state().pane(pane).map(|p| p.tab) == self.active_tab_id()
+    }
+
+    /// An alert from a terminal: mark it, and say so as loudly as the user chose.
+    fn on_notice(&mut self, pane: PaneId, notice: Notice) -> Task<Message> {
+        let level = self.prefs.level(notice.category);
+        // Scratch terminals (the Codex window) are not in the state.
+        let Some(place) = self.place_of(pane) else { return Task::none() };
+        if level == Level::Off || self.attended == Some(pane) {
+            return Task::none();
+        }
+        tracing::debug!(%pane, headline = %notice.headline, "notification");
+        let category = notice.category;
+        let notices = self.notices.entry(pane).or_default();
+        if !notices.add(notice.clone()) {
+            // Repeats an alert from a moment ago; keep its pop-up's text current.
+            let detail = notices.iter().find(|n| n.category == category).and_then(|n| n.detail.clone());
+            if let Some(t) = self.toasts.iter_mut().find(|t| t.pane == pane && t.notice.category == category) {
+                t.notice.detail = detail;
+            }
+            return Task::none();
+        }
+        if level != Level::Prominent {
+            return Task::none();
+        }
+        if !self.window_focused {
+            let body = notice.detail.iter().chain([&place]).cloned().collect::<Vec<_>>().join(" · ");
+            notify::desktop(notice.headline.clone(), body, pane, self.clicks.0.clone());
+            if let Some(id) = self.window_id {
+                return window::request_user_attention(id, Some(window::UserAttention::Informational));
+            }
+        } else if !self.pane_visible(pane) {
+            self.toasts.retain(|t| t.pane != pane);
+            self.toasts.push(Toast { pane, notice, place, shown: std::time::Instant::now() });
+            if self.toasts.len() > 4 {
+                self.toasts.remove(0);
+            }
+        }
+        Task::none()
+    }
+
+    /// Brings a terminal into view and focuses it, and the window too.
+    fn show_pane(&mut self, pane: PaneId) -> Task<Message> {
+        let Some(tab) = self.core.state().pane(pane).map(|p| p.tab) else { return Task::none() };
+        if self.settings.is_some() {
+            self.commit_shell();
+            self.settings = None;
+        }
+        self.rename = None;
+        self.toasts.retain(|t| t.pane != pane);
+        self.dispatch(Command::SelectTab(tab));
+        self.dispatch(Command::FocusPane(pane));
+        self.show_terminals();
+        let focus = self.after_select();
+        match self.window_id {
+            Some(id) => Task::batch([focus, window::gain_focus(id)]),
+            None => focus,
+        }
+    }
+
+    /// Works out which terminal the user is looking at (see `attended`): tells
+    /// programs about focus changes, and clears that terminal's alerts.
+    fn sync_attention(&mut self) {
+        if self.closing {
+            return;
+        }
+        // A file shown in place of the terminals hides them; a terminal
+        // editor showing it is looked at instead (so Neovim hears of focus
+        // and can pick up changes agents made meanwhile).
+        let attended = match self.shown_doc() {
+            Some(_) => self.shown_editor_pane(),
+            None => self.core.state().active_tab().and_then(|t| t.focused_pane),
+        }
+        .filter(|_| self.window_focused && self.settings.is_none());
+        if attended != self.attended {
+            if let Some(h) = self.attended.and_then(|p| self.handle_of(p)) {
+                h.focus_changed(false);
+            }
+            if let Some(h) = attended.and_then(|p| self.handle_of(p)) {
+                h.focus_changed(true);
+            }
+            self.attended = attended;
+        }
+        if let Some(p) = attended
+            && self.notices.remove(&p).is_some()
+        {
+            self.toasts.retain(|t| t.pane != p);
+        }
+        let s = self.core.state();
+        self.notices.retain(|p, n| s.pane(*p).is_some() && n.first().is_some());
+        self.toasts.retain(|t| s.pane(t.pane).is_some());
     }
 
     fn commit_shell(&mut self) {
@@ -1021,6 +1958,20 @@ impl App {
         let wanted = Some(st.shell_input.trim().to_owned()).filter(|s| !s.is_empty());
         if wanted != self.core.state().settings.default_shell {
             self.dispatch(Command::SetDefaultShell(wanted));
+        }
+    }
+
+    /// Sets one color of the custom theme being edited, applying it right away if it's in use.
+    fn set_theme_color(&mut self, field: ColorField, hex: Hex) {
+        let Some(name) = self.settings.as_ref().and_then(|st| st.editing.clone()) else { return };
+        let Some(t) = self.themes.custom_mut(&name) else { return };
+        if t.get(field) == hex {
+            return;
+        }
+        t.set(field, hex);
+        self.themes_dirty = true;
+        if self.active_theme().name == name || self.terminal_theme().name == name {
+            self.apply_theme();
         }
     }
 
@@ -1058,66 +2009,153 @@ impl App {
         self.apply_theme();
     }
 
-    fn shortcut(&mut self, sc: Shortcut) -> Task<Message> {
+    /// Adds the keys just pressed as a shortcut for `action` (from Settings).
+    fn record_shortcut(&mut self, action: Action, combo: Combo) {
+        let Some(st) = &mut self.settings else { return };
+        if !combo.leaves_typing_alone() {
+            st.shortcut_note = Some(format!(
+                "{combo} would get in the way of typing. Hold Ctrl, Alt or {} as well (for keys like Enter or the \
+                 arrows, Shift is enough), or press Escape to cancel.",
+                crate::keymap::LOGO
+            ));
+            return;
+        }
+        st.recording = None;
+        if self.keymap.owner(&combo) == Some(action) {
+            st.shortcut_note = Some(format!("{combo} already does this."));
+            return;
+        }
+        let mut combos = self.keymap.combos(action).to_vec();
+        combos.push(combo);
+        let notes = self.set_shortcuts(action, combos);
+        if let Some(st) = &mut self.settings {
+            st.shortcut_note = (!notes.is_empty()).then(|| notes.join(" "));
+        }
+    }
+
+    /// Gives `action` exactly these shortcuts, taking them away from any other
+    /// action that had them. Returns a note for each one taken away.
+    fn set_shortcuts(&mut self, action: Action, combos: Vec<Combo>) -> Vec<String> {
+        let taken = self.keymap.assign(&mut self.prefs.shortcuts, action, combos);
+        self.shortcuts_changed();
+        taken.into_iter().map(|(c, other)| format!("{c} no longer does “{}”.", other.label())).collect()
+    }
+
+    fn shortcuts_changed(&mut self) {
+        self.keymap = Arc::new(Keymap::new(&self.prefs.shortcuts));
+        self.mark_prefs();
+    }
+
+    fn shortcut(&mut self, action: Action) -> Task<Message> {
         if self.dialog.is_some() || self.settings.is_some() {
             return Task::none();
         }
+        // With a file in place of the terminals, terminal shortcuts don't act
+        // on terminals out of sight: closing closes the file, and splitting or
+        // moving between terminals brings them back first.
+        if let Some(doc) = self.shown_doc().map(|d| d.id) {
+            match action {
+                Action::CloseTerminal => return self.update(Message::Editor(EditorMsg::Close(doc))),
+                Action::SplitRight
+                | Action::SplitDown
+                | Action::FocusLeft
+                | Action::FocusRight
+                | Action::FocusUp
+                | Action::FocusDown => self.show_terminals(),
+                _ => {}
+            }
+        }
         let s = self.core.state();
         let focused = s.active_tab().and_then(|t| t.focused_pane);
-        match sc {
-            Shortcut::NewTab => return self.update(Message::NewTab),
-            Shortcut::SplitRight => {
+        match action {
+            Action::NewProject => return self.update(Message::NewProject),
+            Action::NewSession => return self.update(Message::NewTab),
+            Action::SplitRight => {
                 if let Some(p) = focused {
                     return self.update(Message::Split(p, Axis::Vertical));
                 }
             }
-            Shortcut::SplitDown => {
+            Action::SplitDown => {
                 if let Some(p) = focused {
                     return self.update(Message::Split(p, Axis::Horizontal));
                 }
             }
-            Shortcut::ClosePane => {
+            Action::CloseTerminal => {
                 if let Some(p) = focused {
                     return self.update(Message::ClosePane(p));
                 }
             }
-            Shortcut::NextTab | Shortcut::PrevTab => {
+            Action::NextSession | Action::PrevSession => {
                 if let Some(project) = s.selected_project {
                     let tabs: Vec<TabId> = s.tabs_of(project).map(|t| t.id).collect();
-                    if let Some(next) = cycle(&tabs, self.active_tab_id(), sc == Shortcut::NextTab) {
+                    if let Some(next) = cycle(&tabs, self.active_tab_id(), action == Action::NextSession) {
                         return self.update(Message::SelectTab(next));
                     }
                 }
             }
-            Shortcut::NextProject | Shortcut::PrevProject => {
-                let projects: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
-                if let Some(next) = cycle(&projects, s.selected_project, sc == Shortcut::NextProject) {
+            Action::NextProject | Action::PrevProject => {
+                // Through the projects the list shows, while searching.
+                let projects: Vec<ProjectId> = self.listed_projects().map(|p| p.id).collect();
+                if let Some(next) = cycle(&projects, s.selected_project, action == Action::NextProject) {
                     return self.update(Message::SelectProject(next));
                 }
             }
-            Shortcut::Focus(dir) => {
+            Action::SearchProjects => {
+                self.rename = None;
+                // Selected, so typing replaces the last search.
+                return Task::batch([operation::focus(PROJECT_SEARCH), operation::select_all(PROJECT_SEARCH)]);
+            }
+            Action::MoveSessionUp | Action::MoveSessionDown => {
+                if let Some(project) = s.selected_project
+                    && let Some(tab) = self.active_tab_id()
+                {
+                    let tabs: Vec<TabId> = s.tabs_of(project).map(|t| t.id).collect();
+                    if let Some(to) = step(&tabs, tab, action == Action::MoveSessionDown) {
+                        return self.update(Message::MoveTab(tab, to));
+                    }
+                }
+            }
+            Action::MoveProjectUp | Action::MoveProjectDown => {
+                if let Some(project) = s.selected_project {
+                    // One place up or down in the list as shown, while searching.
+                    let all = groups::entries(&s.projects);
+                    let shown = groups::entries(self.listed_projects());
+                    if let Some(cmd) = groups::step(&all, &shown, project, action == Action::MoveProjectDown) {
+                        return self.update(Message::ArrangeProjects(cmd));
+                    }
+                }
+            }
+            Action::FocusLeft | Action::FocusRight | Action::FocusUp | Action::FocusDown => {
+                let d = match action {
+                    Action::FocusLeft => pane_grid::Direction::Left,
+                    Action::FocusRight => pane_grid::Direction::Right,
+                    Action::FocusUp => pane_grid::Direction::Up,
+                    _ => pane_grid::Direction::Down,
+                };
                 let (Some(tab), Some(pane)) = (self.active_tab_id(), focused) else { return Task::none() };
                 let Some(grid) = self.grids.get(&tab) else { return Task::none() };
                 let Some(gp) = layout_conv::find(grid, pane) else { return Task::none() };
-                let d = match dir {
-                    Direction::Left => pane_grid::Direction::Left,
-                    Direction::Right => pane_grid::Direction::Right,
-                    Direction::Up => pane_grid::Direction::Up,
-                    Direction::Down => pane_grid::Direction::Down,
-                };
                 if let Some(target) = grid.adjacent(gp, d).and_then(|g| grid.get(g)).copied() {
                     return self.update(Message::FocusPane(target));
                 }
             }
-            Shortcut::ToggleTasks => return self.update(Message::ToggleTasks),
-            Shortcut::FontBigger | Shortcut::FontSmaller | Shortcut::FontReset => {
-                self.prefs.font_size = match sc {
-                    Shortcut::FontBigger => (self.prefs.font_size + 1.0).min(32.0),
-                    Shortcut::FontSmaller => (self.prefs.font_size - 1.0).max(8.0),
+            Action::ToggleTasks => return self.update(Message::TogglePanel(SideTab::Tasks)),
+            Action::ToggleFiles => return self.update(Message::TogglePanel(SideTab::Files)),
+            Action::FontBigger | Action::FontSmaller | Action::FontReset => {
+                self.prefs.font_size = match action {
+                    Action::FontBigger => (self.prefs.font_size + 1.0).min(32.0),
+                    Action::FontSmaller => (self.prefs.font_size - 1.0).max(8.0),
                     _ => theme::DEFAULT_FONT_SIZE,
                 };
                 self.mark_prefs();
             }
+            // Handled by the focused terminal.
+            Action::Copy
+            | Action::Paste
+            | Action::ScrollPageUp
+            | Action::ScrollPageDown
+            | Action::ScrollTop
+            | Action::ScrollBottom => {}
         }
         Task::none()
     }
@@ -1126,12 +2164,16 @@ impl App {
         let base: Element<'_, Message> = if self.settings.is_some() {
             self.view_settings()
         } else {
-            let mut main = row![self.view_projects(), self.view_tabs(), self.view_main()].height(Length::Fill);
-            if self.prefs.tasks_open && self.core.state().selected_project.is_some() {
-                main = main.push(self.view_tasks());
+            let terminals = self.drop_zone(self.view_main());
+            let mut main = row![self.view_projects(), self.view_tabs(), terminals].height(Length::Fill);
+            if self.prefs.panel_open && self.core.state().selected_project.is_some() {
+                main = main.push(self.view_side_panel());
             }
-            container(main).width(Length::Fill).height(Length::Fill).into()
+            // The second layer shows a dragged task next to the pointer.
+            container(stack![main, self.view_task_drag()]).width(Length::Fill).height(Length::Fill).into()
         };
+        let base: Element<'_, Message> =
+            if self.toasts.is_empty() { base } else { stack![base, self.view_toasts()].into() };
         match &self.dialog {
             Some(d) => stack![base, self.view_dialog(d)].into(),
             None => column![base].into(),
@@ -1139,16 +2181,59 @@ impl App {
     }
 }
 
-fn cycle<T: Copy + PartialEq>(items: &[T], current: Option<T>, forward: bool) -> Option<T> {
-    if items.is_empty() {
-        return None;
-    }
-    let i = current.and_then(|c| items.iter().position(|x| *x == c)).unwrap_or(0);
-    let n = items.len();
-    Some(items[if forward { (i + 1) % n } else { (i + n - 1) % n }])
+/// Runs an install of TerminalRooster's own bash or Neovim on a thread,
+/// passing on its progress and then how it ended.
+fn run_install(
+    install: impl FnOnce(&dyn Fn(bundled_bash::Progress)) -> termroost_core::Result<PathBuf> + Send + 'static,
+) -> async_channel::Receiver<InstallEvent> {
+    let (tx, rx) = async_channel::unbounded();
+    std::thread::spawn(move || {
+        let report = tx.clone();
+        let result = install(&move |p| {
+            let _ = report.send_blocking(InstallEvent::Progress(p));
+        });
+        let _ = tx.send_blocking(InstallEvent::Done(result.map_err(|e| e.to_string())));
+    });
+    rx
 }
 
-fn expand_home(p: &str) -> PathBuf {
+/// Looks for installed shells on a thread (it may wait on `wsl.exe`).
+fn detect_shells() -> Task<Message> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(shell::detect_shells());
+    });
+    Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::ShellsDetected)
+}
+
+/// The entry of `shells` whose command line is `command`, for showing the
+/// current choice in a shell picker.
+pub(crate) fn shell_matching<'a>(shells: &'a [ShellOption], command: &str) -> Option<&'a ShellOption> {
+    let wanted = shell::split_command_line(command)?;
+    shells.iter().find(|o| shell::split_command_line(&o.command).as_ref() == Some(&wanted))
+}
+
+/// The item after (or before) `current`, wrapping around. When `current` isn't
+/// in the list (say, a project the search hides), the first (or last) one.
+fn cycle<T: Copy + PartialEq>(items: &[T], current: Option<T>, forward: bool) -> Option<T> {
+    let n = items.len();
+    let i = match current.and_then(|c| items.iter().position(|x| *x == c)) {
+        Some(i) if forward => (i + 1) % n,
+        Some(i) => (i + n - 1) % n,
+        None if forward => 0,
+        None => n.checked_sub(1)?,
+    };
+    items.get(i).copied()
+}
+
+/// The index `item` gets when moved one place down (or up); `None` at the end
+/// of the list, where it stays.
+fn step<T: PartialEq>(items: &[T], item: T, down: bool) -> Option<usize> {
+    let i = items.iter().position(|x| *x == item)?;
+    if down { (i + 1 < items.len()).then_some(i + 1) } else { i.checked_sub(1) }
+}
+
+pub(crate) fn expand_home(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~")
         && (rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
         && let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())
@@ -1164,5 +2249,33 @@ fn fill_name_from_dir(name: &mut String, dir: &str) {
         && let Some(base) = PathBuf::from(dir.trim_end_matches(['/', '\\'])).file_name()
     {
         *name = base.to_string_lossy().into_owned();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moving_one_place_stops_at_the_ends() {
+        let items = ['a', 'b', 'c'];
+        assert_eq!(step(&items, 'a', true), Some(1));
+        assert_eq!(step(&items, 'b', true), Some(2));
+        assert_eq!(step(&items, 'c', true), None);
+        assert_eq!(step(&items, 'c', false), Some(1));
+        assert_eq!(step(&items, 'a', false), None);
+        assert_eq!(step(&items, 'x', false), None);
+    }
+
+    #[test]
+    fn cycling_wraps_and_starts_at_an_end() {
+        let items = ['a', 'b', 'c'];
+        assert_eq!(cycle(&items, Some('a'), true), Some('b'));
+        assert_eq!(cycle(&items, Some('c'), true), Some('a'));
+        assert_eq!(cycle(&items, Some('a'), false), Some('c'));
+        assert_eq!(cycle(&items, Some('x'), true), Some('a'), "not listed: the first");
+        assert_eq!(cycle(&items, None, false), Some('c'), "not listed: the last");
+        assert_eq!(cycle(&[] as &[char], None, true), None);
+        assert_eq!(cycle(&[] as &[char], None, false), None);
     }
 }

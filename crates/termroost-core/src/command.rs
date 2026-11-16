@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentKind;
+use crate::alert::Alert;
 use crate::detect::ObservedAgent;
 use crate::layout::{Axis, Layout};
-use crate::model::{PaneId, ProjectId, TabId, TaskId};
+use crate::model::{GroupId, PaneId, ProjectId, TabId, TaskId};
 
 /// A state change requested by the front end.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -30,17 +31,48 @@ pub enum Command {
         project: ProjectId,
         shell: Option<String>,
     },
+    /// Deletes a project, and its group if it was the group's last.
     DeleteProject(ProjectId),
+    /// Moves a project to `to_index` of the list without it, into `group`
+    /// (`None`: outside any group). A group's projects stay together, so the
+    /// place has to be next to or among `group`'s projects and not among
+    /// another group's. A group left without projects is deleted.
     MoveProject {
         project: ProjectId,
         to_index: usize,
+        group: Option<GroupId>,
     },
     SelectProject(ProjectId),
 
-    /// Creates a tab (with one terminal) and selects it.
+    /// Puts `project` just after `with`, in `with`'s group. If `with` has
+    /// none, a new group holding the two takes `with`'s place
+    /// ([`Outcome::Group`]).
+    GroupProjects {
+        project: ProjectId,
+        with: ProjectId,
+    },
+    /// Moves a group's projects, together, to `to_index` of the list
+    /// without them. The place can't be among another group's projects.
+    MoveGroup {
+        group: GroupId,
+        to_index: usize,
+    },
+    RenameGroup {
+        group: GroupId,
+        name: String,
+    },
+    /// Hides (`true`) or shows a group's projects in the list.
+    SetGroupCollapsed {
+        group: GroupId,
+        collapsed: bool,
+    },
+
+    /// Creates a tab (with one terminal) and selects it. Its terminals start
+    /// in `working_dir`, or in the project's directory when that is `None`.
     CreateTab {
         project: ProjectId,
         title: Option<String>,
+        working_dir: Option<PathBuf>,
     },
     RenameTab {
         tab: TabId,
@@ -49,6 +81,15 @@ pub enum Command {
     SetTabDir {
         tab: TabId,
         working_dir: Option<PathBuf>,
+    },
+    /// Moves a tab to another working directory (e.g. a new git worktree):
+    /// sets its directory and restarts its shells there, keeping their
+    /// scrollback. Terminals running a program or an agent are left alone.
+    /// Moving back to the project's directory makes the tab follow the
+    /// project again.
+    RelocateTab {
+        tab: TabId,
+        working_dir: PathBuf,
     },
     DeleteTab(TabId),
     MoveTab {
@@ -74,7 +115,7 @@ pub enum Command {
         pane: PaneId,
         command: Option<String>,
     },
-    /// Launches a coding agent in the pane's shell with a session id TermRoost
+    /// Launches a coding agent in the pane's shell with a session id TerminalRooster
     /// tracks, so the exact session can be resumed after a restart.
     StartAgent {
         pane: PaneId,
@@ -111,6 +152,9 @@ pub enum Command {
     DeleteTask(TaskId),
 
     SetDefaultShell(Option<String>),
+    /// Turns the bash and PowerShell integration that reports failed commands
+    /// on or off, for shells started from now on.
+    SetShellIntegration(bool),
     /// Stores an opaque front-end value (window geometry, panel widths...).
     SetGuiValue {
         key: String,
@@ -123,9 +167,16 @@ pub enum Command {
 pub enum Outcome {
     None,
     Project(ProjectId),
+    /// A new group (named [`crate::NEW_GROUP_NAME`]).
+    Group(GroupId),
     Tab(TabId),
     Pane(PaneId),
     Task(TaskId),
+    /// A tab was relocated; this many of its terminals were busy and stayed
+    /// in the old directory.
+    Relocated {
+        left_running: usize,
+    },
 }
 
 /// Asynchronous notifications from the core.
@@ -154,4 +205,21 @@ pub enum Event {
         pane: PaneId,
         agent: Option<ObservedAgent>,
     },
+    /// The shell in a terminal reported a new working directory.
+    /// [`crate::Core::apply_event`] records it, so the terminal starts there
+    /// again after a restart.
+    CwdChanged {
+        pane: PaneId,
+        dir: std::path::PathBuf,
+    },
+    /// Something the user may want a notification for: a command failed, or
+    /// the coding agent in the terminal finished its turn.
+    Alert {
+        pane: PaneId,
+        alert: Alert,
+    },
+    /// What runs in a terminal changed: its agent started or finished
+    /// working, or programs started or stopped. Read it with
+    /// [`crate::TerminalHandle::activity`].
+    ActivityChanged(PaneId),
 }

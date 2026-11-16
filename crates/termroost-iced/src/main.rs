@@ -1,20 +1,36 @@
 // Release builds on Windows should not open a console window.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod agent_icon;
 mod app;
+mod busy;
+mod color_picker;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod dialogs;
+mod editor;
+mod files;
+mod git_panel;
+mod groups;
 mod keymap;
 mod layout_conv;
+mod leave_room;
 mod logging;
+mod notify;
+mod on_escape;
 mod panes;
+mod reorder;
+mod reveal;
 mod settings;
+mod side_panel;
 mod sidebar;
 mod tasks;
 mod terminal_view;
 mod theme;
 mod themes;
+mod toasts;
+mod worktree;
+mod worktree_remove;
 
 use std::sync::Mutex;
 
@@ -24,25 +40,28 @@ use termroost_core::{Config, Core};
 use crate::app::{App, Prefs};
 
 /// Desktop application id (also the .desktop and AppStream file names).
-pub const APP_ID: &str = "io.github.Davenport_Physics.TermRoost";
+pub const APP_ID: &str = "io.github.Davenport_Physics.TerminalRooster";
+/// The app's name as people read it: window title, dialogs, notifications.
+/// Folders, ids and environment variables keep `TerminalRooster`.
+pub const DISPLAY_NAME: &str = "Terminal Rooster";
 
 fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
     // Flushes the log file when main returns.
     let _log_guard = logging::init(data_dir.as_deref());
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "TermRoost starting");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "TerminalRooster starting");
     // Lets desktops show the icon for a build run without installing a package.
     #[cfg(target_os = "linux")]
     desktop_entry::ensure();
     #[cfg(target_os = "linux")]
     if std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none() {
         tracing::error!("no display: neither WAYLAND_DISPLAY nor DISPLAY is set");
-        eprintln!("termroost: no graphical session found (neither WAYLAND_DISPLAY nor DISPLAY is set)");
+        eprintln!("terminalrooster: no graphical session found (neither WAYLAND_DISPLAY nor DISPLAY is set)");
         std::process::exit(1);
     }
 
     // Terminals started from here must not believe they run inside another
-    // Claude Code session (e.g. when TermRoost itself was launched from one).
+    // Claude Code session (e.g. when TerminalRooster itself was launched from one).
     // SAFETY: no other threads exist yet.
     unsafe {
         std::env::remove_var("CLAUDECODE");
@@ -54,7 +73,7 @@ fn main() -> iced::Result {
         Err(e) => {
             tracing::error!(error = %e, "could not open the core");
             let _ = rfd::MessageDialog::new()
-                .set_title("TermRoost")
+                .set_title(DISPLAY_NAME)
                 .set_description(e.to_string())
                 .set_level(rfd::MessageLevel::Error)
                 .show();
@@ -104,6 +123,6 @@ fn main() -> iced::Result {
         application = application.font(font);
     }
     let result = application.run();
-    tracing::info!("TermRoost exited");
+    tracing::info!("TerminalRooster exited");
     result
 }

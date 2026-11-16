@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal Rooster
+GenericName=Agent Terminal
+Comment=Project-based terminals for running coding agents side by side
+Exec=terminalrooster
+Icon=io.github.Davenport_Physics.TerminalRooster
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=TR;TermRoost;Rooster;terminal;shell;agent;claude;codex;grok;ai;project;
+StartupNotify=true
+StartupWMClass=io.github.Davenport_Physics.TerminalRooster

@@ -127,6 +127,20 @@ impl ColorField {
         (ColorField::TermCursor, "Cursor"),
         (ColorField::TermSelection, "Selection"),
     ];
+
+    /// Name shown in the color picker, e.g. "Interface accent" or "Terminal bright red".
+    pub fn label(self) -> String {
+        if let ColorField::Ansi(i) = self {
+            let name = ANSI_NAMES[i as usize % 8].to_lowercase();
+            return if i < 8 { format!("Terminal {name}") } else { format!("Terminal bright {name}") };
+        }
+        let find = |list: &[(ColorField, &'static str)]| list.iter().find(|(f, _)| *f == self).map(|(_, l)| *l);
+        match (find(&Self::UI), find(&Self::TERMINAL)) {
+            (Some(l), _) => format!("Interface {}", l.to_lowercase()),
+            (_, Some(l)) => format!("Terminal {}", l.to_lowercase()),
+            _ => String::new(),
+        }
+    }
 }
 
 pub const ANSI_NAMES: [&str; 8] = ["Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White"];

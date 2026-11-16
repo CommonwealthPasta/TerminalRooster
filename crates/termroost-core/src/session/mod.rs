@@ -1,13 +1,19 @@
 //! Terminal sessions and the background autosave/agent-detection thread.
 
+mod bundle;
+pub mod bundled_bash;
+pub mod bundled_nvim;
 pub mod input;
+pub mod integration;
+pub(crate) mod osc;
 pub mod render;
 pub mod shell;
 mod snapshot;
+mod tap;
 mod terminal;
 
 pub(crate) use terminal::SpawnSpec;
-pub use terminal::{GridSize, SelectionKind, TerminalHandle};
+pub use terminal::{Activity, GridSize, SelectionKind, TerminalHandle};
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
@@ -35,6 +41,8 @@ pub(crate) struct Background {
     pub store: StoreWriter,
     pub events: async_channel::Sender<Event>,
     pub saved_lines: Arc<std::sync::atomic::AtomicUsize>,
+    /// PTYs not done closing, of all terminals; see `tap::EndShell`.
+    pub ptys: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Background {
@@ -61,22 +69,32 @@ impl Background {
         }
     }
 
-    /// Looks for agents in every running terminal; returns what changed.
-    pub fn detect_agents(&self) -> Vec<(PaneId, Option<ObservedAgent>)> {
+    /// Looks at what runs in every terminal: records the programs below each
+    /// shell (see [`TerminalHandle::activity`]), and returns what changed
+    /// about their agents.
+    pub fn scan_terminals(&self) -> Vec<(PaneId, Option<ObservedAgent>)> {
         let reports = crate::codex_hook::drain(&self.data_dir, self.started);
         if let Some(last) = reports.last() {
             *self.last_codex_report.lock().unwrap() = Some(last.at);
             let _ = self.events.try_send(Event::CodexHookReported);
         }
+        let handles: Vec<TerminalHandle> = self.sessions.lock().unwrap().values().cloned().collect();
         let mut shells = Vec::new();
         let mut submits = HashMap::new();
-        for h in self.sessions.lock().unwrap().values() {
+        for h in &handles {
             if let Some(pid) = h.shell_pid() {
                 shells.push((h.pane(), pid));
                 submits.insert(h.pane(), h.submits());
             }
         }
-        let changes = self.detector.lock().unwrap().scan_with(&shells, &submits, &reports);
+        let mut detector = self.detector.lock().unwrap();
+        let changes = detector.scan_with(&shells, &submits, &reports);
+        // The same look at the processes.
+        let mut programs = detector.programs_seen(&shells);
+        drop(detector);
+        for h in &handles {
+            h.set_programs(programs.remove(&h.pane()).unwrap_or_default());
+        }
         for (pane, agent) in &changes {
             match agent {
                 Some(a) => {
@@ -90,12 +108,12 @@ impl Background {
 
     pub fn spawn(self, stop: mpsc::Receiver<()>, interval: Duration) -> JoinHandle<()> {
         std::thread::Builder::new()
-            .name("termroost-autosave".into())
+            .name("terminalrooster-autosave".into())
             .spawn(move || {
                 // Runs until the core sends a stop signal (or is dropped).
                 while let Err(mpsc::RecvTimeoutError::Timeout) = stop.recv_timeout(interval) {
                     self.save_dirty(false);
-                    for (pane, agent) in self.detect_agents() {
+                    for (pane, agent) in self.scan_terminals() {
                         let _ = self.events.try_send(Event::AgentObserved { pane, agent });
                     }
                 }

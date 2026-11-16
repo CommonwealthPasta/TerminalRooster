@@ -1,16 +1,22 @@
 //! Modal dialogs.
 
-use iced::widget::{button, center, column, container, mouse_area, opaque, row, space, text, text_input};
+use std::sync::Arc;
+
+use iced::widget::{
+    Column, button, center, checkbox, column, container, mouse_area, opaque, row, scrollable, space, text, text_input,
+};
 use iced::{Alignment, Element, Length};
 use termroost_core::AgentKind;
 use termroost_core::session::shell;
 
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message};
+use crate::editor::EditorMsg;
+use crate::keymap::Keymap;
 use crate::sidebar::{BOLD, muted_text};
-use crate::terminal_view::TerminalView;
+use crate::terminal_view::{KeyboardFocus, TerminalView};
 use crate::theme;
 
-fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+pub(crate) fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![text(label).size(12), input.into()].spacing(4).into()
 }
 
@@ -27,10 +33,19 @@ fn actions<'a>(confirm: &'a str, danger: bool) -> Element<'a, Message> {
     .into()
 }
 
-fn modal<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+/// Said when deleting a session or project closes files with unsaved changes.
+fn unsaved_note(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => " A file with unsaved changes is closed without saving.".into(),
+        n => format!(" {n} files with unsaved changes are closed without saving."),
+    }
+}
+
+fn modal<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {
     opaque(
         mouse_area(
-            center(opaque(container(content).padding(20).width(480).style(theme::modal_card)))
+            center(opaque(container(content).padding(20).width(width).style(theme::modal_card)))
                 .style(theme::modal_backdrop),
         )
         .on_press(Message::DialogCancel),
@@ -39,11 +54,17 @@ fn modal<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 
 /// The small Codex window for trusting the hook. Clicking outside does not
 /// close it (it would end Codex); Done does.
-fn codex_window(handle: &termroost_core::TerminalHandle, font_size: f32) -> Element<'_, Message> {
-    let term = TerminalView::new(handle.clone(), true, font_size, Message::Noop, Message::Noop);
+fn codex_window<'a>(
+    handle: &'a termroost_core::TerminalHandle,
+    keymap: &Arc<Keymap>,
+    focus: &KeyboardFocus,
+    font_size: f32,
+) -> Element<'a, Message> {
+    let term =
+        TerminalView::new(handle.clone(), keymap.clone(), focus.clone(), true, font_size, Message::Noop, Message::Noop);
     let content = column![
         row![
-            text("Type /hooks and trust the TermRoost hook.").size(14).width(Length::Fill),
+            text("Type /hooks and trust the Terminal Rooster hook.").size(14).width(Length::Fill),
             button(text("Done")).padding([5, 14]).style(button::primary).on_press(Message::DialogCancel),
         ]
         .spacing(12)
@@ -92,10 +113,16 @@ impl App {
                     ),
                     field(
                         "Shell (optional)",
-                        text_input(&format!("default: {default_shell}"), shell)
-                            .on_input(Message::DialogShell)
-                            .on_submit(Message::DialogSubmit)
-                            .padding(6),
+                        row![
+                            text_input(&format!("default: {default_shell}"), shell)
+                                .on_input(Message::DialogShell)
+                                .on_submit(Message::DialogSubmit)
+                                .padding(6),
+                            // Empty means "the default", so nothing is shown as picked.
+                            self.shell_picker(shell, "", |o| Message::DialogShell(o.command)),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
                     ),
                 ]
                 .spacing(12);
@@ -109,11 +136,13 @@ impl App {
                 let tabs = s.tabs_of(*p).count();
                 let terms: usize = s.tabs_of(*p).map(|t| t.layout.panes().len()).sum();
                 let tasks = s.tasks_of(*p).count();
+                let unsaved: usize = s.tabs_of(*p).map(|t| self.unsaved_in(t.id)).sum();
                 column![
                     text(format!("Delete project “{name}”?")).size(18).font(BOLD),
                     text(format!(
-                        "This closes {terms} terminal(s) in {tabs} tab(s) and deletes {tasks} task(s) and all saved \
-                         scrollback. The directory on disk is not touched. This cannot be undone."
+                        "This closes {terms} terminal(s) in {tabs} session(s) and deletes {tasks} task(s) and all saved \
+                         scrollback. The directory on disk is not touched. This cannot be undone.{}",
+                        unsaved_note(unsaved)
                     ))
                     .size(13),
                     actions("Delete project", true),
@@ -123,25 +152,140 @@ impl App {
             }
             Dialog::ConfirmDeleteTab(t) => {
                 let tab = s.tab(*t);
-                let name = tab.map(|t| t.title.as_str()).unwrap_or("tab");
+                let name = tab.map(|t| t.title.as_str()).unwrap_or("session");
                 let terms = tab.map(|t| t.layout.panes().len()).unwrap_or(0);
                 let linked = s.tasks.iter().filter(|x| x.tab == Some(*t)).count();
                 column![
-                    text(format!("Delete tab “{name}”?")).size(18).font(BOLD),
+                    text(format!("Delete session “{name}”?")).size(18).font(BOLD),
                     text(format!(
                         "This closes {terms} terminal(s) and their saved scrollback. {linked} linked task(s) are kept \
-                         and unlinked."
+                         and unlinked.{}",
+                        unsaved_note(self.unsaved_in(*t))
                     ))
                     .size(13),
-                    actions("Delete tab", true),
+                    actions("Delete session", true),
                 ]
                 .spacing(14)
                 .into()
             }
-            Dialog::CodexTrust(handle) => return codex_window(handle, self.prefs.font_size),
+            Dialog::ConfirmQuit { running, unsaved, dont_ask } => {
+                let mut col = column![text("Quit Terminal Rooster?").size(18).font(BOLD)].spacing(12);
+                if !unsaved.is_empty() {
+                    let n = unsaved.len();
+                    let list = Column::with_children(
+                        unsaved.iter().map(|f| row![text("•").size(13), text(f).size(13)].spacing(8).into()),
+                    )
+                    .spacing(4);
+                    col = col
+                        .push(
+                            text(if n == 1 {
+                                "A file has unsaved changes. Quitting loses them.".to_owned()
+                            } else {
+                                format!("{n} files have unsaved changes. Quitting loses them.")
+                            })
+                            .size(13),
+                        )
+                        .push(container(scrollable(list)).max_height(200));
+                }
+                if !running.is_empty() {
+                    let n = running.len();
+                    let list = Column::with_children(running.iter().map(|r| {
+                        row![
+                            text("•").size(13),
+                            column![text(&r.programs).size(13), muted_text(&r.place)].spacing(1).width(Length::Fill),
+                        ]
+                        .spacing(8)
+                        .into()
+                    }))
+                    .spacing(6);
+                    col = col
+                        .push(
+                            text(if n == 1 {
+                                "A terminal is still running a program. Quitting stops it.".to_owned()
+                            } else {
+                                format!("{n} terminals are still running programs. Quitting stops them.")
+                            })
+                            .size(13),
+                        )
+                        .push(container(scrollable(list)).max_height(320));
+                    if running.iter().any(|r| r.agent) {
+                        col = col.push(muted_text(
+                            "Coding agents come back in the same conversation when Terminal Rooster starts again, but \
+                             a reply they are writing now is cut off.",
+                        ));
+                    }
+                    // Unsaved files are asked about either way.
+                    col = col.push(
+                        checkbox(*dont_ask)
+                            .label("Don't ask again about running programs (Settings → Notifications)")
+                            .on_toggle(Message::DialogDontAsk)
+                            .size(14)
+                            .text_size(12),
+                    );
+                }
+                col.push(actions("Quit", true)).into()
+            }
+            Dialog::SaveConflict { doc, name } => column![
+                text(format!("{name} changed on disk")).size(18).font(BOLD),
+                text(
+                    "It was changed outside Terminal Rooster since you opened or saved it, maybe by an agent. \
+                     Overwrite replaces that version with yours; Reload shows it and drops your changes (undo \
+                     brings them back).",
+                )
+                .size(13),
+                row![
+                    space::horizontal(),
+                    button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text("Reload"))
+                        .padding([6, 14])
+                        .style(button::secondary)
+                        .on_press(Message::Editor(EditorMsg::Reload(*doc))),
+                    button(text("Overwrite")).padding([6, 14]).style(button::danger).on_press(Message::DialogSubmit),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::CloseFile { doc, name, editor: Some(editor) } => column![
+                text(format!("Close {name}?")).size(18).font(BOLD),
+                text(format!("{editor} still has it open. Closing ends {editor}; changes not saved in it are lost."))
+                    .size(13),
+                row![
+                    space::horizontal(),
+                    button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text(format!("End {editor}")))
+                        .padding([6, 14])
+                        .style(button::danger)
+                        .on_press(Message::Editor(EditorMsg::Discard(*doc))),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::CloseFile { doc, name, editor: None } => column![
+                text(format!("Save the changes to {name}?")).size(18).font(BOLD),
+                text("If you don't save them, they are lost.").size(13),
+                row![
+                    space::horizontal(),
+                    button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text("Don't save"))
+                        .padding([6, 14])
+                        .style(button::danger)
+                        .on_press(Message::Editor(EditorMsg::Discard(*doc))),
+                    button(text("Save")).padding([6, 14]).style(button::primary).on_press(Message::DialogSubmit),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::CodexTrust(handle) => {
+                return codex_window(handle, &self.keymap, &self.keyboard_focus, self.prefs.font_size);
+            }
+            Dialog::Worktree(form) => self.view_worktree(form),
+            Dialog::RemoveWorktree(form) => self.view_remove(form),
             Dialog::CodexHook => column![
                 text("Track Codex sessions?").size(18).font(BOLD),
-                text("Add a small hook to Codex so TermRoost always resumes the right conversation in each terminal.",)
+                text("Add a small hook to Codex so Terminal Rooster always resumes the right conversation in each terminal.",)
                     .size(13),
                 muted_text("You can change this later in Settings."),
                 row![
@@ -153,6 +297,44 @@ impl App {
             ]
             .spacing(12)
             .into(),
+            Dialog::Renamed(renamed) => {
+                let mut body = column![text("TermRoost is now Terminal Rooster").size(18).font(BOLD)].spacing(12);
+                if let Some(from) = &renamed.moved_from {
+                    body = body.push(
+                        text(format!(
+                            "Your projects, sessions, tasks, scrollback and settings were moved from {} to {}.",
+                            from.display(),
+                            self.core.data_dir().display()
+                        ))
+                        .size(13),
+                    );
+                }
+                let buttons = if renamed.codex_hook_updated {
+                    body = body
+                        .push(
+                            text(
+                                "The Codex hook now reports to the new folder. Codex only runs hooks you trust, so \
+                                 trust it again: type /hooks in the Codex window that opens.",
+                            )
+                            .size(13),
+                        )
+                        .push(muted_text("You can also do this later in Settings → Integrations."));
+                    row![
+                        space::horizontal(),
+                        button(text("Later")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                        button(text("Trust in Codex…"))
+                            .padding([6, 14])
+                            .style(button::primary)
+                            .on_press(Message::DialogSubmit),
+                    ]
+                } else {
+                    row![
+                        space::horizontal(),
+                        button(text("OK")).padding([6, 14]).style(button::primary).on_press(Message::DialogSubmit),
+                    ]
+                };
+                body.push(buttons.spacing(8)).into()
+            }
             Dialog::Pane { pane, resume, args } => {
                 let agent = s.pane(*pane).and_then(|p| p.agent.as_ref());
                 let status: Element<'_, Message> = match agent {
@@ -193,7 +375,7 @@ impl App {
                     start,
                     muted_text(
                         "Claude Code, Codex and Grok are detected automatically, also when you start them yourself, \
-                         and TermRoost follows the session they are in (including /clear). After a restart each \
+                         and Terminal Rooster follows the session they are in (including /clear). After a restart each \
                          terminal resumes its own conversation, not just the most recent one.",
                     ),
                     field(
@@ -209,6 +391,8 @@ impl App {
                 .into()
             }
         };
-        modal(container(content).width(Length::Fill).align_x(Alignment::Start).into())
+        // The worktree list needs room for a path and its buttons.
+        let width = if matches!(dialog, Dialog::Worktree(_)) { 600.0 } else { 480.0 };
+        modal(container(content).width(Length::Fill).align_x(Alignment::Start).into(), width)
     }
 }

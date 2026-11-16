@@ -1,4 +1,4 @@
-//! Plain data types describing everything TermRoost persists.
+//! Plain data types describing everything TerminalRooster persists.
 //!
 //! These are the read model handed to a GUI via [`crate::Core::state`]. They
 //! contain no terminal or database handles, so any front end can render them.
@@ -42,6 +42,10 @@ id_type!(
     /// Identifier of a [`Task`].
     TaskId
 );
+id_type!(
+    /// Identifier of a [`ProjectGroup`].
+    GroupId
+);
 
 /// A project: a named working directory that owns tabs and tasks.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -54,6 +58,20 @@ pub struct Project {
     pub sort_order: i64,
     /// The tab shown when this project is selected.
     pub active_tab: Option<TabId>,
+    /// The group the project is listed in.
+    pub group: Option<GroupId>,
+    pub created_at: i64,
+}
+
+/// Projects listed together under a name. A group's projects are next to each
+/// other in [`AppState::projects`], and the group is where they are. It has at
+/// least one: it goes away with its last.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProjectGroup {
+    pub id: GroupId,
+    pub name: String,
+    /// The list shows the group without its projects.
+    pub collapsed: bool,
     pub created_at: i64,
 }
 
@@ -81,6 +99,10 @@ pub struct Pane {
     pub resume_command: Option<String>,
     /// Coding agent launched in this pane, with its session id once known.
     pub agent: Option<AgentSession>,
+    /// Directory the shell was last in, as the shell reported it. The shell
+    /// starts here again when the pane is restored; `None` means the tab's
+    /// working directory.
+    pub cwd: Option<PathBuf>,
     pub created_at: i64,
 }
 
@@ -108,19 +130,24 @@ pub struct Settings {
     pub saved_scrollback_lines: usize,
     /// Lines of scrollback kept in memory per terminal.
     pub scrollback_lines: usize,
+    /// Start bash and PowerShell with TerminalRooster's integration, which
+    /// reports each command's exit status (see `session::integration`).
+    pub shell_integration: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { default_shell: None, saved_scrollback_lines: 5_000, scrollback_lines: 10_000 }
+        Self { default_shell: None, saved_scrollback_lines: 5_000, scrollback_lines: 10_000, shell_integration: true }
     }
 }
 
 /// Everything the GUI needs to draw the project/tab/task lists.
 #[derive(Clone, Debug, Default)]
 pub struct AppState {
-    /// Sorted by `sort_order`.
+    /// Sorted by `sort_order`, except that a group's projects stay together.
     pub projects: Vec<Project>,
+    /// Sorted by id; a group's place in the list is that of its projects.
+    pub groups: Vec<ProjectGroup>,
     /// Sorted by project, then `sort_order`.
     pub tabs: Vec<Tab>,
     pub panes: HashMap<PaneId, Pane>,
@@ -139,6 +166,19 @@ impl AppState {
 
     pub(crate) fn project_mut(&mut self, id: ProjectId) -> Option<&mut Project> {
         self.projects.iter_mut().find(|p| p.id == id)
+    }
+
+    pub fn group(&self, id: GroupId) -> Option<&ProjectGroup> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
+    pub(crate) fn group_mut(&mut self, id: GroupId) -> Option<&mut ProjectGroup> {
+        self.groups.iter_mut().find(|g| g.id == id)
+    }
+
+    /// Projects of a group in display order.
+    pub fn projects_in(&self, group: GroupId) -> impl Iterator<Item = &Project> {
+        self.projects.iter().filter(move |p| p.group == Some(group))
     }
 
     pub fn tab(&self, id: TabId) -> Option<&Tab> {
@@ -195,7 +235,19 @@ impl AppState {
     }
 
     pub(crate) fn sort(&mut self) {
-        self.projects.sort_by_key(|p| (p.sort_order, p.id));
+        // A group's projects follow its first one, even if saved out of order.
+        let mut first: HashMap<GroupId, (i64, ProjectId)> = HashMap::new();
+        for p in &self.projects {
+            if let Some(g) = p.group {
+                let key = (p.sort_order, p.id);
+                first.entry(g).and_modify(|k| *k = (*k).min(key)).or_insert(key);
+            }
+        }
+        self.projects.sort_by_key(|p| {
+            let own = (p.sort_order, p.id);
+            (p.group.and_then(|g| first.get(&g).copied()).unwrap_or(own), own)
+        });
+        self.groups.sort_by_key(|g| g.id);
         let order: HashMap<ProjectId, usize> = self.projects.iter().enumerate().map(|(i, p)| (p.id, i)).collect();
         let rank = |p: &ProjectId| order.get(p).copied().unwrap_or(usize::MAX);
         self.tabs.sort_by_key(|t| (rank(&t.project), t.sort_order, t.id));

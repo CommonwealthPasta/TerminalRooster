@@ -58,6 +58,18 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     "#,
+    // 2: the directory each terminal's shell was last in
+    "ALTER TABLE panes ADD COLUMN cwd TEXT;",
+    // 3: project groups
+    r#"
+    CREATE TABLE project_groups (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT NOT NULL,
+        collapsed  INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+    );
+    ALTER TABLE projects ADD COLUMN group_id INTEGER REFERENCES project_groups(id) ON DELETE SET NULL;
+    "#,
 ];
 
 /// Applies connection pragmas used by every connection.
@@ -84,4 +96,27 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 
 pub fn version() -> usize {
     MIGRATIONS.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panes_of_a_version_1_database_get_no_directory() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, working_dir, created_at) VALUES (1, 'p', '/p', 0);
+             INSERT INTO tabs (id, project_id, title, layout, created_at) VALUES (2, 1, 't', '{}', 0);
+             INSERT INTO panes (id, tab_id, created_at) VALUES (3, 2, 0);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let cwd: Option<String> = conn.query_row("SELECT cwd FROM panes WHERE id = 3", [], |r| r.get(0)).unwrap();
+        assert_eq!(cwd, None);
+        let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(v as usize, version());
+    }
 }

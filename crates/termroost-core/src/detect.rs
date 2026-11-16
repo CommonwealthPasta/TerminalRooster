@@ -16,7 +16,7 @@
 //!
 //! The detector walks each terminal's process tree (the shell and everything
 //! below it) and looks every process up in those records. So agents are found
-//! whether they were started from TermRoost or typed by hand, and a new
+//! whether they were started from TerminalRooster or typed by hand, and a new
 //! session (`/clear`, `/new`, `/resume …`) is picked up on the next scan.
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -265,6 +265,186 @@ impl Detector {
     }
 }
 
+/// A program running in a terminal, below its shell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Program {
+    /// The process name without `.exe` (`node`), or the agent's name (`Claude Code`).
+    pub name: String,
+    /// The coding agent this is.
+    pub agent: Option<AgentKind>,
+    /// The coding agent that runs it: one of the agent's commands, such as a
+    /// dev server it left running in the background.
+    pub started_by: Option<AgentKind>,
+}
+
+impl Detector {
+    /// What runs below each shell; see [`Procs::programs_below`].
+    pub(crate) fn programs(&mut self, shells: &[(PaneId, u32)]) -> HashMap<PaneId, Vec<Program>> {
+        let Some(sys) = self.sys.as_mut() else { return HashMap::new() };
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().without_tasks().with_cmd(UpdateKind::OnlyIfNotSet),
+        );
+        self.programs_seen(shells)
+    }
+
+    /// Like [`Self::programs`], from the processes as the last refresh saw them.
+    pub(crate) fn programs_seen(&self, shells: &[(PaneId, u32)]) -> HashMap<PaneId, Vec<Program>> {
+        let Some(sys) = self.sys.as_ref() else { return HashMap::new() };
+        let procs = Procs::below(sys, shells.iter().map(|(_, shell)| *shell));
+        shells.iter().map(|(pane, shell)| (*pane, procs.programs_below(*shell))).collect()
+    }
+}
+
+/// Helpers nobody started on purpose: console hosts, and the processes
+/// wsl.exe always keeps (what runs inside WSL can't be seen).
+const HELPERS: &[&str] = &["conhost", "openconsole", "wslhost", "wslrelay"];
+
+/// What the walks below need to know about a process.
+#[derive(Debug)]
+struct Proc {
+    /// Lowercased name without extension (`bash`).
+    stem: String,
+    /// The name as shown, without `.exe` (`PING`).
+    shown: String,
+    /// The command line after the program.
+    args: Vec<std::ffi::OsString>,
+    agent: Option<AgentKind>,
+}
+
+/// The processes below some shells, with who started whom.
+#[derive(Debug, Default)]
+struct Procs {
+    procs: HashMap<u32, Proc>,
+    children: HashMap<u32, Vec<u32>>,
+}
+
+impl Procs {
+    /// The given processes and everything below them.
+    fn below(sys: &System, roots: impl IntoIterator<Item = u32>) -> Procs {
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (pid, kids) in children_of(sys) {
+            children.insert(pid.as_u32(), kids.iter().map(|k| k.as_u32()).collect());
+        }
+        for kids in children.values_mut() {
+            kids.sort_unstable();
+        }
+        let mut procs = HashMap::new();
+        let mut queue: Vec<u32> = roots.into_iter().collect();
+        while let Some(pid) = queue.pop() {
+            if procs.contains_key(&pid) {
+                continue;
+            }
+            let Some(p) = sys.process(Pid::from_u32(pid)) else { continue };
+            let proc = Proc {
+                stem: stem(p.name()),
+                shown: without_exe(&p.name().to_string_lossy()).to_owned(),
+                args: p.cmd().get(1..).unwrap_or_default().to_vec(),
+                agent: AgentKind::ALL.into_iter().find(|k| runs(p, k.as_str())),
+            };
+            procs.insert(pid, proc);
+            queue.extend(children.get(&pid).into_iter().flatten().copied());
+        }
+        Procs { procs, children }
+    }
+
+    fn kids(&self, pid: u32) -> impl Iterator<Item = u32> + '_ {
+        self.children.get(&pid).into_iter().flatten().copied()
+    }
+
+    /// What runs below a terminal's shell: the programs the shell started,
+    /// not their own children, except the commands of coding agents (see
+    /// [`Self::agent_commands`]). Shell forks (MSYS bash starts programs from
+    /// a copy of itself) are looked through.
+    fn programs_below(&self, shell: u32) -> Vec<Program> {
+        let Some(shell_name) = self.procs.get(&shell).map(|p| p.stem.as_str()) else { return Vec::new() };
+        let mut out: Vec<Program> = Vec::new();
+        let mut add = |program: Program| {
+            if !out.contains(&program) {
+                out.push(program);
+            }
+        };
+        let mut seen = HashSet::from([shell]);
+        let mut queue: VecDeque<u32> = self.kids(shell).collect();
+        while let Some(pid) = queue.pop_front() {
+            if !seen.insert(pid) {
+                continue;
+            }
+            let Some(p) = self.procs.get(&pid) else { continue };
+            if p.stem == shell_name {
+                queue.extend(self.kids(pid));
+                continue;
+            }
+            if HELPERS.contains(&p.stem.as_str()) {
+                continue;
+            }
+            match p.agent {
+                Some(kind) => {
+                    add(Program { name: kind.label().to_owned(), agent: Some(kind), started_by: None });
+                    for name in self.agent_commands(pid) {
+                        add(Program { name, agent: None, started_by: Some(kind) });
+                    }
+                }
+                None => add(Program { name: p.shown.clone(), agent: None, started_by: None }),
+            }
+        }
+        out
+    }
+
+    /// The commands a coding agent runs, by the programs they run. Agents
+    /// run commands through a shell (`bash -c …`, `cmd /c …`), in the
+    /// foreground or left in the background; what they start directly is
+    /// their own machinery (language servers, MCP servers) and is left out.
+    /// A command whose program can't be seen (a builtin, or an MSYS tool,
+    /// which leaves the Windows process tree) is named by its shell.
+    fn agent_commands(&self, agent: u32) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen = HashSet::from([agent]);
+        for command in self.kids(agent) {
+            let Some(p) = self.procs.get(&command) else { continue };
+            if !SHELLS.contains(&p.stem.as_str()) || interactive_shell(&p.stem, &p.args) {
+                continue;
+            }
+            let mut shell = &p.shown;
+            let mut found = Vec::new();
+            let mut queue = VecDeque::from([command]);
+            while let Some(pid) = queue.pop_front() {
+                if !seen.insert(pid) {
+                    continue;
+                }
+                let Some(p) = self.procs.get(&pid) else { continue };
+                let stem = p.stem.as_str();
+                if SHELLS.contains(&stem) || LAUNCHERS.contains(&stem) {
+                    if SHELLS.contains(&stem) {
+                        shell = &p.shown;
+                    }
+                    queue.extend(self.kids(pid));
+                } else if !HELPERS.contains(&stem) {
+                    found.push(p.agent.map(|k| k.label().to_owned()).unwrap_or_else(|| p.shown.clone()));
+                }
+            }
+            if found.is_empty() {
+                found.push(shell.clone());
+            }
+            for name in found {
+                if !out.contains(&name) {
+                    out.push(name);
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A process name without a Windows `.exe` (any case): `PING.EXE` -> `PING`.
+fn without_exe(name: &str) -> &str {
+    match name.len().checked_sub(4).and_then(|i| Some((i, name.get(i..)?))) {
+        Some((i, ext)) if ext.eq_ignore_ascii_case(".exe") => &name[..i],
+        _ => name,
+    }
+}
+
 /// Which terminal a hook report belongs to: the only Codex in that folder, or
 /// the one that most recently submitted a prompt (or started) before the
 /// event. The pane id the hook saw is used only to break a tie.
@@ -294,6 +474,215 @@ fn attribute(
             }
         }
     }
+}
+
+/// Shells. The terminal's own shell may have any arguments; a shell started
+/// inside it counts as idle only without a script or command to run (`bash`,
+/// not `bash build.sh` or `pwsh -Command …`).
+pub(crate) const SHELLS: &[&str] =
+    &["bash", "sh", "dash", "zsh", "fish", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "pwsh", "powershell", "cmd"];
+
+/// Programs that only start a shell and wait for it: MSYS2's launcher runs
+/// `env … bash --login`, and console hosts.
+const LAUNCHERS: &[&str] = &["env", "conhost", "openconsole"];
+
+/// Whether a nested shell was started to sit at a prompt: only flags, and
+/// none that runs a command or script. Unknown flag values count as busy.
+fn interactive_shell(name: &str, args: &[std::ffi::OsString]) -> bool {
+    args.iter().all(|a| {
+        let a = a.to_string_lossy().to_lowercase();
+        match name {
+            "cmd" => a.starts_with('/') && !matches!(a.as_str(), "/c" | "/k" | "/r"),
+            // PowerShell accepts any unambiguous prefix of a parameter name.
+            "pwsh" | "powershell" => a.strip_prefix('-').is_some_and(|f| {
+                let runs = ["command", "file", "encodedcommand", "commandwithargs"].iter().any(|p| p.starts_with(f));
+                !f.is_empty() && !runs && f != "ec" && f != "cwa"
+            }),
+            // `-c` runs a command, also inside a cluster such as `-lc`.
+            _ => a.starts_with("--") || a.strip_prefix('-').is_some_and(|f| !f.is_empty() && !f.contains('c')),
+        }
+    })
+}
+
+/// The terminals (`(pane, shell pid)`) with only an idle shell in them, so
+/// restarting them loses no work. Anything unknown counts as busy, such as
+/// WSL, whose programs Windows cannot see.
+pub(crate) fn idle_shells(shells: &[(PaneId, u32)]) -> HashSet<PaneId> {
+    if shells.is_empty() {
+        return HashSet::new();
+    }
+    let Ok(mut sys) = System::new() else { return HashSet::new() };
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
+    let children = children_of(&sys);
+    let trees: Vec<(PaneId, Vec<Pid>)> = shells.iter().map(|(pane, shell)| (*pane, tree(&children, *shell))).collect();
+    // Command lines are slow to read on Windows: only for these processes.
+    let pids: Vec<Pid> = trees.iter().flat_map(|(_, t)| t.iter().copied()).collect();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        false,
+        ProcessRefreshKind::nothing().without_tasks().with_cmd(UpdateKind::Always),
+    );
+    let idle = |tree: &[Pid]| {
+        tree.iter().enumerate().all(|(i, pid)| {
+            let Some(p) = sys.process(*pid) else { return false };
+            let name = stem(p.name());
+            let shell = SHELLS.contains(&name.as_str());
+            let args = p.cmd().get(1..).unwrap_or_default();
+            LAUNCHERS.contains(&name.as_str()) || (shell && (i == 0 || interactive_shell(&name, args)))
+        })
+    };
+    trees.iter().filter(|(_, tree)| idle(tree)).map(|(pane, _)| *pane).collect()
+}
+
+/// Each process's children.
+fn children_of(sys: &System) -> HashMap<Pid, Vec<Pid>> {
+    let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+    for (pid, p) in sys.processes() {
+        if let Some(parent) = p.parent() {
+            children.entry(parent).or_default().push(*pid);
+        }
+    }
+    children
+}
+
+/// A process and everything below it, without looping on reused process ids.
+fn tree(children: &HashMap<Pid, Vec<Pid>>, root: u32) -> Vec<Pid> {
+    let mut seen = vec![Pid::from_u32(root)];
+    let mut i = 0;
+    while let Some(pid) = seen.get(i).copied() {
+        for kid in children.get(&pid).into_iter().flatten() {
+            if !seen.contains(kid) {
+                seen.push(*kid);
+            }
+        }
+        i += 1;
+    }
+    seen
+}
+
+/// The given shells and every process below them that is running now.
+pub(crate) fn process_trees(shells: &[u32]) -> Vec<u32> {
+    let Ok(mut sys) = System::new() else { return shells.to_vec() };
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
+    let children = children_of(&sys);
+    let mut out: Vec<u32> = shells.iter().flat_map(|s| tree(&children, *s)).map(|p| p.as_u32()).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Waits until none of `pids` runs any more, for at most `timeout`; returns
+/// whether they all exited. A process id taken over by a new process counts
+/// as exited.
+pub(crate) fn wait_for_exit(pids: &[u32], timeout: Duration) -> bool {
+    let Ok(mut sys) = System::new() else { return false };
+    let pids: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(*p)).collect();
+    let refresh = |sys: &mut System| {
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pids),
+            true,
+            ProcessRefreshKind::nothing().without_tasks(),
+        );
+    };
+    refresh(&mut sys);
+    let started: HashMap<Pid, u64> = pids.iter().filter_map(|p| Some((*p, sys.process(*p)?.start_time()))).collect();
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let alive = started.iter().any(|(pid, start)| sys.process(*pid).is_some_and(|p| p.start_time() == *start));
+        if !alive {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        refresh(&mut sys);
+    }
+}
+
+/// A process working in a folder, see [`processes_in`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderProcess {
+    pub pid: u32,
+    /// Its program's file name (`cmd.exe`).
+    pub name: String,
+    start: u64,
+}
+
+/// The processes whose working directory is in `dir` or below, or whose
+/// program is: Windows cannot delete a folder while they run. Leaves out
+/// this process, its own children, and the processes of `shells` (the
+/// terminals' shells, which are stopped another way) and below them.
+pub fn processes_in(dir: &Path, shells: &[u32]) -> Vec<FolderProcess> {
+    let Ok(mut sys) = System::new() else { return Vec::new() };
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().without_tasks().with_cwd(UpdateKind::Always).with_exe(UpdateKind::Always),
+    );
+    let children = children_of(&sys);
+    let skip: HashSet<Pid> = shells.iter().flat_map(|s| tree(&children, *s)).collect();
+    let me = Pid::from_u32(std::process::id());
+    let within = |path: Option<&Path>| path.is_some_and(|p| crate::git::is_within(p, dir));
+    let mut found: Vec<FolderProcess> = sys
+        .processes()
+        .iter()
+        .filter(|(pid, p)| **pid != me && p.parent() != Some(me) && !skip.contains(pid))
+        .filter(|(_, p)| within(p.cwd()) || within(p.exe()))
+        .map(|(pid, p)| FolderProcess {
+            pid: pid.as_u32(),
+            name: p.name().to_string_lossy().into_owned(),
+            start: p.start_time(),
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
+    found
+}
+
+/// Ends the given processes, except ones that exited meanwhile (their id
+/// may belong to another process by now). Returns the ids of those ended,
+/// to wait for (see [`crate::LeftDir::wait`]).
+pub fn end_processes(procs: &[FolderProcess]) -> Vec<u32> {
+    let Ok(mut sys) = System::new() else { return Vec::new() };
+    let pids: Vec<Pid> = procs.iter().map(|p| Pid::from_u32(p.pid)).collect();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        true,
+        ProcessRefreshKind::nothing().without_tasks(),
+    );
+    procs
+        .iter()
+        .filter(|f| sys.process(Pid::from_u32(f.pid)).is_some_and(|p| p.start_time() == f.start && p.kill()))
+        .map(|f| f.pid)
+        .collect()
+}
+
+/// Waits up to `grace` for the process `pid` (which `process` is a handle
+/// to) to exit. If it does not, ends it and every process below it, and
+/// returns true.
+#[cfg(windows)]
+pub(crate) fn end_unless_exited(pid: u32, process: &std::os::windows::io::OwnedHandle, grace: Duration) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+
+    let handle = process.as_raw_handle();
+    let millis = u32::try_from(grace.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: `process` is an open process handle.
+    if unsafe { WaitForSingleObject(handle, millis) } != WAIT_TIMEOUT {
+        return false;
+    }
+    // While the handle is open, `pid` is still this process.
+    if let Ok(mut sys) = System::new() {
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
+        let below = tree(&children_of(&sys), pid);
+        for p in below.iter().skip(1).filter_map(|p| sys.process(*p)) {
+            p.kill();
+        }
+    }
+    // SAFETY: as above.
+    unsafe { TerminateProcess(handle, 1) };
+    true
 }
 
 /// Lowercased file stem of a program path (`/usr/bin/Codex.exe` -> `codex`).
@@ -552,6 +941,93 @@ fn newest_main_thread(codex_home: &Path, ids: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_shells_with_a_command_are_busy() {
+        let idle = |name: &str, args: &[&str]| {
+            let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+            interactive_shell(name, &args)
+        };
+        assert!(idle("bash", &[]));
+        assert!(idle("bash", &["-i", "-l"]));
+        assert!(idle("bash", &["--login"]));
+        assert!(!idle("bash", &["build.sh"]));
+        assert!(!idle("bash", &["-lc", "make"]));
+        assert!(!idle("sh", &["-"]));
+        assert!(idle("pwsh", &["-NoLogo", "-NoProfile"]));
+        assert!(!idle("pwsh", &["-Comm", "Get-Date"]));
+        assert!(!idle("pwsh", &["-f", "x.ps1"]));
+        assert!(!idle("powershell", &["-EC", "AAAA"]));
+        assert!(!idle("powershell", &["Get-Date"]));
+        assert!(idle("cmd", &["/d", "/q"]));
+        assert!(!idle("cmd", &["/C", "dir"]));
+        assert!(!idle("cmd", &["/k", "vcvars.bat"]));
+    }
+
+    /// A process table from `(pid, parent, command line, agent)`.
+    fn procs(entries: &[(u32, u32, &str, Option<AgentKind>)]) -> Procs {
+        let mut t = Procs::default();
+        for (pid, parent, line, agent) in entries {
+            let mut words = line.split_whitespace();
+            let program = words.next().unwrap();
+            let proc = Proc {
+                stem: stem(program.as_ref()),
+                shown: without_exe(program).to_owned(),
+                args: words.map(Into::into).collect(),
+                agent: *agent,
+            };
+            t.procs.insert(*pid, proc);
+            t.children.entry(*parent).or_default().push(*pid);
+        }
+        t
+    }
+
+    /// Laid out as seen on Windows 11 with Git Bash and Claude Code (2026-11-16).
+    #[test]
+    fn programs_below_a_shell() {
+        use AgentKind::Claude;
+        let t = procs(&[
+            // The terminal's Git Bash, and the copy of itself it starts programs from.
+            (10, 1, "bash.exe -i -l", None),
+            (11, 10, "bash.exe -i -l", None),
+            (12, 11, "conhost.exe 0x4", None),
+            (13, 11, "node.exe vite", None),
+            (14, 13, "node.exe esbuild", None),
+            (20, 11, "claude.exe", Some(Claude)),
+            // Claude's own machinery, which it starts directly.
+            (21, 20, "rustup.exe", None),
+            (22, 21, "rust-analyzer.exe", None),
+            (23, 20, "node.exe mcp-server.js", None),
+            (24, 20, "bash.exe -i", None),
+            // Its commands: a dev server left running, a PowerShell command,
+            // and an MSYS tool whose process has left the tree.
+            (30, 20, "bash.exe -c npm run dev", None),
+            (31, 30, "bash.exe -c npm run dev", None),
+            (32, 31, "node.exe vite", None),
+            (40, 20, "cmd.exe /d /s /c powershell", None),
+            (41, 40, "conhost.exe 0x4", None),
+            (42, 40, "powershell.exe -NoProfile -Command Start-Sleep 9", None),
+            (50, 20, "bash.exe -c sleep 90", None),
+            (51, 50, "bash.exe -c sleep 90", None),
+        ]);
+        let p = |name: &str, agent, started_by| Program { name: name.into(), agent, started_by };
+        assert_eq!(
+            t.programs_below(10),
+            [
+                p("node", None, None),
+                p("Claude Code", Some(Claude), None),
+                p("node", None, Some(Claude)),
+                p("powershell", None, Some(Claude)),
+                p("bash", None, Some(Claude)),
+            ]
+        );
+        let idle = procs(&[(10, 1, "bash.exe -i", None), (11, 10, "bash.exe -i", None), (12, 11, "conhost.exe", None)]);
+        assert_eq!(idle.programs_below(10), []);
+        assert_eq!(t.programs_below(99), [], "a shell that is gone");
+        // Process ids reused into a loop.
+        let looped = procs(&[(10, 11, "bash.exe -i", None), (11, 10, "bash.exe -i", None)]);
+        assert_eq!(looped.programs_below(10), []);
+    }
 
     fn homes(dir: &Path) -> AgentHomes {
         AgentHomes { claude: dir.join("claude"), codex: dir.join("codex"), grok: dir.join("grok") }
