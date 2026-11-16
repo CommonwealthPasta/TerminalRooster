@@ -112,6 +112,8 @@ pub enum Dialog {
     CodexHook,
     /// A small Codex window for trusting the hook (`/hooks`).
     CodexTrust(termroost_core::TerminalHandle),
+    /// Says once what was carried over from TermRoost, the app's old name.
+    Renamed(termroost_core::Renamed),
 }
 
 /// State of the settings page while it is open.
@@ -292,6 +294,10 @@ impl App {
         app.codex_hook = app.core.codex_hook_status();
         if app.codex_hook.codex_found && app.codex_hook.installed_in.is_none() && !app.prefs.codex_hook_asked {
             app.dialog = Some(Dialog::CodexHook);
+        }
+        let renamed = app.core.renamed();
+        if renamed.moved_from.is_some() || renamed.codex_hook_updated {
+            app.dialog = Some(Dialog::Renamed(renamed.clone()));
         }
         let task = Task::batch([app.focus_active(), iced::system::theme().map(Message::SystemTheme)]);
         (app, task)
@@ -1012,6 +1018,8 @@ impl App {
                 self.dialog = Some(Dialog::CodexTrust(h));
                 return self.update(Message::DialogCancel);
             }
+            Dialog::Renamed(renamed) if renamed.codex_hook_updated => return self.update(Message::TrustCodexHook),
+            Dialog::Renamed(_) => {}
         }
         self.focus_active()
     }

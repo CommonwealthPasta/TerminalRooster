@@ -49,6 +49,8 @@ Set `TERMINALROOSTER_DATA_DIR` to use another directory. Only one instance can r
 
 The first time TerminalRooster starts, it moves TermRoost's data folder (`~/.local/share/termroost`, or `%APPDATA%\termroost\data` on Windows) into the folder above. That includes projects, tabs, tasks, scrollback, settings, themes and logs. Files named `termroost.*` become `terminalrooster.*`. Close TermRoost first. While it is still running, TerminalRooster says so and does not start.
 
+If TermRoost added its Codex hook, TerminalRooster rewrites that hook to report to the new folder, and a dialog offers to open Codex so you can trust the changed hook (`/hooks`). On Linux, the hidden desktop entry and icons that a TermRoost build wrote under its old app id are removed.
+
 Environment variables changed from `TERMROOST_*` to `TERMINALROOSTER_*`, and the binary is now `terminalrooster`. TermRoost's own older name was *agentdeck*; its data is not moved any more.
 
 ## Themes

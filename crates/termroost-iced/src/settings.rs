@@ -319,7 +319,15 @@ impl App {
                     let at: chrono::DateTime<chrono::Local> = at.into();
                     (format!("Active · last report at {}.", at.format("%H:%M:%S")), vec![remove])
                 }
-                (true, None) => ("Added and trusted.".to_owned(), vec![remove]),
+                // The trust entry may be for an earlier version of the hook (e.g.
+                // TermRoost's), so offer to trust it again until a report shows it runs.
+                (true, None) => (
+                    "Added and trusted.".to_owned(),
+                    vec![
+                        small("Trust again…").style(button::secondary).on_press(Message::TrustCodexHook).into(),
+                        remove,
+                    ],
+                ),
                 (false, None) => (
                     "Added, but not trusted in Codex yet.".to_owned(),
                     vec![

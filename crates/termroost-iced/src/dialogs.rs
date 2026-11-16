@@ -153,6 +153,44 @@ impl App {
             ]
             .spacing(12)
             .into(),
+            Dialog::Renamed(renamed) => {
+                let mut body = column![text("TermRoost is now TerminalRooster").size(18).font(BOLD)].spacing(12);
+                if let Some(from) = &renamed.moved_from {
+                    body = body.push(
+                        text(format!(
+                            "Your projects, tabs, tasks, scrollback and settings were moved from {} to {}.",
+                            from.display(),
+                            self.core.data_dir().display()
+                        ))
+                        .size(13),
+                    );
+                }
+                let buttons = if renamed.codex_hook_updated {
+                    body = body
+                        .push(
+                            text(
+                                "The Codex hook now reports to the new folder. Codex only runs hooks you trust, so \
+                                 trust it again: type /hooks in the Codex window that opens.",
+                            )
+                            .size(13),
+                        )
+                        .push(muted_text("You can also do this later in Settings → Integrations."));
+                    row![
+                        space::horizontal(),
+                        button(text("Later")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                        button(text("Trust in Codex…"))
+                            .padding([6, 14])
+                            .style(button::primary)
+                            .on_press(Message::DialogSubmit),
+                    ]
+                } else {
+                    row![
+                        space::horizontal(),
+                        button(text("OK")).padding([6, 14]).style(button::primary).on_press(Message::DialogSubmit),
+                    ]
+                };
+                body.push(buttons.spacing(8)).into()
+            }
             Dialog::Pane { pane, resume, args } => {
                 let agent = s.pane(*pane).and_then(|p| p.agent.as_ref());
                 let status: Element<'_, Message> = match agent {
