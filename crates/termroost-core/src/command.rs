@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentKind;
+use crate::alert::Alert;
 use crate::detect::ObservedAgent;
 use crate::layout::{Axis, Layout};
 use crate::model::{PaneId, ProjectId, TabId, TaskId};
@@ -153,5 +154,11 @@ pub enum Event {
     AgentObserved {
         pane: PaneId,
         agent: Option<ObservedAgent>,
+    },
+    /// Something the user may want a notification for: a command failed, or
+    /// the coding agent in the terminal finished its turn.
+    Alert {
+        pane: PaneId,
+        alert: Alert,
     },
 }

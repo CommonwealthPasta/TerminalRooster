@@ -3359,6 +3359,7 @@ dependencies = [
  "async-channel",
  "chrono",
  "directories",
+ "polling",
  "rusqlite",
  "serde",
  "serde_json",

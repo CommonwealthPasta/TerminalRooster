@@ -14,6 +14,7 @@
 //! appear in this API.
 
 pub mod agent;
+pub mod alert;
 pub mod codex_hook;
 pub mod command;
 pub mod detect;
@@ -32,6 +33,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 pub use agent::{AgentKind, AgentSession};
+pub use alert::{AgentEvent, Alert};
 pub use codex_hook::CodexHookStatus;
 pub use command::{Command, Event, Outcome};
 pub use detect::{AgentHomes, ObservedAgent};
@@ -256,6 +258,9 @@ impl Core {
         if p.agent != new {
             p.agent = new;
             self.store.write(vec![StoreOp::UpsertPane(p.clone())]);
+        }
+        if let Some(h) = self.terminal(pane) {
+            h.set_agent(observed.map(|o| o.kind));
         }
     }
 
@@ -524,6 +529,7 @@ impl Core {
                 } else {
                     handle.write(format!("{line}\r"))
                 }
+                handle.set_agent(Some(kind));
                 let p = self.state.panes.get_mut(&pane).expect("checked");
                 p.agent = Some(session);
                 ops.push(StoreOp::UpsertPane(p.clone()));
@@ -533,6 +539,9 @@ impl Core {
                 let p = self.state.panes.get_mut(&pane).ok_or(Error::NotFound("pane"))?;
                 p.agent = None;
                 ops.push(StoreOp::UpsertPane(p.clone()));
+                if let Some(h) = self.terminal(pane) {
+                    h.set_agent(None);
+                }
                 Ok(Outcome::None)
             }
             C::RestartPane(pane) => {
@@ -717,6 +726,7 @@ impl Core {
                 .unwrap_or_default();
             handle.replay(&data, Some(&format!("restored session from {when}")));
         }
+        handle.set_agent(self.state.pane(pane).and_then(|p| p.agent.as_ref()).map(|a| a.kind));
         self.bg.sessions.lock().unwrap().insert(pane, handle.clone());
         self.start_process(pane, &handle, restored);
         handle
