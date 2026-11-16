@@ -50,6 +50,15 @@ pub enum Command {
         tab: TabId,
         working_dir: Option<PathBuf>,
     },
+    /// Moves a tab to another working directory (e.g. a new git worktree):
+    /// sets its directory and restarts its shells there, keeping their
+    /// scrollback. Terminals running a program or an agent are left alone.
+    /// Moving back to the project's directory makes the tab follow the
+    /// project again.
+    RelocateTab {
+        tab: TabId,
+        working_dir: PathBuf,
+    },
     DeleteTab(TabId),
     MoveTab {
         tab: TabId,
@@ -126,6 +135,11 @@ pub enum Outcome {
     Tab(TabId),
     Pane(PaneId),
     Task(TaskId),
+    /// A tab was relocated; this many of its terminals were busy and stayed
+    /// in the old directory.
+    Relocated {
+        left_running: usize,
+    },
 }
 
 /// Asynchronous notifications from the core.

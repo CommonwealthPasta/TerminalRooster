@@ -487,3 +487,78 @@ fn windows_shell_paths_and_arguments_keep_their_spaces() {
     let pane = only_pane(&core);
     wait_for_text(&mut core, pane, "spaced args-ok");
 }
+
+/// Moving a session (as after making a git worktree) restarts its idle shells
+/// in the new directory and leaves a terminal that runs a program alone.
+#[test]
+fn relocating_a_session_moves_idle_shells_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("app");
+    let moved = dir.path().join("moved-here");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::create_dir_all(&moved).unwrap();
+    // A plain interactive shell. The busy terminal runs a nested shell with a
+    // command and no child process, so only its command line shows it is busy.
+    // The typed commands print text that differs from the command line
+    // itself, so echoed input never matches.
+    let (shell, busy_line, show_dir) = if cfg!(windows) {
+        ("cmd.exe", "powershell -NoProfile -Command \"Write-Output ('busy'+'-now'); Start-Sleep 60\"", "echo [%CD%]")
+    } else {
+        ("sh", "sh -c 'echo bu\"\"sy-now; read x'", "echo \"[$PWD]\"")
+    };
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(shell.into()))).unwrap();
+    core.dispatch(Command::CreateProject { name: "p".into(), working_dir: project_dir.clone(), shell: None }).unwrap();
+    let tab = core.state().active_tab().unwrap().id;
+    let idle = only_pane(&core);
+    let Outcome::Pane(busy) = core.dispatch(Command::SplitPane { pane: idle, axis: Axis::Vertical }).unwrap() else {
+        panic!()
+    };
+    core.terminal(busy).unwrap().write(format!("{busy_line}\r"));
+    wait_for_text(&mut core, busy, "busy-now");
+    std::thread::sleep(Duration::from_millis(500));
+
+    let outcome = core.dispatch(Command::RelocateTab { tab, working_dir: moved.clone() }).unwrap();
+    assert_eq!(outcome, Outcome::Relocated { left_running: 1 });
+    assert_eq!(core.state().tab(tab).unwrap().working_dir.as_deref(), Some(moved.as_path()));
+    wait_for_text(&mut core, idle, "moved to");
+    std::thread::sleep(Duration::from_millis(500));
+    core.terminal(idle).unwrap().write(format!("{show_dir}\r"));
+    wait_for_text(&mut core, idle, "moved-here]");
+    assert!(!screen_text(&core, busy).contains("moved to"), "{}", screen_text(&core, busy));
+
+    // Back in the project's directory, the session follows the project again.
+    core.dispatch(Command::RelocateTab { tab, working_dir: project_dir }).unwrap();
+    assert_eq!(core.state().tab(tab).unwrap().working_dir, None);
+}
+
+/// Git Bash's `bin\bash.exe` runs the real bash as a child; an idle Git Bash
+/// must still count as idle when its session moves. Skipped without Git Bash.
+#[cfg(windows)]
+#[test]
+fn relocating_moves_an_idle_git_bash() {
+    use termroost_core::session::shell;
+    let shells = shell::detect_shells();
+    let Some(bash) = shells.iter().find(|o| o.name == "Git Bash" || o.name.contains("bash")) else {
+        eprintln!("no bash installed; skipping");
+        return;
+    };
+    eprintln!("using {}", bash.command);
+    let dir = tempfile::tempdir().unwrap();
+    let moved = dir.path().join("moved-here");
+    std::fs::create_dir_all(&moved).unwrap();
+    let mut core = open(dir.path());
+    core.dispatch(Command::SetDefaultShell(Some(bash.command.clone()))).unwrap();
+    core.dispatch(Command::CreateProject { name: "p".into(), working_dir: dir.path().into(), shell: None }).unwrap();
+    let tab = core.state().active_tab().unwrap().id;
+    let pane = only_pane(&core);
+    core.terminal(pane).unwrap().write("echo re\"\"ady\r");
+    wait_for_text(&mut core, pane, "ready");
+
+    let outcome = core.dispatch(Command::RelocateTab { tab, working_dir: moved }).unwrap();
+    assert_eq!(outcome, Outcome::Relocated { left_running: 0 });
+    wait_for_text(&mut core, pane, "moved to");
+    std::thread::sleep(Duration::from_millis(1500));
+    core.terminal(pane).unwrap().write("echo \"[$PWD]\"\r");
+    wait_for_text(&mut core, pane, "moved-here]");
+}
