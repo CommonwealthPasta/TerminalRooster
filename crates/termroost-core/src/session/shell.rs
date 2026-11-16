@@ -60,7 +60,7 @@ pub fn default_shell() -> ShellCommand {
 }
 
 #[cfg(windows)]
-fn find_in_path(exe: &str) -> bool {
+pub(crate) fn find_in_path(exe: &str) -> bool {
     std::env::var_os("PATH").map(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file())).unwrap_or(false)
 }
 

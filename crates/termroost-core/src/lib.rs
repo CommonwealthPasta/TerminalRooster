@@ -18,6 +18,7 @@ pub mod codex_hook;
 pub mod command;
 pub mod detect;
 pub mod error;
+pub mod git;
 pub mod layout;
 pub mod model;
 pub mod paths;
