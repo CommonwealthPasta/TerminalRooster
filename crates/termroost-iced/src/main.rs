@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod color_picker;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod dialogs;

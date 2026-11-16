@@ -5,6 +5,7 @@ use iced::{Alignment, Border, Color, Element, Length};
 use termroost_core::session::shell;
 
 use crate::app::{App, Message, SettingsState};
+use crate::color_picker;
 use crate::sidebar::{BOLD, muted_text};
 use crate::theme::{self, MONO};
 use crate::themes::{ANSI_NAMES, ColorField, Hex, ThemeDef};
@@ -225,8 +226,9 @@ impl App {
     fn color_input<'a>(&self, st: &'a SettingsState, t: &ThemeDef, field: ColorField) -> Element<'a, Message> {
         let value = st.inputs.get(&field).cloned().unwrap_or_else(|| t.get(field).to_string());
         let valid = Hex::parse(&value).is_some();
+        let open = st.picker.is_some_and(|p| p.field == field);
         row![
-            swatch(t.get(field), 22.0),
+            color_picker::field_swatch(t.get(field), open, Message::PickColor((!open).then_some(field))),
             text_input("#rrggbb", &value)
                 .on_input(move |v| Message::ThemeColor(field, v))
                 .font(MONO)
@@ -280,23 +282,40 @@ impl App {
             name_col = name_col.push(text(err).size(12).style(text::danger));
         }
 
+        // The picker opens under the group holding the color being picked.
+        let picker_after = |group: usize| -> Option<Element<'a, Message>> {
+            let p = st.picker.as_ref()?;
+            let at = match p.field {
+                ColorField::Ansi(i) if i < 8 => 1,
+                ColorField::Ansi(_) => 2,
+                _ => 0,
+            };
+            (at == group).then(|| color_picker::panel(p, t))
+        };
+
         column![
             text(format!("Editing “{}”", t.name)).size(15).font(BOLD),
-            muted_text("Changes apply immediately and are saved automatically. Colors are #rrggbb."),
+            muted_text(
+                "Changes apply immediately and are saved automatically. Type a #rrggbb color, or click a color's \
+                 square to choose from a palette."
+            ),
             name_col,
             row![
                 column![text("Interface").size(13).font(BOLD), ui].spacing(8),
                 column![text("Terminal").size(13).font(BOLD), term].spacing(8),
             ]
             .spacing(48),
-            text("Terminal colors (ANSI)").size(13).font(BOLD),
-            muted_text("Normal"),
-            ansi_row(false),
-            muted_text("Bright"),
-            ansi_row(true),
-            text("Preview").size(13).font(BOLD),
-            preview(t),
         ]
+        .push(picker_after(0))
+        .push(text("Terminal colors (ANSI)").size(13).font(BOLD))
+        .push(muted_text("Normal"))
+        .push(ansi_row(false))
+        .push(picker_after(1))
+        .push(muted_text("Bright"))
+        .push(ansi_row(true))
+        .push(picker_after(2))
+        .push(text("Preview").size(13).font(BOLD))
+        .push(preview(t))
         .spacing(10)
         .padding(iced::Padding { top: 8.0, ..Default::default() })
         .into()

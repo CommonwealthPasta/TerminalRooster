@@ -50,6 +50,7 @@ Open **Settings** with the ⚙ in the projects header.
 - **Terminal colors:** match the interface, or always use one theme's terminal colors. For example, you can have dark terminals with a light interface.
 - **Custom themes:** **Duplicate** a theme, then edit it.
   - You can change its name, its interface colors (background, text, accent, success, warning, danger) and its terminal colors (foreground, background, cursor, selection and the 16 ANSI colors).
+  - Type a `#rrggbb` color, or click a color's square to pick one: a palette of ready-made colors, the colors the theme already uses, and hue/saturation/lightness sliders.
   - Edits apply live and are saved automatically.
 
 Terminals switch colors instantly, including their scrollback. Programs that ask the terminal for its colors get the new ones. Coding agents usually have their own light/dark setting; for example, set Claude Code's `/theme` to match.

@@ -10,6 +10,7 @@ use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId};
 
+use crate::color_picker::{ColorPicker, Hsl};
 use crate::keymap::{self, Direction, Shortcut};
 use crate::layout_conv;
 use crate::terminal_view;
@@ -121,6 +122,8 @@ pub struct SettingsState {
     pub editing: Option<String>,
     /// Raw text of color fields (kept while not yet a valid color).
     pub inputs: HashMap<ColorField, String>,
+    /// Color picker open under one of the edited theme's colors.
+    pub picker: Option<ColorPicker>,
     pub name_input: String,
     pub name_error: Option<String>,
     pub shell_input: String,
@@ -182,6 +185,10 @@ pub enum Message {
     DeleteTheme(String),
     ThemeNameInput(String),
     ThemeColor(ColorField, String),
+    /// Open the color picker for a color of the edited theme (`None`: close it).
+    PickColor(Option<ColorField>),
+    /// A hue/saturation/lightness slider of the color picker moved.
+    PickerHsl(Hsl),
     FontSize(f32),
     ShellInput(String),
     ShellCommit,
@@ -500,6 +507,12 @@ impl App {
                 if self.dialog.is_some() {
                     return self.update(Message::DialogCancel);
                 }
+                if let Some(st) = &mut self.settings
+                    && st.picker.is_some()
+                {
+                    st.picker = None;
+                    return Task::none();
+                }
                 if self.settings.is_some() {
                     return self.update(Message::CloseSettings);
                 }
@@ -654,6 +667,7 @@ impl App {
             Message::EditTheme(name) => {
                 if let Some(st) = &mut self.settings {
                     st.inputs.clear();
+                    st.picker = None;
                     st.name_error = None;
                     st.name_input = name.clone();
                     st.editing = Some(name);
@@ -690,6 +704,7 @@ impl App {
                         && st.editing.as_deref() == Some(name.as_str())
                     {
                         st.editing = None;
+                        st.picker = None;
                     }
                     self.apply_theme();
                 }
@@ -697,16 +712,29 @@ impl App {
             Message::ThemeNameInput(value) => self.rename_theme(value),
             Message::ThemeColor(field, value) => {
                 let Some(st) = &mut self.settings else { return Task::none() };
-                st.inputs.insert(field, value.clone());
-                if let (Some(hex), Some(name)) = (Hex::parse(&value), st.editing.clone())
-                    && let Some(t) = self.themes.custom_mut(&name)
-                {
-                    t.set(field, hex);
-                    self.themes_dirty = true;
-                    if self.active_theme().name == name || self.terminal_theme().name == name {
-                        self.apply_theme();
+                let hex = Hex::parse(&value);
+                st.inputs.insert(field, value);
+                if let Some(hex) = hex {
+                    if let Some(p) = st.picker.as_mut().filter(|p| p.field == field) {
+                        p.hsl = Hsl::of(hex);
                     }
+                    self.set_theme_color(field, hex);
                 }
+            }
+            Message::PickColor(field) => {
+                if let Some(st) = &mut self.settings {
+                    let theme = st.editing.as_deref().and_then(|n| self.themes.find(n));
+                    st.picker = field.zip(theme).map(|(f, t)| ColorPicker::new(f, t.get(f)));
+                }
+            }
+            Message::PickerHsl(hsl) => {
+                let Some(st) = &mut self.settings else { return Task::none() };
+                let Some(p) = &mut st.picker else { return Task::none() };
+                p.hsl = hsl;
+                let field = p.field;
+                // The text field shows the theme's color again.
+                st.inputs.remove(&field);
+                self.set_theme_color(field, hsl.to_hex());
             }
             Message::FontSize(size) => {
                 self.prefs.font_size = size.round().clamp(8.0, 32.0);
@@ -1021,6 +1049,20 @@ impl App {
         let wanted = Some(st.shell_input.trim().to_owned()).filter(|s| !s.is_empty());
         if wanted != self.core.state().settings.default_shell {
             self.dispatch(Command::SetDefaultShell(wanted));
+        }
+    }
+
+    /// Sets one color of the custom theme being edited, applying it right away if it's in use.
+    fn set_theme_color(&mut self, field: ColorField, hex: Hex) {
+        let Some(name) = self.settings.as_ref().and_then(|st| st.editing.clone()) else { return };
+        let Some(t) = self.themes.custom_mut(&name) else { return };
+        if t.get(field) == hex {
+            return;
+        }
+        t.set(field, hex);
+        self.themes_dirty = true;
+        if self.active_theme().name == name || self.terminal_theme().name == name {
+            self.apply_theme();
         }
     }
 
