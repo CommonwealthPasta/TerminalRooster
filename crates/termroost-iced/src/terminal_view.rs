@@ -3,6 +3,8 @@
 //! The widget talks to the [`TerminalHandle`] directly for I/O (keys, paste,
 //! selection, scrolling, resize), so typing does not go through app messages.
 
+use std::sync::Arc;
+
 use iced::advanced::clipboard::Kind as ClipboardKind;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::mouse::{self, ScrollDelta};
@@ -19,7 +21,7 @@ use termroost_core::{
     TerminalHandle,
 };
 
-use crate::keymap::{self, TermAction};
+use crate::keymap::{self, Action, Keymap};
 use crate::theme::{self, MONO};
 
 const PADDING: f32 = 4.0;
@@ -27,6 +29,7 @@ const LINE_FACTOR: f32 = 1.25;
 
 pub struct TerminalView<M> {
     handle: TerminalHandle,
+    keymap: Arc<Keymap>,
     id: widget::Id,
     /// This is the focused pane of the visible tab.
     active: bool,
@@ -36,9 +39,16 @@ pub struct TerminalView<M> {
 }
 
 impl<M: Clone> TerminalView<M> {
-    pub fn new(handle: TerminalHandle, active: bool, font_size: f32, on_focus: M, on_restart: M) -> Self {
+    pub fn new(
+        handle: TerminalHandle,
+        keymap: Arc<Keymap>,
+        active: bool,
+        font_size: f32,
+        on_focus: M,
+        on_restart: M,
+    ) -> Self {
         let id = widget_id(handle.pane());
-        Self { handle, id, active, font_size, on_focus, on_restart }
+        Self { handle, keymap, id, active, font_size, on_focus, on_restart }
     }
 }
 
@@ -210,20 +220,21 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for TerminalView<M> {
                 if !(state.focused && self.active) {
                     return;
                 }
-                // App shortcuts bubble up to the application subscription.
-                if keymap::shortcut(key, *physical_key, *modifiers).is_some() {
-                    return;
-                }
-                if let Some(action) = keymap::term_action(key, *physical_key, *modifiers) {
+                if let Some(action) = self.keymap.action(key, *physical_key, *modifiers) {
+                    // App shortcuts bubble up to the application subscription.
+                    if !action.in_terminal() {
+                        return;
+                    }
                     match action {
-                        TermAction::Copy => {
+                        Action::Copy => {
                             self.copy_selection(clipboard);
                         }
-                        TermAction::Paste => self.paste_from(clipboard, ClipboardKind::Standard),
-                        TermAction::ScrollPageUp => handle.scroll_page(true),
-                        TermAction::ScrollPageDown => handle.scroll_page(false),
-                        TermAction::ScrollTop => handle.scroll_lines(i32::MAX / 2, 0, 0),
-                        TermAction::ScrollBottom => handle.scroll_to_bottom(),
+                        Action::Paste => self.paste_from(clipboard, ClipboardKind::Standard),
+                        Action::ScrollPageUp => handle.scroll_page(true),
+                        Action::ScrollPageDown => handle.scroll_page(false),
+                        Action::ScrollTop => handle.scroll_lines(i32::MAX / 2, 0, 0),
+                        Action::ScrollBottom => handle.scroll_to_bottom(),
+                        _ => {}
                     }
                     shell.capture_event();
                     shell.request_redraw();

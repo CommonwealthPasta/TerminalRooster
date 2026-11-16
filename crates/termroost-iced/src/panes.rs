@@ -5,6 +5,7 @@ use iced::{Alignment, Element, Length};
 use termroost_core::{AgentKind, Axis, PaneId, Tab};
 
 use crate::app::{App, Message};
+use crate::keymap::Action;
 use crate::sidebar::{BOLD, icon_button, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
 use crate::theme;
@@ -88,6 +89,7 @@ impl App {
         let body: Element<'_, Message> = match handle.clone() {
             Some(h) => TerminalView::new(
                 h,
+                self.keymap.clone(),
                 active && self.dialog.is_none(),
                 self.prefs.font_size,
                 Message::FocusPane(pane),
@@ -108,22 +110,23 @@ impl App {
             title_row = title_row.push(container(text(agent).size(11)).padding([1, 6]).style(theme::badge));
         }
 
+        let k = &self.keymap;
         let full = row![
             pick_list(&AgentKind::ALL[..], None::<AgentKind>, move |k| Message::StartAgent(pane, k))
                 .placeholder("Start agent")
                 .text_size(12)
                 .padding([2, 6]),
             icon_button("⚙", Message::PaneSettings(pane), "Terminal settings & resume command"),
-            icon_button("◫", Message::Split(pane, Axis::Vertical), "Split right (Ctrl+Shift+E)"),
-            icon_button("⊟", Message::Split(pane, Axis::Horizontal), "Split down (Ctrl+Shift+O)"),
-            icon_button("✕", Message::ClosePane(pane), "Close terminal (Ctrl+Shift+W)"),
+            icon_button("◫", Message::Split(pane, Axis::Vertical), k.hint("Split right", Action::SplitRight)),
+            icon_button("⊟", Message::Split(pane, Axis::Horizontal), k.hint("Split down", Action::SplitDown)),
+            icon_button("✕", Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
         ]
         .spacing(2)
         .align_y(Alignment::Center);
         // Narrow panes get only the essentials.
         let compact = row![
             icon_button("⚙", Message::PaneSettings(pane), "Terminal settings, agents & resume command"),
-            icon_button("✕", Message::ClosePane(pane), "Close terminal (Ctrl+Shift+W)"),
+            icon_button("✕", Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
         ]
         .spacing(2)
         .align_y(Alignment::Center);

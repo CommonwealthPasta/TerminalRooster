@@ -5,6 +5,7 @@ use iced::{Alignment, Element, Length};
 use termroost_core::Task;
 
 use crate::app::{App, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
+use crate::keymap::Action;
 use crate::sidebar::{icon_button, muted_text, section_title};
 use crate::theme;
 
@@ -22,7 +23,7 @@ impl App {
             section_title("TASKS"),
             muted_text(format!("{open} open · {done} done")),
             space::horizontal(),
-            icon_button("✕", Message::ToggleTasks, "Hide tasks (Ctrl+Shift+K)"),
+            icon_button("✕", Message::ToggleTasks, self.keymap.hint("Hide tasks", Action::ToggleTasks)),
         ]
         .spacing(8)
         .align_y(Alignment::Center);

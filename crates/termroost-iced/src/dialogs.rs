@@ -1,11 +1,14 @@
 //! Modal dialogs.
 
+use std::sync::Arc;
+
 use iced::widget::{button, center, column, container, mouse_area, opaque, row, space, text, text_input};
 use iced::{Alignment, Element, Length};
 use termroost_core::AgentKind;
 use termroost_core::session::shell;
 
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message};
+use crate::keymap::Keymap;
 use crate::sidebar::{BOLD, muted_text};
 use crate::terminal_view::TerminalView;
 use crate::theme;
@@ -39,8 +42,12 @@ fn modal<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 
 /// The small Codex window for trusting the hook. Clicking outside does not
 /// close it (it would end Codex); Done does.
-fn codex_window(handle: &termroost_core::TerminalHandle, font_size: f32) -> Element<'_, Message> {
-    let term = TerminalView::new(handle.clone(), true, font_size, Message::Noop, Message::Noop);
+fn codex_window<'a>(
+    handle: &'a termroost_core::TerminalHandle,
+    keymap: &Arc<Keymap>,
+    font_size: f32,
+) -> Element<'a, Message> {
+    let term = TerminalView::new(handle.clone(), keymap.clone(), true, font_size, Message::Noop, Message::Noop);
     let content = column![
         row![
             text("Type /hooks and trust the TermRoost hook.").size(14).width(Length::Fill),
@@ -138,7 +145,7 @@ impl App {
                 .spacing(14)
                 .into()
             }
-            Dialog::CodexTrust(handle) => return codex_window(handle, self.prefs.font_size),
+            Dialog::CodexTrust(handle) => return codex_window(handle, &self.keymap, self.prefs.font_size),
             Dialog::CodexHook => column![
                 text("Track Codex sessions?").size(18).font(BOLD),
                 text("Add a small hook to Codex so TermRoost always resumes the right conversation in each terminal.",)

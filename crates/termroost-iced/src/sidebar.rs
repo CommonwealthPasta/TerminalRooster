@@ -5,6 +5,7 @@ use iced::{Alignment, Element, Font, Length, font};
 use termroost_core::{Project, Tab};
 
 use crate::app::{App, Message, RENAME_INPUT, RenameTarget};
+use crate::keymap::Action;
 use crate::theme;
 
 /// Width of the edit/delete button column next to the selected list item.
@@ -12,7 +13,7 @@ const ACTIONS_WIDTH: f32 = 26.0;
 
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
 
-pub fn icon_button<'a>(label: &'a str, msg: Message, tip: &'a str) -> Element<'a, Message> {
+pub fn icon_button<'a>(label: &'a str, msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     tooltip(
         button(text(label).size(14).align_x(Alignment::Center).width(18))
             .padding([2, 4])
@@ -114,13 +115,13 @@ impl App {
             section_title("PROJECTS"),
             space::horizontal(),
             icon_button("⚙", Message::OpenSettings, "Settings"),
-            icon_button("+", Message::NewProject, "New project (Ctrl+Shift+N)"),
+            icon_button("+", Message::NewProject, self.keymap.hint("New project", Action::NewProject)),
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
 
         let items = column(s.projects.iter().map(|p| self.project_item(p)))
-            .push(add_item(Message::NewProject, "New project (Ctrl+Shift+N)"))
+            .push(add_item(Message::NewProject, self.keymap.hint("New project", Action::NewProject)))
             .spacing(2)
             .padding([0, 6]);
         container(column![header, scrollable(items).height(Length::Fill)])
@@ -170,12 +171,12 @@ impl App {
                 muted_text(short_dir(&project.working_dir, 26)).wrapping(text::Wrapping::None)
             ]
             .width(Length::Fill),
-            icon_button("+", Message::NewTab, "New session (Ctrl+Shift+T)"),
+            icon_button("+", Message::NewTab, self.keymap.hint("New session", Action::NewSession)),
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
         let items = column(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
-            .push(add_item(Message::NewTab, "New session (Ctrl+Shift+T)"))
+            .push(add_item(Message::NewTab, self.keymap.hint("New session", Action::NewSession)))
             .spacing(2)
             .padding([0, 6]);
         container(

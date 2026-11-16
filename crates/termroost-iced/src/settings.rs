@@ -6,6 +6,7 @@ use termroost_core::session::shell;
 
 use crate::app::{App, Message, SettingsState};
 use crate::color_picker;
+use crate::keymap::Action;
 use crate::sidebar::{BOLD, muted_text};
 use crate::theme::{self, MONO};
 use crate::themes::{ANSI_NAMES, ColorField, Hex, ThemeDef};
@@ -72,7 +73,7 @@ impl App {
             self.appearance_section(st),
             self.terminal_section(st),
             self.integrations_section(),
-            shortcuts_section(),
+            self.shortcuts_section(),
             muted_text(format!(
                 "Everything is stored in {}. Logs are in {}.",
                 self.core.data_dir().join("termroost.db").display(),
@@ -499,27 +500,44 @@ fn preview<'a>(t: &ThemeDef) -> Element<'a, Message> {
     row![ui_mock, term_mock].spacing(12).into()
 }
 
-fn shortcuts_section<'a>() -> Element<'a, Message> {
-    const SHORTCUTS: [(&str, &str); 13] = [
-        ("Ctrl+Shift+N", "New project"),
-        ("Ctrl+Shift+T", "New session"),
-        ("Ctrl+Shift+E / Ctrl+Shift+O", "Split right / split down"),
-        ("Ctrl+Shift+W", "Close terminal"),
-        ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous session"),
-        ("Ctrl+Shift+PgDn / PgUp", "Next / previous project"),
-        ("Alt+Arrows", "Move between terminals"),
-        ("Ctrl+Shift+C / Ctrl+Shift+V", "Copy / paste"),
-        ("Right click", "Copy selection, or paste"),
-        ("Shift+PgUp / Shift+PgDn", "Scroll history"),
-        ("Ctrl+Shift+K", "Show / hide tasks"),
-        ("Ctrl+Shift+= / - / 0", "Font size bigger / smaller / reset"),
-        ("Shift+Enter", "Newline in Claude Code / Codex"),
-    ];
-    section(
-        "Keyboard shortcuts",
-        Column::with_children(
-            SHORTCUTS.iter().map(|(k, d)| row![text(*k).font(MONO).size(13).width(260), text(*d).size(13)].into()),
-        )
-        .spacing(6),
-    )
+/// The key-cap frame around a shortcut.
+fn key_cap<'a>(content: impl Into<Element<'a, Message>>, right: f32) -> Element<'a, Message> {
+    container(content)
+        .padding(iced::Padding { top: 2.0, bottom: 2.0, left: 8.0, right })
+        .style(|t: &iced::Theme| {
+            let p = t.extended_palette();
+            container::Style {
+                background: Some(p.background.base.color.into()),
+                border: Border { width: 1.0, color: p.background.strong.color, radius: 4.0.into() },
+                ..container::Style::default()
+            }
+        })
+        .into()
+}
+
+/// A row of the shortcuts list: what happens, then the keys.
+fn shortcut_row<'a>(what: &'a str, keys: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    row![text(what).size(13).width(240), keys.into()].spacing(8).align_y(Alignment::Center).height(28).into()
+}
+
+impl App {
+    fn shortcuts_section(&self) -> Element<'_, Message> {
+        let mut col = Column::new().spacing(6);
+        let mut group = "";
+        for action in Action::ALL {
+            if action.group() != group {
+                group = action.group();
+                col = col.push(text(group).size(13).font(BOLD));
+            }
+            let keys = self.keymap.combos(action).iter().map(|c| key_cap(text(c.to_string()).font(MONO).size(12), 8.0));
+            col = col.push(shortcut_row(action.label(), row(keys).spacing(6).align_y(Alignment::Center)));
+        }
+        col = col.push(text("Fixed").size(13).font(BOLD));
+        for (keys, what) in
+            [("Right click", "Copy the selection, or paste"), ("Shift+Enter", "New line in Claude Code / Codex")]
+        {
+            col = col.push(shortcut_row(what, key_cap(text(keys).font(MONO).size(12), 8.0)));
+        }
+        section("Keyboard shortcuts", col)
+    }
 }

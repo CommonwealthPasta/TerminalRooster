@@ -1,8 +1,9 @@
 //! Application state, messages and update logic.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use iced::widget::{column, container, operation, pane_grid, row, stack};
@@ -11,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId};
 
 use crate::color_picker::{ColorPicker, Hsl};
-use crate::keymap::{self, Direction, Shortcut};
+use crate::keymap::{Action, Keymap};
 use crate::layout_conv;
 use crate::terminal_view;
 use crate::theme;
@@ -46,6 +47,9 @@ pub struct Prefs {
     pub terminal_theme: Option<String>,
     /// The user was already asked about the Codex hook at startup.
     pub codex_hook_asked: bool,
+    /// Keyboard shortcuts the user changed: action id -> its shortcuts, such
+    /// as `"Ctrl+Shift+T"`. Actions not listed use their defaults.
+    pub shortcuts: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for Prefs {
@@ -63,6 +67,7 @@ impl Default for Prefs {
             dark_theme: themes::DARK.into(),
             terminal_theme: None,
             codex_hook_asked: false,
+            shortcuts: BTreeMap::new(),
         }
     }
 }
@@ -158,7 +163,7 @@ pub enum Message {
     },
     /// Enter, even when captured (confirms dialogs without text fields).
     Enter,
-    Shortcut(Shortcut),
+    Shortcut(Action),
 
     SelectProject(ProjectId),
     SelectTab(TabId),
@@ -258,6 +263,8 @@ pub struct App {
     ui_theme: iced::Theme,
     /// Cached Codex integration state (reads files, so refreshed on demand).
     pub(crate) codex_hook: termroost_core::CodexHookStatus,
+    /// Shortcuts in effect (from `prefs.shortcuts`); shared with the terminals.
+    pub(crate) keymap: Arc<Keymap>,
     closing: bool,
 }
 
@@ -274,6 +281,7 @@ impl App {
     pub fn new(core: Core) -> (App, Task<Message>) {
         let prefs = Prefs::load(&core);
         let themes = ThemeStore::load(&core);
+        let keymap = Arc::new(Keymap::new(&prefs.shortcuts));
         let mut app = App {
             core,
             grids: HashMap::new(),
@@ -292,6 +300,7 @@ impl App {
             system_mode: iced::theme::Mode::None,
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
+            keymap,
             closing: false,
         };
         app.apply_theme();
@@ -535,8 +544,10 @@ impl App {
                 }
             }
             Message::Key(keyboard::Event::KeyPressed { key, physical_key, modifiers, .. }) => {
-                if let Some(sc) = keymap::shortcut(&key, physical_key, modifiers) {
-                    return self.update(Message::Shortcut(sc));
+                if let Some(action) = self.keymap.action(&key, physical_key, modifiers)
+                    && !action.in_terminal()
+                {
+                    return self.update(Message::Shortcut(action));
                 }
             }
             Message::Key(_) => {}
@@ -1100,67 +1111,74 @@ impl App {
         self.apply_theme();
     }
 
-    fn shortcut(&mut self, sc: Shortcut) -> Task<Message> {
+    fn shortcut(&mut self, action: Action) -> Task<Message> {
         if self.dialog.is_some() || self.settings.is_some() {
             return Task::none();
         }
         let s = self.core.state();
         let focused = s.active_tab().and_then(|t| t.focused_pane);
-        match sc {
-            Shortcut::NewProject => return self.update(Message::NewProject),
-            Shortcut::NewTab => return self.update(Message::NewTab),
-            Shortcut::SplitRight => {
+        match action {
+            Action::NewProject => return self.update(Message::NewProject),
+            Action::NewSession => return self.update(Message::NewTab),
+            Action::SplitRight => {
                 if let Some(p) = focused {
                     return self.update(Message::Split(p, Axis::Vertical));
                 }
             }
-            Shortcut::SplitDown => {
+            Action::SplitDown => {
                 if let Some(p) = focused {
                     return self.update(Message::Split(p, Axis::Horizontal));
                 }
             }
-            Shortcut::ClosePane => {
+            Action::CloseTerminal => {
                 if let Some(p) = focused {
                     return self.update(Message::ClosePane(p));
                 }
             }
-            Shortcut::NextTab | Shortcut::PrevTab => {
+            Action::NextSession | Action::PrevSession => {
                 if let Some(project) = s.selected_project {
                     let tabs: Vec<TabId> = s.tabs_of(project).map(|t| t.id).collect();
-                    if let Some(next) = cycle(&tabs, self.active_tab_id(), sc == Shortcut::NextTab) {
+                    if let Some(next) = cycle(&tabs, self.active_tab_id(), action == Action::NextSession) {
                         return self.update(Message::SelectTab(next));
                     }
                 }
             }
-            Shortcut::NextProject | Shortcut::PrevProject => {
+            Action::NextProject | Action::PrevProject => {
                 let projects: Vec<ProjectId> = s.projects.iter().map(|p| p.id).collect();
-                if let Some(next) = cycle(&projects, s.selected_project, sc == Shortcut::NextProject) {
+                if let Some(next) = cycle(&projects, s.selected_project, action == Action::NextProject) {
                     return self.update(Message::SelectProject(next));
                 }
             }
-            Shortcut::Focus(dir) => {
+            Action::FocusLeft | Action::FocusRight | Action::FocusUp | Action::FocusDown => {
+                let d = match action {
+                    Action::FocusLeft => pane_grid::Direction::Left,
+                    Action::FocusRight => pane_grid::Direction::Right,
+                    Action::FocusUp => pane_grid::Direction::Up,
+                    _ => pane_grid::Direction::Down,
+                };
                 let (Some(tab), Some(pane)) = (self.active_tab_id(), focused) else { return Task::none() };
                 let Some(grid) = self.grids.get(&tab) else { return Task::none() };
                 let Some(gp) = layout_conv::find(grid, pane) else { return Task::none() };
-                let d = match dir {
-                    Direction::Left => pane_grid::Direction::Left,
-                    Direction::Right => pane_grid::Direction::Right,
-                    Direction::Up => pane_grid::Direction::Up,
-                    Direction::Down => pane_grid::Direction::Down,
-                };
                 if let Some(target) = grid.adjacent(gp, d).and_then(|g| grid.get(g)).copied() {
                     return self.update(Message::FocusPane(target));
                 }
             }
-            Shortcut::ToggleTasks => return self.update(Message::ToggleTasks),
-            Shortcut::FontBigger | Shortcut::FontSmaller | Shortcut::FontReset => {
-                self.prefs.font_size = match sc {
-                    Shortcut::FontBigger => (self.prefs.font_size + 1.0).min(32.0),
-                    Shortcut::FontSmaller => (self.prefs.font_size - 1.0).max(8.0),
+            Action::ToggleTasks => return self.update(Message::ToggleTasks),
+            Action::FontBigger | Action::FontSmaller | Action::FontReset => {
+                self.prefs.font_size = match action {
+                    Action::FontBigger => (self.prefs.font_size + 1.0).min(32.0),
+                    Action::FontSmaller => (self.prefs.font_size - 1.0).max(8.0),
                     _ => theme::DEFAULT_FONT_SIZE,
                 };
                 self.mark_prefs();
             }
+            // Handled by the focused terminal.
+            Action::Copy
+            | Action::Paste
+            | Action::ScrollPageUp
+            | Action::ScrollPageDown
+            | Action::ScrollTop
+            | Action::ScrollBottom => {}
         }
         Task::none()
     }
