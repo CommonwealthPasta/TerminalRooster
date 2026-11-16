@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use iced::widget::{button, container, pane_grid};
+use iced::widget::{button, container, pane_grid, text_editor};
 use iced::{Background, Border, Color, Font, Theme};
 
 /// Bundled terminal font (JetBrains Mono, SIL Open Font License 1.1).
@@ -98,6 +98,69 @@ pub fn add_item_button(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A tab of the right panel's header.
+pub fn panel_tab(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let p = theme.extended_palette();
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: if selected {
+                Some(Background::Color(p.primary.weak.color))
+            } else {
+                hovered.then_some(Background::Color(p.background.strong.color))
+            },
+            text_color: if selected { p.primary.weak.text } else { p.background.base.text },
+            border: Border::default().rounded(4),
+            ..button::Style::default()
+        }
+    }
+}
+
+/// A line of the file tree: plain until hovered.
+pub fn tree_row(theme: &Theme, status: button::Status) -> button::Style {
+    let p = theme.extended_palette();
+    button::Style {
+        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
+            .then_some(Background::Color(p.background.strong.color)),
+        text_color: p.background.base.text,
+        border: Border::default().rounded(3),
+        ..button::Style::default()
+    }
+}
+
+/// A small menu, such as an entry's in the Files tab.
+pub fn menu(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.background.base.color)),
+        text_color: Some(p.background.base.text),
+        border: Border { width: 1.0, color: p.background.strong.color, radius: 6.0.into() },
+        shadow: iced::Shadow {
+            color: Color { a: 0.3, ..Color::BLACK },
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 6.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The file editor: square, framed like a terminal, in the accent color while it has the keyboard.
+pub fn file_editor(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let p = theme.extended_palette();
+    let focused = matches!(status, text_editor::Status::Focused { .. });
+    text_editor::Style {
+        background: Background::Color(p.background.base.color),
+        border: Border {
+            width: 1.0,
+            color: if focused { p.primary.base.color } else { p.background.strong.color },
+            radius: 0.0.into(),
+        },
+        placeholder: muted(theme),
+        value: p.background.base.text,
+        selection: p.primary.weak.color,
+    }
+}
+
 pub fn badge(theme: &Theme) -> container::Style {
     let p = theme.extended_palette();
     container::Style {
@@ -127,26 +190,6 @@ pub fn warning_badge(theme: &Theme) -> container::Style {
         text_color: Some(p.warning.weak.text),
         border: Border::default().rounded(8),
         ..container::Style::default()
-    }
-}
-
-/// A tab at the top of the side panel (Tasks, Git).
-pub fn side_tab(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let p = theme.extended_palette();
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        button::Style {
-            background: if selected {
-                Some(Background::Color(p.background.strong.color))
-            } else if hovered {
-                Some(Background::Color(p.background.weak.color))
-            } else {
-                None
-            },
-            text_color: if selected || hovered { p.background.base.text } else { muted(theme) },
-            border: Border::default().rounded(4),
-            ..button::Style::default()
-        }
     }
 }
 

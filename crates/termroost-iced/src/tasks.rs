@@ -8,7 +8,6 @@ use iced::{Alignment, Element, Length, Point, mouse};
 use termroost_core::Task;
 
 use crate::app::{App, DropTarget, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
-use crate::keymap::Action;
 use crate::sidebar::{BOLD, icon_button, muted_text};
 use crate::theme;
 
@@ -89,24 +88,8 @@ impl App {
         area.into()
     }
 
-    /// The side panel: the project's tasks, or the git log of the session on screen.
+    /// The Tasks tab of the right panel.
     pub(crate) fn view_tasks(&self) -> Element<'_, Message> {
-        let header = row![
-            self.side_tabs(),
-            space::horizontal(),
-            icon_button("✕", Message::ToggleTasks, self.keymap.hint("Hide panel", Action::ToggleTasks)),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center);
-        let body = if self.git_tab_shown() { self.view_git_log() } else { self.view_task_list() };
-        container(column![header, body].spacing(10).padding([10, 10]))
-            .width(300)
-            .height(Length::Fill)
-            .style(theme::sidebar)
-            .into()
-    }
-
-    fn view_task_list(&self) -> Element<'_, Message> {
         let s = self.core.state();
         let Some(project) = s.selected_project else { return space::horizontal().width(0).into() };
         let active_tab = self.active_tab_id();

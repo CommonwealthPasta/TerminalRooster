@@ -9,6 +9,7 @@ use crate::app::{App, Message};
 use crate::keymap::Action;
 use crate::leave_room::leave_room;
 use crate::notify::Category;
+use crate::side_panel::SideTab;
 use crate::sidebar::{BOLD, ICON_BUTTON_WIDTH, branch_label, icon_button, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
 use crate::theme;
@@ -49,16 +50,21 @@ impl App {
         };
 
         let open: usize = s.tasks_of(project.id).filter(|t| !t.done).count();
-        let tasks_toggle: Element<'_, Message> = if self.prefs.tasks_open {
+        let git = self.git_of(tab);
+        // While the right panel is hidden, buttons bring it back on any of its
+        // tabs (Git only for a session in a repository).
+        let panel_buttons: Element<'_, Message> = if self.prefs.panel_open {
             space::horizontal().width(0).into()
         } else {
-            button(text(format!("Tasks ({open})")).size(12))
-                .padding([3, 10])
-                .style(button::secondary)
-                .on_press(Message::ToggleTasks)
-                .into()
+            let show = |label: String, tab: SideTab| {
+                button(text(label).size(12)).padding([3, 10]).style(button::secondary).on_press(Message::ShowPanel(tab))
+            };
+            let mut buttons = row![show(format!("Tasks ({open})"), SideTab::Tasks)].spacing(6);
+            if git.is_some() {
+                buttons = buttons.push(show("Git".into(), SideTab::Git));
+            }
+            buttons.push(show("Files".into(), SideTab::Files)).into()
         };
-        let git = self.git_of(tab);
         let mut header = row![text(&tab.title).size(14).font(BOLD)];
         if let Some(head) = git.and_then(|g| g.head.as_ref()) {
             header = header.push(branch_label(head, 12.0, 40));
@@ -78,16 +84,16 @@ impl App {
                 tooltip::Position::Bottom,
             ));
         }
-        let header = header.push(tasks_toggle).spacing(10).align_y(Alignment::Center).padding([4, 10]);
+        let header = header.push(panel_buttons).spacing(10).align_y(Alignment::Center).padding([4, 10]);
 
-        let mut content = column![header];
-        let banners = [
+        let mut banners = column![];
+        let messages = [
             (&self.error, Message::DismissError, theme::error_banner as fn(&iced::Theme) -> container::Style),
             (&self.notice, Message::DismissNotice, theme::notice_banner),
         ];
-        for (message, dismiss, style) in banners {
+        for (message, dismiss, style) in messages {
             if let Some(message) = message {
-                content = content.push(
+                banners = banners.push(
                     container(
                         row![text(message).size(13).width(Length::Fill), icon_button("✕", dismiss, "Dismiss")]
                             .align_y(Alignment::Center),
@@ -97,17 +103,21 @@ impl App {
                 );
             }
         }
-        let grid: Element<'_, Message> = match self.grids.get(&tab.id) {
-            Some(grid) => pane_grid(grid, move |_, pane, _| self.pane_content(*pane, tab))
+        let body: Element<'_, Message> = match (self.shown_doc(), self.grids.get(&tab.id)) {
+            (Some(doc), _) => self.view_doc(doc),
+            (None, Some(grid)) => pane_grid(grid, move |_, pane, _| self.pane_content(*pane, tab))
                 .spacing(3)
                 .on_click(Message::PaneClicked)
                 .on_drag(Message::PaneDragged)
                 .on_resize(8, Message::PaneResized)
                 .style(theme::pane_grid_style)
                 .into(),
-            None => center(text("…")).into(),
+            (None, None) => center(text("…")).into(),
         };
-        content.push(container(grid).padding(3).height(Length::Fill)).into()
+        // Each part keeps its place in the column whether it shows anything or
+        // not: widgets are matched to their state by position, so a banner
+        // coming and going would otherwise reset the editor and the terminals.
+        column![header, self.view_file_strip(), banners, container(body).padding(3).height(Length::Fill)].into()
     }
 
     fn pane_content<'a>(&'a self, pane: PaneId, tab: &'a Tab) -> pane_grid::Content<'a, Message> {

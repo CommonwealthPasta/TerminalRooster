@@ -10,6 +10,7 @@ use termroost_core::AgentKind;
 use termroost_core::session::shell;
 
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message};
+use crate::editor::EditorMsg;
 use crate::keymap::Keymap;
 use crate::sidebar::{BOLD, muted_text};
 use crate::terminal_view::{KeyboardFocus, TerminalView};
@@ -30,6 +31,15 @@ fn actions<'a>(confirm: &'a str, danger: bool) -> Element<'a, Message> {
     ]
     .spacing(8)
     .into()
+}
+
+/// Said when deleting a session or project closes files with unsaved changes.
+fn unsaved_note(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => " A file with unsaved changes is closed without saving.".into(),
+        n => format!(" {n} files with unsaved changes are closed without saving."),
+    }
 }
 
 fn modal<'a>(content: Element<'a, Message>, width: f32) -> Element<'a, Message> {
@@ -126,11 +136,13 @@ impl App {
                 let tabs = s.tabs_of(*p).count();
                 let terms: usize = s.tabs_of(*p).map(|t| t.layout.panes().len()).sum();
                 let tasks = s.tasks_of(*p).count();
+                let unsaved: usize = s.tabs_of(*p).map(|t| self.unsaved_in(t.id)).sum();
                 column![
                     text(format!("Delete project “{name}”?")).size(18).font(BOLD),
                     text(format!(
                         "This closes {terms} terminal(s) in {tabs} session(s) and deletes {tasks} task(s) and all saved \
-                         scrollback. The directory on disk is not touched. This cannot be undone."
+                         scrollback. The directory on disk is not touched. This cannot be undone.{}",
+                        unsaved_note(unsaved)
                     ))
                     .size(13),
                     actions("Delete project", true),
@@ -147,7 +159,8 @@ impl App {
                     text(format!("Delete session “{name}”?")).size(18).font(BOLD),
                     text(format!(
                         "This closes {terms} terminal(s) and their saved scrollback. {linked} linked task(s) are kept \
-                         and unlinked."
+                         and unlinked.{}",
+                        unsaved_note(self.unsaved_in(*t))
                     ))
                     .size(13),
                     actions("Delete session", true),
@@ -155,44 +168,116 @@ impl App {
                 .spacing(14)
                 .into()
             }
-            Dialog::ConfirmQuit { running, dont_ask } => {
-                let n = running.len();
-                let list = Column::with_children(running.iter().map(|r| {
-                    row![
-                        text("•").size(13),
-                        column![text(&r.programs).size(13), muted_text(&r.place)].spacing(1).width(Length::Fill),
-                    ]
-                    .spacing(8)
-                    .into()
-                }))
-                .spacing(6);
-                let mut col = column![
-                    text("Quit Terminal Rooster?").size(18).font(BOLD),
-                    text(if n == 1 {
-                        "A terminal is still running a program. Quitting stops it.".to_owned()
-                    } else {
-                        format!("{n} terminals are still running programs. Quitting stops them.")
-                    })
-                    .size(13),
-                    container(scrollable(list)).max_height(320),
-                ]
-                .spacing(12);
-                if running.iter().any(|r| r.agent) {
-                    col = col.push(muted_text(
-                        "Coding agents come back in the same conversation when Terminal Rooster starts again, but a \
-                         reply they are writing now is cut off.",
-                    ));
+            Dialog::ConfirmQuit { running, unsaved, dont_ask } => {
+                let mut col = column![text("Quit Terminal Rooster?").size(18).font(BOLD)].spacing(12);
+                if !unsaved.is_empty() {
+                    let n = unsaved.len();
+                    let list = Column::with_children(
+                        unsaved.iter().map(|f| row![text("•").size(13), text(f).size(13)].spacing(8).into()),
+                    )
+                    .spacing(4);
+                    col = col
+                        .push(
+                            text(if n == 1 {
+                                "A file has unsaved changes. Quitting loses them.".to_owned()
+                            } else {
+                                format!("{n} files have unsaved changes. Quitting loses them.")
+                            })
+                            .size(13),
+                        )
+                        .push(container(scrollable(list)).max_height(200));
                 }
-                col.push(
-                    checkbox(*dont_ask)
-                        .label("Don't ask again (Settings → Notifications)")
-                        .on_toggle(Message::DialogDontAsk)
-                        .size(14)
-                        .text_size(12),
-                )
-                .push(actions("Quit", true))
-                .into()
+                if !running.is_empty() {
+                    let n = running.len();
+                    let list = Column::with_children(running.iter().map(|r| {
+                        row![
+                            text("•").size(13),
+                            column![text(&r.programs).size(13), muted_text(&r.place)].spacing(1).width(Length::Fill),
+                        ]
+                        .spacing(8)
+                        .into()
+                    }))
+                    .spacing(6);
+                    col = col
+                        .push(
+                            text(if n == 1 {
+                                "A terminal is still running a program. Quitting stops it.".to_owned()
+                            } else {
+                                format!("{n} terminals are still running programs. Quitting stops them.")
+                            })
+                            .size(13),
+                        )
+                        .push(container(scrollable(list)).max_height(320));
+                    if running.iter().any(|r| r.agent) {
+                        col = col.push(muted_text(
+                            "Coding agents come back in the same conversation when Terminal Rooster starts again, but \
+                             a reply they are writing now is cut off.",
+                        ));
+                    }
+                    // Unsaved files are asked about either way.
+                    col = col.push(
+                        checkbox(*dont_ask)
+                            .label("Don't ask again about running programs (Settings → Notifications)")
+                            .on_toggle(Message::DialogDontAsk)
+                            .size(14)
+                            .text_size(12),
+                    );
+                }
+                col.push(actions("Quit", true)).into()
             }
+            Dialog::SaveConflict { doc, name } => column![
+                text(format!("{name} changed on disk")).size(18).font(BOLD),
+                text(
+                    "It was changed outside TerminalRooster since you opened or saved it, maybe by an agent. \
+                     Overwrite replaces that version with yours; Reload shows it and drops your changes (undo \
+                     brings them back).",
+                )
+                .size(13),
+                row![
+                    space::horizontal(),
+                    button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text("Reload"))
+                        .padding([6, 14])
+                        .style(button::secondary)
+                        .on_press(Message::Editor(EditorMsg::Reload(*doc))),
+                    button(text("Overwrite")).padding([6, 14]).style(button::danger).on_press(Message::DialogSubmit),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::CloseFile { doc, name, editor: Some(editor) } => column![
+                text(format!("Close {name}?")).size(18).font(BOLD),
+                text(format!("{editor} still has it open. Closing ends {editor}; changes not saved in it are lost."))
+                    .size(13),
+                row![
+                    space::horizontal(),
+                    button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text(format!("End {editor}")))
+                        .padding([6, 14])
+                        .style(button::danger)
+                        .on_press(Message::Editor(EditorMsg::Discard(*doc))),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
+            Dialog::CloseFile { doc, name, editor: None } => column![
+                text(format!("Save the changes to {name}?")).size(18).font(BOLD),
+                text("If you don't save them, they are lost.").size(13),
+                row![
+                    space::horizontal(),
+                    button(text("Cancel")).padding([6, 14]).style(button::secondary).on_press(Message::DialogCancel),
+                    button(text("Don't save"))
+                        .padding([6, 14])
+                        .style(button::danger)
+                        .on_press(Message::Editor(EditorMsg::Discard(*doc))),
+                    button(text("Save")).padding([6, 14]).style(button::primary).on_press(Message::DialogSubmit),
+                ]
+                .spacing(8),
+            ]
+            .spacing(12)
+            .into(),
             Dialog::CodexTrust(handle) => {
                 return codex_window(handle, &self.keymap, &self.keyboard_focus, self.prefs.font_size);
             }

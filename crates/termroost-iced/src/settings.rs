@@ -4,11 +4,12 @@ use iced::widget::{
     Column, button, checkbox, column, container, pick_list, row, scrollable, slider, space, text, text_input,
 };
 use iced::{Alignment, Border, Color, Element, Length};
-use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
+use termroost_core::session::{bundled_bash, bundled_nvim};
 
 use crate::app::{App, Message, SettingsState};
 use crate::color_picker;
+use crate::editor::FileEditor;
 use crate::keymap::{Action, Combo};
 use crate::notify::{Category, Level};
 use crate::sidebar::{BOLD, muted_text};
@@ -76,6 +77,7 @@ impl App {
         let body = column![
             self.appearance_section(st),
             self.terminal_section(st),
+            self.editor_section(st),
             self.notifications_section(),
             self.integrations_section(),
             self.shortcuts_section(st),
@@ -393,6 +395,100 @@ impl App {
         )
     }
 
+    /// What files from the Files tab open in, and the terminal editor's command.
+    fn editor_section<'a>(&'a self, st: &'a SettingsState) -> Element<'a, Message> {
+        let current = self.prefs.file_editor;
+        let choice = |label: &'a str, value: FileEditor| {
+            // Always pressable: a disabled button would make the choice look faded.
+            button(text(label).size(12))
+                .padding([4, 12])
+                .style(if current == value { button::primary } else { button::secondary })
+                .on_press(Message::FileEditor(value))
+        };
+        let choices =
+            row![choice("Built-in editor", FileEditor::Builtin), choice("Neovim or Vim", FileEditor::Terminal)]
+                .spacing(4);
+        let placeholder = match &st.editor_found {
+            Some(p) => format!("Empty: {}", p.display()),
+            None => "Empty: Neovim or Vim (none found)".to_owned(),
+        };
+        section(
+            "Editor",
+            column![
+                row![
+                    column![
+                        text("Edit files with").size(13),
+                        muted_text("Files you open from the Files tab show in place of the session's terminals."),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    choices,
+                ]
+                .spacing(16)
+                .align_y(Alignment::Center),
+                crate::dialogs::field(
+                    "Terminal editor command",
+                    text_input(&placeholder, &self.prefs.editor_command).on_input(Message::EditorCommand).padding(6),
+                ),
+                self.neovim_row(st),
+                muted_text(
+                    "Neovim or Vim runs in a terminal, with your own configuration; quitting it (:q) closes the \
+                     file. The file's path is added to the command. Leave it empty to use Neovim, or Vim when there \
+                     is no Neovim. Ctrl+Shift shortcuts and Alt+arrows stay with TerminalRooster; every other key \
+                     goes to the editor.",
+                ),
+            ]
+            .spacing(12),
+        )
+    }
+
+    /// Getting Neovim: on Windows TerminalRooster can install it for itself;
+    /// elsewhere the system's package manager does. Nothing when the user's
+    /// own Neovim is on PATH.
+    fn neovim_row<'a>(&'a self, st: &'a SettingsState) -> Element<'a, Message> {
+        use crate::app::InstallState;
+
+        if let Some(path) = &st.nvim_on_path {
+            return muted_text(format!("Neovim: {}", path.display())).into();
+        }
+        if !bundled_nvim::SUPPORTED {
+            let how = if cfg!(target_os = "macos") {
+                "brew install neovim"
+            } else {
+                "your package manager, e.g. sudo apt install neovim, sudo dnf install neovim or sudo pacman -S neovim"
+            };
+            return muted_text(format!("Neovim isn't installed. Install it with {how}, then reopen Settings.")).into();
+        }
+        let mb = bundled_nvim::download_size().div_ceil(1_000_000);
+        let version = bundled_nvim::NVIM_VERSION;
+        let install = |label: &'a str| button(text(label).size(13)).padding([4, 10]).on_press(Message::InstallNvim);
+        let (action, status): (Option<Element<'a, Message>>, Element<'a, Message>) =
+            match (&self.nvim_install, bundled_nvim::installed()) {
+                (InstallState::Running(progress), _) => (None, text(progress.to_string()).size(13).into()),
+                (_, Some(exe)) => {
+                    (None, muted_text(format!("Neovim {version} is installed in {}.", exe.display())).into())
+                }
+                (InstallState::Failed(e), None) => (
+                    Some(install("Try again").into()),
+                    text(format!("Could not install Neovim: {e}")).size(13).style(text::danger).into(),
+                ),
+                (InstallState::Idle, None) => (
+                    Some(install("Install and use").into()),
+                    muted_text(format!(
+                        "Neovim {version}: a {mb} MB download, unpacked into TerminalRooster's own folder. Nothing \
+                         else on the system changes."
+                    ))
+                    .into(),
+                ),
+            };
+        row![text("Neovim").size(13).width(150)]
+            .push(action)
+            .push(container(status).width(Length::Fill))
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .into()
+    }
+
     fn integrations_section(&self) -> Element<'_, Message> {
         let h = &self.codex_hook;
         let small = |label| button(text(label).size(13)).padding([5, 12]);
@@ -499,14 +595,14 @@ impl App {
 
     /// Windows: download Terminal Rooster's own bash, or say where it is.
     fn bundled_bash_row<'a>(&'a self, input: &str, platform: &str) -> Element<'a, Message> {
-        use crate::app::{BashInstall, shell_matching};
+        use crate::app::{InstallState, shell_matching};
 
         let mb = bundled_bash::download_size() / 1_000_000;
         let version = bundled_bash::GIT_VERSION;
         let install = |label: &'a str| button(text(label).size(13)).padding([4, 10]).on_press(Message::InstallBash);
         let (action, status): (Option<Element<'a, Message>>, Element<'a, Message>) =
             match (&self.bash_install, bundled_bash::installed()) {
-                (BashInstall::Running(progress), _) => (None, text(progress.to_string()).size(13).into()),
+                (InstallState::Running(progress), _) => (None, text(progress.to_string()).size(13).into()),
                 (_, Some(_)) => {
                     let current = if input.trim().is_empty() { platform } else { input };
                     let in_use = shell_matching(&self.shells, current).is_some_and(|o| o.name == bundled_bash::NAME);
@@ -518,11 +614,11 @@ impl App {
                     };
                     (None, muted_text(note).into())
                 }
-                (BashInstall::Failed(e), None) => (
+                (InstallState::Failed(e), None) => (
                     Some(install("Try again").into()),
                     text(format!("Could not install bash: {e}")).size(13).style(text::danger).into(),
                 ),
-                (BashInstall::Idle, None) => (
+                (InstallState::Idle, None) => (
                     Some(install("Install and use").into()),
                     muted_text(format!(
                         "Bash with coreutils, vim, less, ssh and git, from Git for Windows {version}: a {mb} MB \

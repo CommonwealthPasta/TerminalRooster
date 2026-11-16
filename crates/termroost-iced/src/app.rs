@@ -9,16 +9,19 @@ use std::time::Duration;
 use iced::widget::{column, container, operation, pane_grid, row, stack};
 use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
-use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
+use termroost_core::session::{bundled_bash, bundled_nvim};
 use termroost_core::{AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
-use crate::git_panel::{GitLog, GitSync, LogRead, SideTab, SyncOp};
+use crate::editor::{DocId, EditorMsg, FileEditor, SessionFiles};
+use crate::files::{FilesMsg, FilesState};
+use crate::git_panel::{GitLog, GitSync, LogRead, SyncOp};
 use crate::groups;
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
+use crate::side_panel::SideTab;
 use crate::terminal_view::{self, KeyboardFocus};
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
@@ -41,7 +44,11 @@ pub const DIALOG_FIRST_INPUT: &str = "dialog-first-input";
 #[serde(default)]
 pub struct Prefs {
     pub font_size: f32,
-    pub tasks_open: bool,
+    /// The right panel is shown (its old name is from when it only held tasks).
+    #[serde(rename = "tasks_open")]
+    pub panel_open: bool,
+    /// What the right panel shows.
+    pub side_tab: SideTab,
     pub show_done: bool,
     pub tasks_this_tab_only: bool,
     pub window: Option<WindowGeom>,
@@ -68,20 +75,24 @@ pub struct Prefs {
     pub notify_agents: Level,
     /// Ask before quitting while terminals run programs.
     pub confirm_quit: bool,
-    /// The tab the side panel shows.
-    pub side_tab: SideTab,
     /// The git log shows every branch, not just the session's.
     pub log_all_branches: bool,
     /// Pull rebases the branch's own commits on top of what came in,
     /// instead of merging.
     pub pull_rebase: bool,
+    /// What files open in: the built-in editor, or Neovim/Vim in a terminal.
+    pub file_editor: FileEditor,
+    /// The terminal editor's command line (the file is added at the end);
+    /// empty finds Neovim or Vim.
+    pub editor_command: String,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
         Self {
             font_size: theme::DEFAULT_FONT_SIZE,
-            tasks_open: true,
+            panel_open: true,
+            side_tab: SideTab::Tasks,
             show_done: true,
             tasks_this_tab_only: false,
             window: None,
@@ -96,9 +107,10 @@ impl Default for Prefs {
             notify_errors: Level::Subtle,
             notify_agents: Level::Prominent,
             confirm_quit: true,
-            side_tab: SideTab::Tasks,
             log_all_branches: false,
             pull_rebase: true,
+            file_editor: FileEditor::Builtin,
+            editor_command: String::new(),
         }
     }
 }
@@ -175,10 +187,24 @@ pub enum Dialog {
     Worktree(Box<WorktreeForm>),
     /// Ask before removing a worktree, which closes its sessions.
     RemoveWorktree(Box<RemoveForm>),
-    /// Quitting while terminals still run programs.
+    /// Quitting while terminals still run programs, or files have unsaved changes.
     ConfirmQuit {
         running: Vec<RunningTerminal>,
+        /// Files with unsaved changes ("src/main.rs (agents)").
+        unsaved: Vec<String>,
         dont_ask: bool,
+    },
+    /// Closing a file with unsaved changes, or open in a terminal editor
+    /// that is still running (its name).
+    CloseFile {
+        doc: DocId,
+        name: String,
+        editor: Option<String>,
+    },
+    /// Saving a file that changed on disk since it was read.
+    SaveConflict {
+        doc: DocId,
+        name: String,
     },
 }
 
@@ -198,6 +224,11 @@ pub struct SettingsState {
     pub recording: Option<Action>,
     /// What the last shortcut change did, e.g. which action lost its keys.
     pub shortcut_note: Option<String>,
+    /// The terminal editor files open in when no command is set (looked
+    /// for when settings open).
+    pub editor_found: Option<PathBuf>,
+    /// The user's own Neovim, on PATH.
+    pub nvim_on_path: Option<PathBuf>,
 }
 
 /// Choice in a task's "linked session" dropdown.
@@ -213,18 +244,18 @@ impl std::fmt::Display for TabChoice {
     }
 }
 
-/// Installing TerminalRooster's own bash (Settings → Terminal, Windows only).
+/// Installing TerminalRooster's own bash or Neovim (Settings, Windows only).
 #[derive(Clone, Debug, Default)]
-pub enum BashInstall {
+pub enum InstallState {
     #[default]
     Idle,
     Running(bundled_bash::Progress),
     Failed(String),
 }
 
-/// News from the thread installing the bash.
+/// News from the thread installing the bash or Neovim.
 #[derive(Clone, Debug)]
-pub enum BashInstallEvent {
+pub enum InstallEvent {
     Progress(bundled_bash::Progress),
     Done(Result<PathBuf, String>),
 }
@@ -344,7 +375,17 @@ pub enum Message {
     RestartPane(PaneId),
     StartAgent(PaneId, AgentKind),
 
-    ToggleTasks,
+    /// Show the right panel on this tab, or hide it if it already shows it.
+    TogglePanel(SideTab),
+    /// Show the right panel on this tab.
+    ShowPanel(SideTab),
+    ClosePanel,
+    Files(FilesMsg),
+    Editor(EditorMsg),
+    /// Edit files in the built-in editor or in a terminal editor (settings).
+    FileEditor(FileEditor),
+    /// The terminal editor's command line changed (settings).
+    EditorCommand(String),
     NewTaskInput(String),
     AddTask,
     TaskDone(TaskId, bool),
@@ -372,7 +413,9 @@ pub enum Message {
     /// A shell picked from the list in settings becomes the default.
     PickDefaultShell(ShellOption),
     InstallBash,
-    BashInstall(BashInstallEvent),
+    BashInstall(InstallEvent),
+    InstallNvim,
+    NvimInstall(InstallEvent),
 
     /// Time to read the visible sessions' branches again.
     GitPoll,
@@ -380,8 +423,6 @@ pub enum Message {
     GitStatus(Vec<(PathBuf, Option<git::Status>)>),
     Worktree(WorktreeMsg),
     RemoveWorktree(RemoveMsg),
-    /// Show a tab of the side panel.
-    SideTab(SideTab),
     LogRead(LogRead),
     LogAllBranches(bool),
     /// Pull or push the Git tab's repository.
@@ -406,6 +447,18 @@ pub struct App {
     pub(crate) dialog: Option<Dialog>,
     pub(crate) new_task: String,
     pub(crate) task_edit: Option<(TaskId, String)>,
+    /// The folders read for the Files tab.
+    pub(crate) files: FilesState,
+    /// The files each session has open.
+    pub(crate) editors: HashMap<TabId, SessionFiles>,
+    /// The last id given to an open file.
+    pub(crate) next_doc: u64,
+    /// The last version number given to the text of an open file.
+    pub(crate) next_version: u64,
+    /// The list of open files changed since it was last saved.
+    pub(crate) open_files_dirty: bool,
+    /// Open files are being compared with the disk.
+    pub(crate) disk_polling: bool,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     pub(crate) error: Option<String>,
@@ -426,7 +479,8 @@ pub struct App {
     pub(crate) settings: Option<SettingsState>,
     /// Shells installed on this machine, for the shell pickers.
     pub(crate) shells: Vec<ShellOption>,
-    pub(crate) bash_install: BashInstall,
+    pub(crate) bash_install: InstallState,
+    pub(crate) nvim_install: InstallState,
     pub(crate) system_mode: iced::theme::Mode,
     ui_theme: iced::Theme,
     /// Cached Codex integration state (reads files, so refreshed on demand).
@@ -512,6 +566,12 @@ impl App {
             dialog: None,
             new_task: String::new(),
             task_edit: None,
+            files: FilesState::default(),
+            editors: HashMap::new(),
+            next_doc: 0,
+            next_version: 0,
+            open_files_dirty: false,
+            disk_polling: false,
             activity: HashSet::new(),
             error: None,
             notice: None,
@@ -524,7 +584,8 @@ impl App {
             themes_dirty: false,
             settings: None,
             shells: Vec::new(),
-            bash_install: BashInstall::Idle,
+            bash_install: InstallState::Idle,
+            nvim_install: InstallState::Idle,
             system_mode: iced::theme::Mode::None,
             ui_theme: ThemeDef::dark().iced_theme(),
             codex_hook: termroost_core::CodexHookStatus::default(),
@@ -542,6 +603,7 @@ impl App {
         notify::init(app.core.data_dir());
         app.apply_theme();
         app.ensure_active_grid();
+        app.restore_open_files();
         app.codex_hook = app.core.codex_hook_status();
         if app.codex_hook.codex_found && app.codex_hook.installed_in.is_none() && !app.prefs.codex_hook_asked {
             app.dialog = Some(Dialog::CodexHook);
@@ -550,8 +612,11 @@ impl App {
         if renamed.moved_from.is_some() || renamed.codex_hook_updated {
             app.dialog = Some(Dialog::Renamed(renamed.clone()));
         }
+        // A file shown before the restart is read again (or its editor started).
+        let revived = app.revive_shown();
         app.sync_attention();
         let task = Task::batch([
+            revived,
             app.focus_active(),
             iced::system::theme().map(Message::SystemTheme),
             detect_shells(),
@@ -641,6 +706,13 @@ impl App {
             }),
             iced::time::every(GIT_POLL).map(|_| Message::GitPoll),
         ];
+        if self.files_shown() && self.window_focused {
+            subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Files(FilesMsg::Poll)));
+        }
+        // Agents change open files: look at them now and then, and when coming back to the window.
+        if self.has_text_docs() && self.window_focused {
+            subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Editor(EditorMsg::DiskPoll)));
+        }
         if self.task_drag.is_some() {
             // Only while a task is held, so moving the mouse doesn't redraw the app otherwise.
             // A drop on a session arrives from that widget before this end does.
@@ -653,7 +725,12 @@ impl App {
                 _ => None,
             }));
         }
-        if !self.layout_dirty.is_empty() || self.prefs_dirty || self.themes_dirty || !self.toasts.is_empty() {
+        if !self.layout_dirty.is_empty()
+            || self.prefs_dirty
+            || self.themes_dirty
+            || self.open_files_dirty
+            || !self.toasts.is_empty()
+        {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
@@ -726,10 +803,14 @@ impl App {
         Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::GitStatus)
     }
 
-    /// Moves keyboard focus to the focused terminal of the visible tab.
+    /// Moves keyboard focus to the focused terminal of the visible tab, or to
+    /// the file shown in place of its terminals.
     pub(crate) fn focus_active(&self) -> Task<Message> {
         if self.dialog.is_some() || self.rename.is_some() || self.task_edit.is_some() {
             return Task::none();
+        }
+        if let Some(focus) = self.focus_doc() {
+            return focus;
         }
         match self.core.state().active_tab().and_then(|t| t.focused_pane) {
             Some(p) => operation::focus(terminal_view::widget_id(p)),
@@ -757,6 +838,9 @@ impl App {
             let value = self.themes.to_json();
             self.dispatch(Command::SetGuiValue { key: themes::THEMES_KEY.into(), value });
         }
+        if let Some(value) = self.take_open_files_value() {
+            self.dispatch(Command::SetGuiValue { key: App::OPEN_FILES_KEY.into(), value });
+        }
     }
 
     pub(crate) fn after_select(&mut self) -> Task<Message> {
@@ -764,7 +848,7 @@ impl App {
             self.activity.remove(&tab);
         }
         self.ensure_active_grid();
-        Task::batch([self.focus_active(), self.read_git()])
+        Task::batch([self.focus_active(), self.read_git(), self.refresh_files()])
     }
 
     fn grid_pane(&self, pane: pane_grid::Pane) -> Option<(TabId, PaneId)> {
@@ -775,8 +859,13 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        let revived = self.revive_shown();
         self.sync_attention();
-        task
+        let task = Task::batch([task, revived]);
+        match self.ensure_files_root() {
+            Some(read) => Task::batch([task, read]),
+            None => task,
+        }
     }
 
     fn handle(&mut self, message: Message) -> Task<Message> {
@@ -784,12 +873,24 @@ impl App {
             return Task::none();
         }
         // Key events are never logged: they can carry what the user types.
-        if !matches!(message, Message::Core(_) | Message::Tick | Message::Key(_)) {
+        // Nor are editor actions and folder listings: what is in people's files.
+        let quiet = match &message {
+            Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
+            Message::Editor(msg) => !msg.loggable(),
+            _ => false,
+        };
+        if !quiet {
             tracing::trace!(?message, "update");
         }
         match message {
             Message::Core(ev) => {
                 self.core.apply_event(&ev);
+                // A terminal editor quit: its file closes.
+                if let Event::ProcessExited { pane, code } = ev
+                    && let Some(task) = self.editor_exited(pane, code)
+                {
+                    return task;
+                }
                 match ev {
                     Event::TerminalDirty(pane) | Event::Bell(pane) => {
                         let tab = self.core.state().pane(pane).map(|p| p.tab);
@@ -812,6 +913,9 @@ impl App {
             Message::WindowFocus(id, focused) => {
                 self.window_id = Some(id);
                 self.window_focused = focused;
+                if focused {
+                    return self.update(Message::Editor(EditorMsg::DiskPoll));
+                }
             }
             Message::WindowFound(id) => self.window_id = self.window_id.or(id),
             Message::ShowPane(pane) => return self.show_pane(pane),
@@ -869,18 +973,22 @@ impl App {
                 if matches!(self.dialog, Some(Dialog::ConfirmQuit { .. })) {
                     return Task::none();
                 }
-                if self.prefs.confirm_quit {
-                    let running = self.running_terminals();
-                    if !running.is_empty() {
-                        self.rename = None;
-                        self.dialog = Some(Dialog::ConfirmQuit { running, dont_ask: false });
-                        return Task::none();
-                    }
+                // Unsaved files are always asked about; running programs as the user chose.
+                let unsaved = self.unsaved_files();
+                let running = if self.prefs.confirm_quit {
+                    self.running_terminals().into_iter().chain(self.running_editors()).collect()
+                } else {
+                    Vec::new()
+                };
+                if !running.is_empty() || !unsaved.is_empty() {
+                    self.rename = None;
+                    self.dialog = Some(Dialog::ConfirmQuit { running, unsaved, dont_ask: false });
+                    return Task::none();
                 }
                 return self.quit();
             }
             Message::Escape => {
-                if self.task_drag.take().is_some() {
+                if self.task_drag.take().is_some() || self.close_files_menu() {
                     return Task::none();
                 }
                 if matches!(self.dialog, Some(Dialog::CodexTrust(_))) {
@@ -911,7 +1019,12 @@ impl App {
                 // Dialogs with text fields submit through the fields themselves.
                 if matches!(
                     self.dialog,
-                    Some(Dialog::ConfirmDeleteProject(_) | Dialog::ConfirmDeleteTab(_) | Dialog::ConfirmQuit { .. })
+                    Some(
+                        Dialog::ConfirmDeleteProject(_)
+                            | Dialog::ConfirmDeleteTab(_)
+                            | Dialog::ConfirmQuit { .. }
+                            | Dialog::CloseFile { .. }
+                    )
                 ) {
                     return self.submit_dialog();
                 }
@@ -1022,7 +1135,11 @@ impl App {
                 self.rename = None;
                 self.task_edit = None;
                 let shell_input = self.core.state().settings.default_shell.clone().unwrap_or_default();
-                self.settings = Some(SettingsState { shell_input, ..SettingsState::default() });
+                let editor_found = shell::find_terminal_editor().map(|e| e.program);
+                let path = std::env::var_os("PATH").unwrap_or_default();
+                let nvim_on_path = shell::find_program("nvim", &path);
+                self.settings =
+                    Some(SettingsState { shell_input, editor_found, nvim_on_path, ..SettingsState::default() });
                 self.codex_hook = self.core.codex_hook_status();
                 // Pick up shells installed since the last look.
                 return detect_shells();
@@ -1059,28 +1176,47 @@ impl App {
                 self.dispatch(Command::SetDefaultShell(Some(option.command)));
             }
             Message::InstallBash => {
-                if matches!(self.bash_install, BashInstall::Running(_)) {
+                if matches!(self.bash_install, InstallState::Running(_)) {
                     return Task::none();
                 }
                 let total = bundled_bash::download_size();
-                self.bash_install = BashInstall::Running(bundled_bash::Progress::Downloading { done: 0, total });
-                let (tx, rx) = async_channel::unbounded();
-                std::thread::spawn(move || {
-                    let report = tx.clone();
-                    let result = bundled_bash::install(move |p| {
-                        let _ = report.send_blocking(BashInstallEvent::Progress(p));
-                    });
-                    let _ = tx.send_blocking(BashInstallEvent::Done(result.map_err(|e| e.to_string())));
-                });
-                return Task::run(rx, Message::BashInstall);
+                self.bash_install = InstallState::Running(bundled_bash::Progress::Downloading { done: 0, total });
+                return Task::run(run_install(|p| bundled_bash::install(p)), Message::BashInstall);
             }
-            Message::BashInstall(BashInstallEvent::Progress(p)) => {
-                if matches!(self.bash_install, BashInstall::Running(_)) {
-                    self.bash_install = BashInstall::Running(p);
+            Message::InstallNvim => {
+                if matches!(self.nvim_install, InstallState::Running(_)) {
+                    return Task::none();
+                }
+                let total = bundled_nvim::download_size();
+                self.nvim_install = InstallState::Running(bundled_nvim::Progress::Downloading { done: 0, total });
+                return Task::run(run_install(|p| bundled_nvim::install(p)), Message::NvimInstall);
+            }
+            Message::NvimInstall(InstallEvent::Progress(p)) => {
+                if matches!(self.nvim_install, InstallState::Running(_)) {
+                    self.nvim_install = InstallState::Running(p);
                 }
             }
-            Message::BashInstall(BashInstallEvent::Done(Ok(exe))) => {
-                self.bash_install = BashInstall::Idle;
+            Message::NvimInstall(InstallEvent::Done(Ok(_))) => {
+                self.nvim_install = InstallState::Idle;
+                // The button says "Install and use": files open in Neovim now.
+                self.prefs.file_editor = FileEditor::Terminal;
+                self.prefs.editor_command.clear();
+                self.mark_prefs();
+                if let Some(st) = &mut self.settings {
+                    st.editor_found = shell::find_terminal_editor().map(|e| e.program);
+                }
+            }
+            Message::NvimInstall(InstallEvent::Done(Err(e))) => {
+                tracing::warn!(error = %e, "installing Neovim failed");
+                self.nvim_install = InstallState::Failed(e);
+            }
+            Message::BashInstall(InstallEvent::Progress(p)) => {
+                if matches!(self.bash_install, InstallState::Running(_)) {
+                    self.bash_install = InstallState::Running(p);
+                }
+            }
+            Message::BashInstall(InstallEvent::Done(Ok(exe))) => {
+                self.bash_install = InstallState::Idle;
                 // The button says "Install and use": new terminals start bash.
                 let command = bundled_bash::shell_option(&exe).command;
                 if let Some(st) = &mut self.settings {
@@ -1089,9 +1225,9 @@ impl App {
                 self.dispatch(Command::SetDefaultShell(Some(command)));
                 return detect_shells();
             }
-            Message::BashInstall(BashInstallEvent::Done(Err(e))) => {
+            Message::BashInstall(InstallEvent::Done(Err(e))) => {
                 tracing::warn!(error = %e, "installing TerminalRooster bash failed");
-                self.bash_install = BashInstall::Failed(e);
+                self.bash_install = InstallState::Failed(e);
             }
             Message::Noop => {}
             Message::RemoveCodexHook => {
@@ -1440,16 +1576,38 @@ impl App {
                 return self.focus_active();
             }
 
-            Message::ToggleTasks => {
-                self.prefs.tasks_open = !self.prefs.tasks_open;
+            Message::TogglePanel(tab) => {
+                if self.prefs.panel_open && self.shown_side_tab() == tab {
+                    return self.update(Message::ClosePanel);
+                }
+                return self.update(Message::ShowPanel(tab));
+            }
+            Message::ShowPanel(tab) => {
+                self.prefs.panel_open = true;
+                self.prefs.side_tab = tab;
                 self.mark_prefs();
-                if self.git_tab_shown() {
-                    return Task::batch([self.refresh_log(), self.focus_active()]);
-                }
-                if self.prefs.tasks_open {
-                    return operation::focus(TASK_INPUT);
-                }
+                return match tab {
+                    SideTab::Tasks => operation::focus(TASK_INPUT),
+                    // Looking at the log or the files doesn't take the
+                    // keyboard from the terminal.
+                    SideTab::Git => Task::batch([self.refresh_log(), self.focus_active()]),
+                    SideTab::Files => Task::batch([self.refresh_files(), self.focus_active()]),
+                };
+            }
+            Message::ClosePanel => {
+                self.prefs.panel_open = false;
+                self.mark_prefs();
                 return self.focus_active();
+            }
+            Message::Files(msg) => return self.update_files(msg),
+            Message::Editor(msg) => return self.update_editor(msg),
+            Message::FileEditor(editor) => {
+                self.prefs.file_editor = editor;
+                self.mark_prefs();
+            }
+            Message::EditorCommand(command) => {
+                self.prefs.editor_command = command;
+                self.mark_prefs();
             }
             Message::NewTaskInput(v) => self.new_task = v,
             Message::AddTask => {
@@ -1541,11 +1699,6 @@ impl App {
             }
             Message::Worktree(msg) => return self.update_worktree(msg),
             Message::RemoveWorktree(msg) => return self.update_remove(msg),
-            Message::SideTab(tab) => {
-                self.prefs.side_tab = tab;
-                self.mark_prefs();
-                return Task::batch([self.refresh_log(), self.focus_active()]);
-            }
             Message::LogRead(read) => return self.log_read(read),
             Message::GitSync(op) => return self.start_sync(op),
             Message::GitSynced(worktree, result) => return self.sync_done(worktree, result),
@@ -1602,6 +1755,7 @@ impl App {
                 for t in tabs {
                     self.grids.remove(&t);
                     self.activity.remove(&t);
+                    self.drop_session_files(t);
                 }
                 return self.after_select();
             }
@@ -1609,6 +1763,7 @@ impl App {
                 self.dispatch(Command::DeleteTab(tab));
                 self.grids.remove(&tab);
                 self.activity.remove(&tab);
+                self.drop_session_files(tab);
                 return self.after_select();
             }
             Dialog::Pane { pane, resume, .. } => {
@@ -1629,6 +1784,11 @@ impl App {
                 self.dialog = Some(Dialog::RemoveWorktree(form));
                 return self.update_remove(RemoveMsg::Confirm);
             }
+            Dialog::CloseFile { doc, editor: None, .. } => return self.save_doc(doc, true, false),
+            Dialog::CloseFile { doc, editor: Some(_), .. } => {
+                return self.update(Message::Editor(EditorMsg::Discard(doc)));
+            }
+            Dialog::SaveConflict { doc, .. } => return self.update(Message::Editor(EditorMsg::SaveAnyway(doc))),
             Dialog::ConfirmQuit { dont_ask, .. } => {
                 if dont_ask {
                     self.prefs.confirm_quit = false;
@@ -1681,9 +1841,12 @@ impl App {
         Some(format!("{} · {}", tab.title, project.name))
     }
 
-    /// The terminal is on screen: in the visible session, settings closed.
+    /// The terminal is on screen: in the visible session, settings closed, no
+    /// file shown in place of the terminals.
     fn pane_visible(&self, pane: PaneId) -> bool {
-        self.settings.is_none() && self.core.state().pane(pane).map(|p| p.tab) == self.active_tab_id()
+        self.settings.is_none()
+            && self.shown_doc().is_none()
+            && self.core.state().pane(pane).map(|p| p.tab) == self.active_tab_id()
     }
 
     /// An alert from a terminal: mark it, and say so as loudly as the user chose.
@@ -1735,6 +1898,7 @@ impl App {
         self.toasts.retain(|t| t.pane != pane);
         self.dispatch(Command::SelectTab(tab));
         self.dispatch(Command::FocusPane(pane));
+        self.show_terminals();
         let focus = self.after_select();
         match self.window_id {
             Some(id) => Task::batch([focus, window::gain_focus(id)]),
@@ -1748,17 +1912,19 @@ impl App {
         if self.closing {
             return;
         }
-        let attended = self
-            .core
-            .state()
-            .active_tab()
-            .and_then(|t| t.focused_pane)
-            .filter(|_| self.window_focused && self.settings.is_none());
+        // A file shown in place of the terminals hides them; a terminal
+        // editor showing it is looked at instead (so Neovim hears of focus
+        // and can pick up changes agents made meanwhile).
+        let attended = match self.shown_doc() {
+            Some(_) => self.shown_editor_pane(),
+            None => self.core.state().active_tab().and_then(|t| t.focused_pane),
+        }
+        .filter(|_| self.window_focused && self.settings.is_none());
         if attended != self.attended {
-            if let Some(h) = self.attended.and_then(|p| self.core.terminal(p)) {
+            if let Some(h) = self.attended.and_then(|p| self.handle_of(p)) {
                 h.focus_changed(false);
             }
-            if let Some(h) = attended.and_then(|p| self.core.terminal(p)) {
+            if let Some(h) = attended.and_then(|p| self.handle_of(p)) {
                 h.focus_changed(true);
             }
             self.attended = attended;
@@ -1870,6 +2036,21 @@ impl App {
         if self.dialog.is_some() || self.settings.is_some() {
             return Task::none();
         }
+        // With a file in place of the terminals, terminal shortcuts don't act
+        // on terminals out of sight: closing closes the file, and splitting or
+        // moving between terminals brings them back first.
+        if let Some(doc) = self.shown_doc().map(|d| d.id) {
+            match action {
+                Action::CloseTerminal => return self.update(Message::Editor(EditorMsg::Close(doc))),
+                Action::SplitRight
+                | Action::SplitDown
+                | Action::FocusLeft
+                | Action::FocusRight
+                | Action::FocusUp
+                | Action::FocusDown => self.show_terminals(),
+                _ => {}
+            }
+        }
         let s = self.core.state();
         let focused = s.active_tab().and_then(|t| t.focused_pane);
         match action {
@@ -1944,7 +2125,8 @@ impl App {
                     return self.update(Message::FocusPane(target));
                 }
             }
-            Action::ToggleTasks => return self.update(Message::ToggleTasks),
+            Action::ToggleTasks => return self.update(Message::TogglePanel(SideTab::Tasks)),
+            Action::ToggleFiles => return self.update(Message::TogglePanel(SideTab::Files)),
             Action::FontBigger | Action::FontSmaller | Action::FontReset => {
                 self.prefs.font_size = match action {
                     Action::FontBigger => (self.prefs.font_size + 1.0).min(32.0),
@@ -1970,8 +2152,8 @@ impl App {
         } else {
             let terminals = self.drop_zone(self.view_main());
             let mut main = row![self.view_projects(), self.view_tabs(), terminals].height(Length::Fill);
-            if self.prefs.tasks_open && self.core.state().selected_project.is_some() {
-                main = main.push(self.view_tasks());
+            if self.prefs.panel_open && self.core.state().selected_project.is_some() {
+                main = main.push(self.view_side_panel());
             }
             // The second layer shows a dragged task next to the pointer.
             container(stack![main, self.view_task_drag()]).width(Length::Fill).height(Length::Fill).into()
@@ -1983,6 +2165,22 @@ impl App {
             None => column![base].into(),
         }
     }
+}
+
+/// Runs an install of TerminalRooster's own bash or Neovim on a thread,
+/// passing on its progress and then how it ended.
+fn run_install(
+    install: impl FnOnce(&dyn Fn(bundled_bash::Progress)) -> termroost_core::Result<PathBuf> + Send + 'static,
+) -> async_channel::Receiver<InstallEvent> {
+    let (tx, rx) = async_channel::unbounded();
+    std::thread::spawn(move || {
+        let report = tx.clone();
+        let result = install(&move |p| {
+            let _ = report.send_blocking(InstallEvent::Progress(p));
+        });
+        let _ = tx.send_blocking(InstallEvent::Done(result.map_err(|e| e.to_string())));
+    });
+    rx
 }
 
 /// Looks for installed shells on a thread (it may wait on `wsl.exe`).

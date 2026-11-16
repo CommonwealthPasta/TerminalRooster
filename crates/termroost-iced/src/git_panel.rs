@@ -1,30 +1,23 @@
 //! The Git tab of the side panel: the log of the visible session's
-//! repository, next to the Tasks tab. It follows new commits: every git poll
-//! compares the repository's refs, and reads the log again when they moved.
-//! Commits that are on no remote are marked, and the branch's distance to
-//! its upstream is shown, with Pull (rebasing by default) and Push.
+//! repository, between the Tasks and Files tabs. It follows new commits:
+//! every git poll compares the repository's refs, and reads the log again
+//! when they moved. Commits that are on no remote are marked, and the
+//! branch's distance to its upstream is shown, with Pull (rebasing by
+//! default) and Push.
 
 use std::path::PathBuf;
 
 use iced::widget::{button, checkbox, column, container, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Task};
-use serde::{Deserialize, Serialize};
 use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
-use crate::sidebar::{BOLD, branch_label, icon_button, muted_text};
+use crate::side_panel::SideTab;
+use crate::sidebar::{branch_label, icon_button, muted_text};
 use crate::theme;
 
 /// How many commits the log shows.
 const LOG_LIMIT: usize = 200;
-
-/// The tabs of the side panel.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SideTab {
-    #[default]
-    Tasks,
-    Git,
-}
 
 /// What the Git tab's buttons do with the remote.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,10 +91,16 @@ impl App {
         Some(&self.git_of(tab)?.repo)
     }
 
+    /// Whether the session on screen is in a repository, which the Git tab
+    /// needs.
+    pub(crate) fn in_repo(&self) -> bool {
+        self.active_repo().is_some()
+    }
+
     /// Whether the side panel shows the Git tab now. It needs a session in a
     /// repository; otherwise the panel shows the tasks.
     pub(crate) fn git_tab_shown(&self) -> bool {
-        self.prefs.tasks_open && self.prefs.side_tab == SideTab::Git && self.active_repo().is_some()
+        self.prefs.panel_open && self.shown_side_tab() == SideTab::Git
     }
 
     /// Reads the log when the Git tab shows a repository it has not read yet
@@ -167,22 +166,6 @@ impl App {
             }
             _ => self.refresh_log(),
         }
-    }
-
-    /// The Tasks and Git tabs; Git only for a session in a repository.
-    pub(crate) fn side_tabs(&self) -> Element<'_, Message> {
-        let tab = |label: &'static str, which: SideTab| {
-            let selected = self.prefs.side_tab == which || (which == SideTab::Tasks && self.active_repo().is_none());
-            button(text(label).size(11).font(BOLD))
-                .padding([3, 10])
-                .style(theme::side_tab(selected))
-                .on_press(Message::SideTab(which))
-        };
-        let mut tabs = row![tab("TASKS", SideTab::Tasks)].spacing(4);
-        if self.active_repo().is_some() {
-            tabs = tabs.push(tab("GIT", SideTab::Git));
-        }
-        tabs.into()
     }
 
     /// The Git tab: the branch on screen and its latest commits.
