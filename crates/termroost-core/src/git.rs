@@ -183,8 +183,25 @@ pub struct Branches {
     pub local: Vec<String>,
     /// Remote-tracking branches, as `<remote>/<branch>`.
     pub remote: Vec<String>,
-    /// Every working tree, with its checked-out branch (`None`: detached or bare).
-    pub worktrees: Vec<(PathBuf, Option<String>)>,
+    /// Every working tree, the main one first.
+    pub worktrees: Vec<Worktree>,
+}
+
+/// A working tree of a repository, as `git worktree list` reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Worktree {
+    pub path: PathBuf,
+    /// What it has checked out; `None` for a bare repository.
+    pub head: Option<Head>,
+    /// Its folder is gone; `git worktree prune` would forget it.
+    pub prunable: bool,
+}
+
+impl Worktree {
+    /// Whether a session can work in it: it has files, and they exist.
+    pub fn usable(&self) -> bool {
+        self.head.is_some() && !self.prunable
+    }
 }
 
 /// How a worktree for a branch name would be made.
@@ -216,19 +233,26 @@ impl Branches {
         }
         for block in worktrees.split("\n\n") {
             let mut path = None;
+            let mut commit = None;
             let mut branch = None;
+            let mut prunable = false;
             for line in block.lines() {
                 if let Some(p) = line.strip_prefix("worktree ") {
                     // Git for Windows lists `D:/src/app`; use native separators.
                     #[cfg(windows)]
                     let p = p.replace('/', "\\");
                     path = Some(PathBuf::from(p));
+                } else if let Some(c) = line.strip_prefix("HEAD ") {
+                    commit = Some(c.get(..7).unwrap_or(c).to_owned());
                 } else if let Some(b) = line.strip_prefix("branch ") {
                     branch = Some(b.strip_prefix("refs/heads/").unwrap_or(b).to_owned());
+                } else if line == "prunable" || line.starts_with("prunable ") {
+                    prunable = true;
                 }
             }
             if let Some(path) = path {
-                out.worktrees.push((path, branch));
+                let head = branch.map(Head::Branch).or(commit.map(Head::Detached));
+                out.worktrees.push(Worktree { path, head, prunable });
             }
         }
         out
@@ -236,8 +260,9 @@ impl Branches {
 
     /// What making a worktree for `branch` would do.
     pub fn plan(&self, branch: &str) -> Plan {
-        if let Some((dir, _)) = self.worktrees.iter().find(|(_, b)| b.as_deref() == Some(branch)) {
-            return Plan::CheckedOut(dir.clone());
+        // Also a worktree whose folder is gone: git refuses until it is pruned.
+        if let Some(w) = self.worktrees.iter().find(|w| matches!(&w.head, Some(Head::Branch(b)) if b == branch)) {
+            return Plan::CheckedOut(w.path.clone());
         }
         if self.local.iter().any(|b| b == branch) {
             return Plan::Existing;
@@ -259,6 +284,17 @@ impl Branches {
             None => Plan::NewBranch,
         }
     }
+}
+
+/// Whether two paths are the same without asking the disk: git writes
+/// `D:/src/app`, Windows `d:\src\app\`.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| {
+        let s = normalize(p).to_string_lossy().replace('\\', "/");
+        let s = s.trim_end_matches('/');
+        if cfg!(windows) { s.to_lowercase() } else { s.to_owned() }
+    };
+    key(a) == key(b)
 }
 
 /// A branch name made safe for a folder name: `feature/login` -> `feature-login`.
@@ -413,6 +449,15 @@ mod tests {
     }
 
     #[test]
+    fn same_paths() {
+        assert!(same_path(Path::new("/src/app/"), Path::new("/src/./app")));
+        assert!(!same_path(Path::new("/src/app"), Path::new("/src/app-x")));
+        if cfg!(windows) {
+            assert!(same_path(Path::new("D:/src/App"), Path::new(r"d:\src\app\")));
+        }
+    }
+
+    #[test]
     fn slugs() {
         assert_eq!(slug("feature/login"), "feature-login");
         assert_eq!(slug("  fix: the  thing "), "fix-the-thing");
@@ -424,15 +469,20 @@ mod tests {
     fn plans() {
         let refs = "refs/heads/main\nrefs/heads/wip\nrefs/remotes/origin/HEAD\nrefs/remotes/origin/main\n\
                     refs/remotes/origin/shared\nrefs/remotes/fork/shared\nrefs/remotes/fork/only-fork\n";
-        let list = "worktree D:/src/app\nHEAD abc\nbranch refs/heads/main\n\n\
-                    worktree D:/src/app-old\nHEAD def\ndetached\n\n";
+        let list = "worktree D:/src/app\nHEAD abcdef0123\nbranch refs/heads/main\n\n\
+                    worktree D:/src/app-old\nHEAD 0123456789\ndetached\n\n\
+                    worktree D:/src/app-gone\nHEAD 0123456789\nbranch refs/heads/gone\nprunable gitdir file points to \
+                    non-existent location\n\n";
         let b = Branches::parse(refs, list);
         assert_eq!(b.local, vec!["main", "wip"]);
-        assert_eq!(
-            b.worktrees,
-            vec![(PathBuf::from("D:/src/app"), Some("main".into())), ("D:/src/app-old".into(), None)]
-        );
+        let main = Worktree { path: "D:/src/app".into(), head: Some(Head::Branch("main".into())), prunable: false };
+        let old =
+            Worktree { path: "D:/src/app-old".into(), head: Some(Head::Detached("0123456".into())), prunable: false };
+        let gone = Worktree { path: "D:/src/app-gone".into(), head: Some(Head::Branch("gone".into())), prunable: true };
+        assert_eq!(b.worktrees, vec![main, old, gone.clone()]);
+        assert!(!gone.usable());
         assert_eq!(b.plan("main"), Plan::CheckedOut("D:/src/app".into()));
+        assert_eq!(b.plan("gone"), Plan::CheckedOut("D:/src/app-gone".into()));
         assert_eq!(b.plan("wip"), Plan::Existing);
         assert_eq!(b.plan("shared"), Plan::Track("origin/shared".into()));
         assert_eq!(b.plan("only-fork"), Plan::Track("fork/only-fork".into()));
