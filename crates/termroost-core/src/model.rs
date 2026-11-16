@@ -81,6 +81,10 @@ pub struct Pane {
     pub resume_command: Option<String>,
     /// Coding agent launched in this pane, with its session id once known.
     pub agent: Option<AgentSession>,
+    /// Directory the shell was last in, as the shell reported it. The shell
+    /// starts here again when the pane is restored; `None` means the tab's
+    /// working directory.
+    pub cwd: Option<PathBuf>,
     pub created_at: i64,
 }
 

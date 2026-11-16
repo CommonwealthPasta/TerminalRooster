@@ -12,6 +12,11 @@
 //! * `OSC 9 ; <text>` (iTerm2), `OSC 777 ; notify ; <title> ; <body>`
 //!   (urxvt, Ghostty, VTE) and `OSC 99` (kitty): a program asks for a desktop
 //!   notification, e.g. Codex or Grok at the end of a turn.
+//! * `OSC 7 ; file://<host>/<path>`, `OSC 9 ; 9 ; <path>` (ConEmu, Windows
+//!   Terminal) and `OSC 633 ; P ; Cwd=<path>` (VS Code): the shell's working
+//!   directory, so a restored terminal can start there again.
+
+use std::path::PathBuf;
 
 /// A sequence of interest found in the output.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +32,8 @@ pub(crate) enum Signal {
     Status { state: String, app: Option<String>, kind: Option<String> },
     /// A program asked for a desktop notification.
     Notify { title: Option<String>, body: String },
+    /// The shell's working directory, as an absolute path of this system.
+    Cwd(PathBuf),
 }
 
 /// Longest OSC payload kept; longer ones (e.g. huge OSC 52 copies) are skipped.
@@ -113,7 +120,17 @@ impl OscScanner {
                         let line = unescape(args.split(';').next().unwrap_or_default());
                         out.push(Signal::CommandLine(clean(&line)));
                     }
+                    "P" if code == "633" => {
+                        if let Some(dir) = args.strip_prefix("Cwd=").and_then(|d| cwd(&unescape(d))) {
+                            out.push(Signal::Cwd(dir));
+                        }
+                    }
                     _ => {}
+                }
+            }
+            "7" => {
+                if let Some(dir) = file_url_path(rest).and_then(|p| cwd(&p)) {
+                    out.push(Signal::Cwd(dir));
                 }
             }
             "9" => {
@@ -121,8 +138,14 @@ impl OscScanner {
                 if sub == "4" {
                     let state = args.split(';').next().and_then(|s| s.trim().parse::<u8>().ok()).unwrap_or(0);
                     out.push(Signal::Progress(state.min(4)));
+                } else if sub == "9" {
+                    let dir = args.trim();
+                    let dir = dir.strip_prefix('"').and_then(|d| d.strip_suffix('"')).unwrap_or(dir);
+                    if let Some(dir) = cwd(dir) {
+                        out.push(Signal::Cwd(dir));
+                    }
                 } else if !sub.is_empty() && sub.bytes().all(|b| b.is_ascii_digit()) {
-                    // Other ConEmu commands (`9;9;<cwd>` and so on), not notifications.
+                    // Other ConEmu commands, not notifications.
                 } else if !rest.trim().is_empty() {
                     out.push(Signal::Notify { title: None, body: clean(rest) });
                 }
@@ -221,6 +244,64 @@ fn unescape(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The path of an `OSC 7` URL: `file://<host>/<path>` (or kitty's
+/// `kitty-shell-cwd://`), percent-decoded. The host is not checked: a shell
+/// on another machine (ssh) names a directory there, which then just does
+/// not exist here.
+fn file_url_path(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("file://").or_else(|| url.strip_prefix("kitty-shell-cwd://"))?;
+    let path = &rest[rest.find('/')?..];
+    let b = path.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let Some(v) = path.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// A reported directory as an absolute path of this system, if it is one.
+fn cwd(reported: &str) -> Option<PathBuf> {
+    if reported.chars().any(char::is_control) {
+        return None;
+    }
+    let path = PathBuf::from(if cfg!(windows) { windows_path(reported) } else { reported.to_owned() });
+    path.is_absolute().then_some(path)
+}
+
+/// A directory as Windows names it. Shells that know only Unix-style paths
+/// report drives as `/c/...` (Git Bash, MSYS2), `/cygdrive/c/...` (Cygwin) or
+/// `/mnt/c/...` (WSL), and `file://` URLs give `/C:/...`.
+fn windows_path(path: &str) -> String {
+    let drive = |rest: &str| -> Option<String> {
+        let mut chars = rest.chars();
+        let letter = chars.next().filter(char::is_ascii_alphabetic)?;
+        let tail = chars.as_str();
+        let tail = match tail.strip_prefix(':') {
+            Some(t) => t,
+            None => tail,
+        };
+        (tail.is_empty() || tail.starts_with('/')).then(|| format!("{}:{}", letter.to_ascii_uppercase(), tail))
+    };
+    let converted = path
+        .strip_prefix("/cygdrive/")
+        .or_else(|| path.strip_prefix("/mnt/"))
+        .or_else(|| path.strip_prefix('/'))
+        .and_then(drive)
+        .unwrap_or_else(|| path.to_owned());
+    let converted = converted.replace('/', "\\");
+    // `C:` alone is the current directory on drive C, not its root.
+    if converted.len() == 2 && converted.ends_with(':') { converted + "\\" } else { converted }
+}
+
 /// Notification text without control characters, trimmed and kept short.
 fn clean(s: &str) -> String {
     let s: String = s.chars().filter(|c| !c.is_control()).collect();
@@ -266,7 +347,7 @@ mod tests {
             scan(&[b"\x1b]9;Agent turn complete\x07"]),
             vec![Signal::Notify { title: None, body: "Agent turn complete".into() }]
         );
-        assert!(scan(&[b"\x1b]9;9;C:\\Users\x07"]).is_empty(), "ConEmu cwd report");
+        assert!(scan(&[b"\x1b]9;9;C:\\Users\x07"]).iter().all(|s| matches!(s, Signal::Cwd(_))), "ConEmu cwd report");
         assert_eq!(
             scan(&[b"\x1b]777;notify;Codex;Done; all good\x1b\\"]),
             vec![Signal::Notify { title: Some("Codex".into()), body: "Done; all good".into() }]
@@ -302,5 +383,52 @@ mod tests {
         big.extend(std::iter::repeat_n(b'A', MAX_OSC * 2));
         big.extend(b"\x07\x1b]133;D;4\x07");
         assert_eq!(scan(&[&big]), vec![Signal::CommandDone(Some(4))]);
+    }
+
+    fn cwds(chunks: &[&[u8]]) -> Vec<String> {
+        scan(chunks)
+            .into_iter()
+            .map(|s| match s {
+                Signal::Cwd(d) => d.display().to_string(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn working_directory_reports() {
+        assert_eq!(cwds(&[b"\x1b]7;file://box/home/me/my%20dir\x07"]), ["/home/me/my dir"]);
+        assert_eq!(cwds(&[b"\x1b]7;kitty-shell-cwd://box/srv\x1b\\"]), ["/srv"]);
+        assert_eq!(cwds(&[b"\x1b]633;P;Cwd=/home/me/a\\x3bb\x07"]), ["/home/me/a;b"]);
+        assert_eq!(cwds(&[b"\x1b]9;9;\"/opt/x\"\x07"]), ["/opt/x"]);
+        // Not absolute, not a file URL, or another VS Code property.
+        assert!(cwds(&[b"\x1b]7;relative\x07\x1b]7;http://x/y\x07\x1b]633;P;IsWindows=False\x07"]).is_empty());
+        assert!(cwds(&[b"\x1b]9;9;C:\\Users\x07"]).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn working_directory_reports() {
+        assert_eq!(cwds(&[b"\x1b]9;9;\"C:\\Users\\me\"\x07"]), [r"C:\Users\me"]);
+        assert_eq!(cwds(&[b"\x1b]633;P;Cwd=D:/projects/a\\x3bb\x07"]), [r"D:\projects\a;b"]);
+        assert_eq!(cwds(&[b"\x1b]7;file://box/C:/Program%20Files\x07"]), [r"C:\Program Files"]);
+        assert_eq!(cwds(&[b"\x1b]7;file://box/d/projects\x07"]), [r"D:\projects"]);
+        // A path inside MSYS2 or WSL that has no Windows name.
+        assert!(cwds(&[b"\x1b]7;file://box/home/me\x07"]).is_empty());
+    }
+
+    #[test]
+    fn unix_style_paths_become_windows_paths() {
+        assert_eq!(windows_path("/c/Users/me"), r"C:\Users\me");
+        assert_eq!(windows_path("/cygdrive/d/x"), r"D:\x");
+        assert_eq!(windows_path("/mnt/e/src"), r"E:\src");
+        assert_eq!(windows_path("/C:/Windows"), r"C:\Windows");
+        assert_eq!(windows_path("C:/projects/app"), r"C:\projects\app");
+        assert_eq!(windows_path("/d"), r"D:\");
+        assert_eq!(windows_path(r"\\server\share"), r"\\server\share");
+        // Not a drive: left alone (and not absolute on Windows).
+        assert_eq!(windows_path("/home/me"), r"\home\me");
+        assert_eq!(windows_path("/mnt/wsl"), r"\mnt\wsl");
     }
 }

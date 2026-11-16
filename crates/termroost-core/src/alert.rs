@@ -138,6 +138,7 @@ impl Tracker {
                 self.progress_busy = true;
                 None
             }
+            Signal::Cwd(_) => None,
             Signal::Status { state, app, kind } => {
                 let agent = app.as_deref().and_then(AgentKind::parse);
                 let event = match state.as_str() {

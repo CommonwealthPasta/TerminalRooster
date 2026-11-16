@@ -9,7 +9,7 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 - **Reordering:** drag a project or session up or down its list; a line shows where it will land. Dropping it outside the list cancels. The move shortcuts below do the same from the keyboard.
 - **Tasks** per project in the right panel. You can mark them done and link each one to a session, with its dropdown or by dragging the task onto a session in the list or onto the terminals on screen. Sessions show a badge with their open-task count.
 - **Git:** each session shows the branch its directory is on. **Worktrees** (at the top of a session) lists the repository's worktrees; **Switch** moves the session to one, **New session** opens another session in it. Its **New worktree** part runs `git worktree add` beside the repository, so on the same drive (`app` → `app-feature-x`), and opens the worktree in a new session named after the branch, or moves this session there when **Move … into it** is checked. When a session moves, idle terminals restart in the worktree with their scrollback kept. Terminals running a program or an agent are left alone.
-- **Everything is persisted in SQLite** as it changes: projects, sessions, split layouts, focus, tasks, window geometry and terminal scrollback. After a crash or a normal close, the app reopens as you left it.
+- **Everything is persisted in SQLite** as it changes: projects, sessions, split layouts, focus, tasks, window geometry, terminal scrollback and the directory each terminal's shell is in. After a crash or a normal close, the app reopens as you left it.
 
 ## Running
 
@@ -93,7 +93,7 @@ No agent needs any setup.
 - **bash** gets `PROMPT_COMMAND` in its environment. That sources the script at the first prompt, after `~/.bashrc`. If your `~/.bashrc` replaces `PROMPT_COMMAND` instead of adding to it, there is no integration.
 - **PowerShell** runs the script after your profile, with `-NoExit -Command`. This is skipped when the shell's command line already runs a command or a file.
 
-Other shells (zsh, fish, cmd, WSL) start unchanged. They work too if something in them sends `OSC 133;D;<status>`. Turn the integration off in Settings → Notifications.
+Other shells (zsh, fish, cmd, WSL) start unchanged. They work too if something in them sends `OSC 133;D;<status>`, and `OSC 7` or `OSC 9;9` for the directory (fish and many prompt themes do). Turn the integration off in Settings → Notifications.
 
 ### Quitting with programs running
 
@@ -115,7 +115,7 @@ Panics are written to the log with a backtrace. The level comes from `TERMINALRO
 Terminal processes cannot survive a crash, and they end when the app closes. On reopen, every terminal gets the following:
 
 - Its **saved scrollback**, with colors. It is saved every 5 seconds and on close, and shown under a "restored session" banner.
-- A **fresh shell** in the session's working directory.
+- A **fresh shell** in the directory the last one was in, if the shell reported it (see **Shell integration** under [How it knows](#how-it-knows)). Otherwise, or if that directory is gone, it starts in the session's working directory.
 - Its **resume command**, which runs automatically.
 
 Restored sessions start their shells the first time you open them, so dozens of agents don't all launch at once.

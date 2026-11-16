@@ -113,6 +113,8 @@ pub(crate) struct Shared {
     palette: SharedPalette,
     /// Turns what the program sends into alerts (failed commands, finished agents).
     tracker: Mutex<Tracker>,
+    /// The directory the shell last reported (shells report it at every prompt).
+    cwd: Mutex<Option<PathBuf>>,
 }
 
 impl Shared {
@@ -127,10 +129,23 @@ impl Shared {
         }
     }
 
-    /// A sequence found in the output by the PTY tap.
+    /// A sequence found in the output by the PTY tap. Runs while the PTY
+    /// thread may hold the term lock, so it must not take it.
     pub(crate) fn on_signal(&self, signal: Signal) {
-        let alert = self.tracker.lock().unwrap().signal(signal);
-        self.alert(alert);
+        match signal {
+            Signal::Cwd(dir) => {
+                let mut cwd = self.cwd.lock().unwrap();
+                if cwd.as_ref() != Some(&dir) {
+                    *cwd = Some(dir.clone());
+                    drop(cwd);
+                    self.send(Event::CwdChanged { pane: self.pane, dir });
+                }
+            }
+            signal => {
+                let alert = self.tracker.lock().unwrap().signal(signal);
+                self.alert(alert);
+            }
+        }
     }
 
     fn bump(&self) {
@@ -257,6 +272,7 @@ impl TerminalHandle {
             size: Mutex::new(size),
             palette,
             tracker: Mutex::new(Tracker::default()),
+            cwd: Mutex::new(None),
         });
         let config = term::Config { scrolling_history: scrollback_lines, ..Default::default() };
         let term = Term::new(config, &size, Proxy { shared: shared.clone(), run: None });
@@ -308,6 +324,8 @@ impl TerminalHandle {
             ..Default::default()
         };
         let size = *shared.size.lock().unwrap();
+        // The new shell reports its directory afresh.
+        *shared.cwd.lock().unwrap() = None;
         let pty = tty::new(&options, size.window_size(), shared.pane.0 as u64)?;
         #[cfg(not(windows))]
         let shell_pid = pty.child().id();
