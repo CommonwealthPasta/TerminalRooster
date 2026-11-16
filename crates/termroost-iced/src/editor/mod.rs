@@ -5,6 +5,7 @@ mod disk;
 mod external;
 mod history;
 mod keys;
+mod saved;
 mod text;
 mod view;
 
@@ -68,6 +69,11 @@ pub enum DocKind {
     /// Being read.
     Loading,
     Text(Box<TextDoc>),
+    /// Open before a restart, not read (or its editor not started) yet.
+    Restored {
+        /// It was open in a terminal editor.
+        terminal: bool,
+    },
     /// A terminal editor (Neovim, Vim) has it open.
     Terminal {
         handle: TerminalHandle,
@@ -227,7 +233,65 @@ impl App {
     pub(crate) fn show_terminals(&mut self) {
         if let Some(files) = self.session_files_mut() {
             files.shown = None;
+            self.open_files_dirty = true;
         }
+    }
+
+    /// Brings back the files that were open before the last restart.
+    pub(crate) fn restore_open_files(&mut self) {
+        let Some(saved) =
+            self.core.state().gui_value(saved::KEY).and_then(|v| serde_json::from_str::<saved::Saved>(v).ok())
+        else {
+            return;
+        };
+        let mut next = self.next_doc;
+        let state = self.core.state();
+        let restored = saved.restore(
+            |tab| state.tab(tab).is_some(),
+            || {
+                next += 1;
+                DocId(next)
+            },
+        );
+        self.next_doc = next;
+        self.editors.extend(restored);
+    }
+
+    /// The open files to keep across a restart, as stored, if they changed.
+    pub(crate) fn take_open_files_value(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.open_files_dirty) {
+            return None;
+        }
+        serde_json::to_string(&saved::Saved::of(&self.editors)).ok()
+    }
+
+    /// The key [`App::take_open_files_value`] is stored under.
+    pub(crate) const OPEN_FILES_KEY: &str = saved::KEY;
+
+    /// A file brought back from before a restart is read, or its terminal
+    /// editor started, once it is shown. Called after every update, so no way
+    /// of showing a file misses it.
+    pub(crate) fn revive_shown(&mut self) -> Task<Message> {
+        let Some(tab) = self.active_tab_id() else { return Task::none() };
+        let Some(&OpenFile { id, ref path, kind: DocKind::Restored { terminal } }) = self.shown_doc() else {
+            return Task::none();
+        };
+        let path = path.clone();
+        if !terminal {
+            if let Some(doc) = self.doc_mut(id) {
+                doc.kind = DocKind::Loading;
+            }
+            return self.read_doc(id, path);
+        }
+        match self.launch_editor(tab, &path) {
+            Some(kind) => {
+                if let Some(doc) = self.doc_mut(id) {
+                    doc.kind = kind;
+                }
+            }
+            None => self.close_doc(id),
+        }
+        self.focus_active()
     }
 
     fn doc(&self, id: DocId) -> Option<(TabId, &OpenFile)> {
@@ -241,7 +305,7 @@ impl App {
     fn text_mut(&mut self, id: DocId) -> Option<&mut TextDoc> {
         match &mut self.doc_mut(id)?.kind {
             DocKind::Text(t) => Some(t),
-            DocKind::Loading | DocKind::Terminal { .. } => None,
+            DocKind::Loading | DocKind::Restored { .. } | DocKind::Terminal { .. } => None,
         }
     }
 
@@ -310,6 +374,7 @@ impl App {
 
     /// Closes the files of a session that is going away, ending their terminal editors.
     pub(crate) fn drop_session_files(&mut self, tab: TabId) {
+        self.open_files_dirty = true;
         for doc in self.editors.remove(&tab).map(|f| f.open).unwrap_or_default() {
             if let DocKind::Terminal { handle, .. } = doc.kind {
                 self.core.close_scratch_terminal(handle.pane());
@@ -345,7 +410,7 @@ impl App {
         Some(match &self.shown_doc()?.kind {
             DocKind::Text(_) => operation::focus(FILE_EDITOR),
             DocKind::Terminal { handle, .. } => operation::focus(crate::terminal_view::widget_id(handle.pane())),
-            DocKind::Loading => Task::none(),
+            DocKind::Loading | DocKind::Restored { .. } => Task::none(),
         })
     }
 
@@ -356,6 +421,7 @@ impl App {
             self.error = Some("Files open in place of a session's terminals: start a session first.".into());
             return Task::none();
         };
+        self.open_files_dirty = true;
         let files = self.editors.entry(tab).or_default();
         if let Some(doc) = files.open.iter().find(|d| d.path == path) {
             files.shown = Some(doc.id);
@@ -364,11 +430,20 @@ impl App {
         self.next_doc += 1;
         let id = DocId(self.next_doc);
         if self.prefs.file_editor == FileEditor::Terminal {
-            return self.open_in_terminal_editor(tab, id, path);
+            let Some(kind) = self.launch_editor(tab, &path) else { return Task::none() };
+            let files = self.editors.entry(tab).or_default();
+            files.open.push(OpenFile { id, path, kind });
+            files.shown = Some(id);
+            return self.focus_active();
         }
         let files = self.editors.entry(tab).or_default();
         files.open.push(OpenFile { id, path: path.clone(), kind: DocKind::Loading });
         files.shown = Some(id);
+        self.read_doc(id, path)
+    }
+
+    /// Reads a file for the built-in editor, on a thread.
+    fn read_doc(&self, id: DocId, path: PathBuf) -> Task<Message> {
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let _ = tx.send_blocking(disk::read(&path));
@@ -378,29 +453,24 @@ impl App {
         })
     }
 
-    /// Opens `path` in Neovim or Vim (or the editor command set), running in
-    /// a terminal in the session's folder.
-    fn open_in_terminal_editor(&mut self, tab: TabId, id: DocId, path: PathBuf) -> Task<Message> {
+    /// Starts Neovim or Vim (or the editor command set) on `path`, in a
+    /// terminal in session `tab`'s folder. `None`, with a banner saying why,
+    /// when it can't.
+    fn launch_editor(&mut self, tab: TabId, path: &Path) -> Option<DocKind> {
         let s = self.core.state();
-        let Some(root) = s.tab(tab).map(|t| s.tab_working_dir(t)) else { return Task::none() };
-        let launch = match external::launch_here(&self.prefs.editor_command, &path, &root) {
+        let root = s.tab(tab).map(|t| s.tab_working_dir(t))?;
+        let launch = match external::launch_here(&self.prefs.editor_command, path, &root) {
             Ok(l) => l,
             Err(e) => {
-                self.error = Some(format!("Can't open {} in an editor: {e}.", self.file_label(Some(tab), &path)));
-                return Task::none();
+                self.error = Some(format!("Can't open {} in an editor: {e}.", self.file_label(Some(tab), path)));
+                return None;
             }
         };
         match self.core.open_program_terminal(&root, launch.command, launch.env, GridSize::default()) {
-            Ok(handle) => {
-                let kind = DocKind::Terminal { handle, name: launch.name, started: Instant::now() };
-                let files = self.editors.entry(tab).or_default();
-                files.open.push(OpenFile { id, path, kind });
-                files.shown = Some(id);
-                self.focus_active()
-            }
+            Ok(handle) => Some(DocKind::Terminal { handle, name: launch.name, started: Instant::now() }),
             Err(e) => {
                 self.error = Some(format!("Could not start {}: {e}", launch.name));
-                Task::none()
+                None
             }
         }
     }
@@ -458,6 +528,7 @@ impl App {
     /// Closes a file; its session shows the file next to it, else its terminals.
     /// A terminal editor is ended.
     fn close_doc(&mut self, id: DocId) {
+        self.open_files_dirty = true;
         let mut closed = None;
         for files in self.editors.values_mut() {
             let Some(i) = files.open.iter().position(|d| d.id == id) else { continue };
@@ -513,6 +584,7 @@ impl App {
             EditorMsg::Show(id) => {
                 if let Some(files) = self.session_files_mut() {
                     files.shown = id.filter(|id| files.open.iter().any(|d| d.id == *id));
+                    self.open_files_dirty = true;
                 }
                 self.focus_active()
             }

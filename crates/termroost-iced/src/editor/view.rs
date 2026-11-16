@@ -49,7 +49,7 @@ impl App {
     /// A file shown in place of the terminals.
     pub(crate) fn view_doc<'a>(&'a self, doc: &'a OpenFile) -> Element<'a, Message> {
         match &doc.kind {
-            DocKind::Loading => center(muted_text("Reading…")).into(),
+            DocKind::Loading | DocKind::Restored { .. } => center(muted_text("Reading…")).into(),
             // Neovim or Vim: a terminal like the session's, with the keyboard
             // unless a dialog is open.
             DocKind::Terminal { handle, .. } => container(TerminalView::new(

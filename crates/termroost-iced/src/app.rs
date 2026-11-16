@@ -427,6 +427,8 @@ pub struct App {
     pub(crate) next_doc: u64,
     /// The last version number given to the text of an open file.
     pub(crate) next_version: u64,
+    /// The list of open files changed since it was last saved.
+    pub(crate) open_files_dirty: bool,
     /// Open files are being compared with the disk.
     pub(crate) disk_polling: bool,
     /// Tabs with output the user has not looked at yet.
@@ -534,6 +536,7 @@ impl App {
             editors: HashMap::new(),
             next_doc: 0,
             next_version: 0,
+            open_files_dirty: false,
             disk_polling: false,
             activity: HashSet::new(),
             error: None,
@@ -563,6 +566,7 @@ impl App {
         notify::init(app.core.data_dir());
         app.apply_theme();
         app.ensure_active_grid();
+        app.restore_open_files();
         app.codex_hook = app.core.codex_hook_status();
         if app.codex_hook.codex_found && app.codex_hook.installed_in.is_none() && !app.prefs.codex_hook_asked {
             app.dialog = Some(Dialog::CodexHook);
@@ -571,8 +575,11 @@ impl App {
         if renamed.moved_from.is_some() || renamed.codex_hook_updated {
             app.dialog = Some(Dialog::Renamed(renamed.clone()));
         }
+        // A file shown before the restart is read again (or its editor started).
+        let revived = app.revive_shown();
         app.sync_attention();
         let task = Task::batch([
+            revived,
             app.focus_active(),
             iced::system::theme().map(Message::SystemTheme),
             detect_shells(),
@@ -680,7 +687,12 @@ impl App {
                 _ => None,
             }));
         }
-        if !self.layout_dirty.is_empty() || self.prefs_dirty || self.themes_dirty || !self.toasts.is_empty() {
+        if !self.layout_dirty.is_empty()
+            || self.prefs_dirty
+            || self.themes_dirty
+            || self.open_files_dirty
+            || !self.toasts.is_empty()
+        {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
@@ -788,6 +800,9 @@ impl App {
             let value = self.themes.to_json();
             self.dispatch(Command::SetGuiValue { key: themes::THEMES_KEY.into(), value });
         }
+        if let Some(value) = self.take_open_files_value() {
+            self.dispatch(Command::SetGuiValue { key: App::OPEN_FILES_KEY.into(), value });
+        }
     }
 
     pub(crate) fn after_select(&mut self) -> Task<Message> {
@@ -806,7 +821,9 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        let revived = self.revive_shown();
         self.sync_attention();
+        let task = Task::batch([task, revived]);
         match self.ensure_files_root() {
             Some(read) => Task::batch([task, read]),
             None => task,
