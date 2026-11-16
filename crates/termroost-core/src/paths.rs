@@ -16,7 +16,7 @@ pub fn default_data_dir() -> Result<PathBuf> {
     directories::ProjectDirs::from("", "", "termroost").map(|d| d.data_dir().to_path_buf()).ok_or(Error::NoDataDir)
 }
 
-/// The data directory used before the project was renamed to TermRoost.
+/// The data directory used before the project was renamed from agentdeck.
 pub fn legacy_data_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "agentdeck").map(|d| d.data_dir().to_path_buf())
 }

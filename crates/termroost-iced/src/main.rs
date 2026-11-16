@@ -30,7 +30,7 @@ fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
     // Flushes the log file when main returns.
     let _log_guard = logging::init(data_dir.as_deref());
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "TermRoost starting");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "TerminalRooster starting");
     // Lets desktops show the icon for a build run without installing a package.
     #[cfg(target_os = "linux")]
     desktop_entry::ensure();
@@ -42,7 +42,7 @@ fn main() -> iced::Result {
     }
 
     // Terminals started from here must not believe they run inside another
-    // Claude Code session (e.g. when TermRoost itself was launched from one).
+    // Claude Code session (e.g. when TerminalRooster itself was launched from one).
     // SAFETY: no other threads exist yet.
     unsafe {
         std::env::remove_var("CLAUDECODE");
@@ -54,7 +54,7 @@ fn main() -> iced::Result {
         Err(e) => {
             tracing::error!(error = %e, "could not open the core");
             let _ = rfd::MessageDialog::new()
-                .set_title("TermRoost")
+                .set_title("TerminalRooster")
                 .set_description(e.to_string())
                 .set_level(rfd::MessageLevel::Error)
                 .show();
@@ -104,6 +104,6 @@ fn main() -> iced::Result {
         application = application.font(font);
     }
     let result = application.run();
-    tracing::info!("TermRoost exited");
+    tracing::info!("TerminalRooster exited");
     result
 }

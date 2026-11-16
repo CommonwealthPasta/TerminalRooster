@@ -43,7 +43,7 @@ fn codex_window(handle: &termroost_core::TerminalHandle, font_size: f32) -> Elem
     let term = TerminalView::new(handle.clone(), true, font_size, Message::Noop, Message::Noop);
     let content = column![
         row![
-            text("Type /hooks and trust the TermRoost hook.").size(14).width(Length::Fill),
+            text("Type /hooks and trust the TerminalRooster hook.").size(14).width(Length::Fill),
             button(text("Done")).padding([5, 14]).style(button::primary).on_press(Message::DialogCancel),
         ]
         .spacing(12)
@@ -141,7 +141,7 @@ impl App {
             Dialog::CodexTrust(handle) => return codex_window(handle, self.prefs.font_size),
             Dialog::CodexHook => column![
                 text("Track Codex sessions?").size(18).font(BOLD),
-                text("Add a small hook to Codex so TermRoost always resumes the right conversation in each terminal.",)
+                text("Add a small hook to Codex so TerminalRooster always resumes the right conversation in each terminal.",)
                     .size(13),
                 muted_text("You can change this later in Settings."),
                 row![
@@ -193,7 +193,7 @@ impl App {
                     start,
                     muted_text(
                         "Claude Code, Codex and Grok are detected automatically, also when you start them yourself, \
-                         and TermRoost follows the session they are in (including /clear). After a restart each \
+                         and TerminalRooster follows the session they are in (including /clear). After a restart each \
                          terminal resumes its own conversation, not just the most recent one.",
                     ),
                     field(

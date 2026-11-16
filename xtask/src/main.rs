@@ -1,4 +1,4 @@
-//! Build automation for TermRoost.
+//! Build automation for TerminalRooster.
 //!
 //! ```text
 //! cargo xtask package [deb|rpm|all]   build release packages into dist/

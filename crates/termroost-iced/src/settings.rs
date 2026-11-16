@@ -333,7 +333,7 @@ impl App {
             "Integrations",
             column![
                 text("Codex session hook").size(14).font(BOLD),
-                muted_text("Lets TermRoost resume the right Codex conversation in each terminal."),
+                muted_text("Lets TerminalRooster resume the right Codex conversation in each terminal."),
                 text(status).size(13),
                 row(actions).spacing(8),
             ]

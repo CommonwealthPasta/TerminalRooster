@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::APP_ID;
 
-const MARKER: &str = "# Written by TermRoost for a build that is not installed";
+const MARKER: &str = "# Written by TerminalRooster for a build that is not installed";
 const TEMPLATE: &str = include_str!("../../../packaging/linux/io.github.Davenport_Physics.TermRoost.desktop");
 const ICONS: [(u32, &[u8]); 7] = [
     (16, include_bytes!("../../../packaging/icons/termroost-16.png")),

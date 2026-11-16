@@ -341,9 +341,9 @@ impl App {
     pub fn title(&self) -> String {
         let s = self.core.state();
         match (s.selected_project.and_then(|p| s.project(p)), s.active_tab()) {
-            (Some(p), Some(t)) => format!("{} · {} — TermRoost", t.title, p.name),
-            (Some(p), None) => format!("{} — TermRoost", p.name),
-            _ => "TermRoost".to_owned(),
+            (Some(p), Some(t)) => format!("{} · {} — TerminalRooster", t.title, p.name),
+            (Some(p), None) => format!("{} — TerminalRooster", p.name),
+            _ => "TerminalRooster".to_owned(),
         }
     }
 

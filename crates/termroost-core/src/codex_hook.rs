@@ -2,15 +2,15 @@
 //! Codex session is in.
 //!
 //! Codex has no per-process session record (see [`crate::detect`]), but it
-//! runs user hooks with the thread id. With the user's consent TermRoost adds
+//! runs user hooks with the thread id. With the user's consent TerminalRooster adds
 //! a `SessionStart` and a `UserPromptSubmit` hook to `~/.codex/hooks.json`.
 //! The hook copies Codex's event JSON into `<data dir>/codex-hooks/`, only
-//! while TermRoost runs (a `.running` marker), and TermRoost matches each
+//! while TerminalRooster runs (a `.running` marker), and TerminalRooster matches each
 //! report to the Codex terminal in that folder that just submitted a prompt or
 //! just started.
 //!
 //! Codex requires new hooks to be trusted once (`/hooks` inside Codex) before
-//! they run; TermRoost cannot do that for the user.
+//! they run; TerminalRooster cannot do that for the user.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::model::PaneId;
 
-/// Marks TermRoost's hook entries so they can be found and removed.
+/// Marks TerminalRooster's hook entries so they can be found and removed.
 pub const MARKER: &str = "termroost-codex-hook";
 const EVENTS: [&str; 2] = ["SessionStart", "UserPromptSubmit"];
 const RUNNING: &str = ".running";
@@ -33,7 +33,7 @@ const RUNNING: &str = ".running";
 pub struct CodexHookStatus {
     /// A Codex configuration directory exists.
     pub codex_found: bool,
-    /// The file holding TermRoost's hook, if installed.
+    /// The file holding TerminalRooster's hook, if installed.
     pub installed_in: Option<PathBuf>,
     /// The file the hook is (or would be) added to.
     pub hooks_file: PathBuf,
@@ -61,7 +61,7 @@ pub(crate) fn status(codex_home: &Path) -> CodexHookStatus {
     }
 }
 
-/// Index of TermRoost's matcher group within an event's hooks.
+/// Index of TerminalRooster's matcher group within an event's hooks.
 fn our_group(hooks: &Value, event: &str) -> Option<usize> {
     hooks["hooks"][event].as_array()?.iter().position(is_ours)
 }
@@ -152,7 +152,7 @@ fn invalid(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
 
-/// Adds TermRoost's hook to `hooks.json` (created if missing). Existing hooks
+/// Adds TerminalRooster's hook to `hooks.json` (created if missing). Existing hooks
 /// are kept; the original file is backed up once.
 pub(crate) fn install(codex_home: &Path, data_dir: &Path) -> io::Result<PathBuf> {
     let file = hooks_json(codex_home);
@@ -184,7 +184,7 @@ pub(crate) fn install(codex_home: &Path, data_dir: &Path) -> io::Result<PathBuf>
     Ok(file)
 }
 
-/// Removes TermRoost's hook entries; deletes `hooks.json` if nothing else is left.
+/// Removes TerminalRooster's hook entries; deletes `hooks.json` if nothing else is left.
 pub(crate) fn remove(codex_home: &Path) -> io::Result<()> {
     let file = hooks_json(codex_home);
     let text = match std::fs::read_to_string(&file) {
@@ -216,7 +216,7 @@ pub(crate) fn remove(codex_home: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Lets the hook write reports while TermRoost runs.
+/// Lets the hook write reports while TerminalRooster runs.
 pub(crate) fn set_running(data_dir: &Path, running: bool) {
     let dir = reports_dir(data_dir);
     let marker = dir.join(RUNNING);
@@ -248,7 +248,7 @@ struct Payload {
 }
 
 /// Reads and deletes the reports written since the last call; reports older
-/// than `since` (e.g. written while TermRoost was not running) are dropped.
+/// than `since` (e.g. written while TerminalRooster was not running) are dropped.
 pub(crate) fn drain(data_dir: &Path, since: SystemTime) -> Vec<HookReport> {
     let dir = reports_dir(data_dir);
     let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
@@ -385,7 +385,7 @@ mod tests {
             assert!(child.wait().unwrap().success());
         };
         run(Some("7"));
-        assert!(drain(&data, UNIX_EPOCH).is_empty(), "nothing is written while TermRoost is not running");
+        assert!(drain(&data, UNIX_EPOCH).is_empty(), "nothing is written while TerminalRooster is not running");
         set_running(&data, true);
         run(Some("7"));
         run(None);

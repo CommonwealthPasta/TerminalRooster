@@ -1,4 +1,4 @@
-//! GUI-agnostic core of TermRoost.
+//! GUI-agnostic core of TerminalRooster.
 //!
 //! A front end talks to [`Core`] only:
 //!
@@ -183,24 +183,24 @@ impl Core {
         }
     }
 
-    /// Whether Codex is installed and TermRoost's Codex hook is set up.
+    /// Whether Codex is installed and TerminalRooster's Codex hook is set up.
     pub fn codex_hook_status(&self) -> CodexHookStatus {
         codex_hook::status(&self.homes.codex)
     }
 
-    /// When the Codex hook last reported (since TermRoost started).
+    /// When the Codex hook last reported (since TerminalRooster started).
     pub fn codex_hook_last_report(&self) -> Option<SystemTime> {
         *self.bg.last_codex_report.lock().unwrap()
     }
 
-    /// Adds TermRoost's hook to Codex (`~/.codex/hooks.json`) so Codex
+    /// Adds TerminalRooster's hook to Codex (`~/.codex/hooks.json`) so Codex
     /// sessions are tracked exactly. Codex asks the user to trust it once
     /// (`/hooks`). Returns the file that was changed.
     pub fn install_codex_hook(&self) -> Result<PathBuf> {
         Ok(codex_hook::install(&self.homes.codex, &self.data_dir)?)
     }
 
-    /// Removes TermRoost's Codex hook, leaving any other hooks in place.
+    /// Removes TerminalRooster's Codex hook, leaving any other hooks in place.
     pub fn remove_codex_hook(&self) -> Result<()> {
         Ok(codex_hook::remove(&self.homes.codex)?)
     }

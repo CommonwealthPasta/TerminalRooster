@@ -1,6 +1,8 @@
-# TermRoost
+# TerminalRooster
 
 A project-based terminal manager for running coding agents (Claude Code, Codex, Grok, …) side by side.
+
+*TR, TermRoost or Rooster for short.* It used to be called TermRoost.
 
 - **Projects** on the left, each with a working directory.
 - **Tabs** per project: vertical, renamable (double-click). Each tab holds terminals in horizontal/vertical **splits**.
@@ -15,7 +17,7 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 cargo run --release -p termroost-iced
 ```
 
-Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show TermRoost's icon for its window on Wayland. Once a package is installed, TermRoost removes this entry again. Set `TERMROOST_NO_DESKTOP_ENTRY=1` to skip it.
+Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show TerminalRooster's icon for its window on Wayland. Once a package is installed, TerminalRooster removes this entry again. Set `TERMROOST_NO_DESKTOP_ENTRY=1` to skip it.
 
 ### Windows (native build)
 
@@ -39,7 +41,7 @@ Windows 10 1809 or newer is required, for ConPTY. Terminals use `pwsh` if it is 
 
 Set `TERMROOST_DATA_DIR` to use another directory. Only one instance can run per data directory.
 
-TermRoost used to be called *agentdeck*. On first start it moves the old `agentdeck` data folder's database into the folder above. Close the old app first; TermRoost waits and says so if it is still running.
+Before TermRoost, the app was called *agentdeck*. On first start it moves the old `agentdeck` data folder's database into the folder above. Close the old app first; TerminalRooster waits and says so if it is still running.
 
 ## Themes
 
@@ -56,7 +58,7 @@ Terminals switch colors instantly, including their scrollback. Programs that ask
 
 ## Logging
 
-TermRoost logs with `tracing`, to stderr and to a daily file that keeps the last 7 days:
+TerminalRooster logs with `tracing`, to stderr and to a daily file that keeps the last 7 days:
 
 | Platform | Log location |
 |---|---|
@@ -77,7 +79,7 @@ Restored tabs start their shells the first time you open them, so dozens of agen
 
 ### Exact agent sessions, not "continue last"
 
-`--continue` and `resume --last` reopen the most recent conversation in a folder, which is wrong when several agents work in one project. TermRoost watches each terminal's processes instead (every 5 seconds, and once more on shutdown). It finds the coding agent running there and reads the agent's session id from the agent's own records:
+`--continue` and `resume --last` reopen the most recent conversation in a folder, which is wrong when several agents work in one project. TerminalRooster watches each terminal's processes instead (every 5 seconds, and once more on shutdown). It finds the coding agent running there and reads the agent's session id from the agent's own records:
 
 | Agent | Where the session id comes from | Restore command |
 |---|---|---|
@@ -88,7 +90,7 @@ Restored tabs start their shells the first time you open them, so dozens of agen
 - **How agents are found:** it works whether you start the agent with **Start agent** or type `claude` yourself. It follows `/clear`, `/new` and `/resume`, and it forgets the agent when you quit it.
 - **Missing sessions:** if a session never got a message, so nothing is saved to resume, the agent is started fresh instead.
 - **Extra arguments:** arguments set in terminal settings (e.g. `--model opus`) are reused on resume.
-- **Codex accuracy:** Codex runs every terminal through one shared daemon and keeps no per-process record, so by default its session is inferred. That is exact with one Codex per folder. For exact tracking, add the optional **Codex hook**. TermRoost offers it once at startup, and you can also add it from Settings → Integrations. Codex only runs hooks you trust, so TermRoost then opens a small Codex window: type `/hooks` there and trust it. The hook goes in `~/.codex/hooks.json`, your other hooks are kept, and it only writes while TermRoost runs.
+- **Codex accuracy:** Codex runs every terminal through one shared daemon and keeps no per-process record, so by default its session is inferred. That is exact with one Codex per folder. For exact tracking, add the optional **Codex hook**. TerminalRooster offers it once at startup, and you can also add it from Settings → Integrations. Codex only runs hooks you trust, so TerminalRooster then opens a small Codex window: type `/hooks` there and trust it. The hook goes in `~/.codex/hooks.json`, your other hooks are kept, and it only writes while TerminalRooster runs.
 - **Debugging detection:** `cargo run -p termroost-core --example detect_agents -- <shell pid>…` prints what is detected under any shell.
 
 ## Shortcuts
@@ -154,6 +156,6 @@ cargo run -p termroost-core --example seed -- /some/dir   # demo data (use with 
 
 ## License
 
-TermRoost is released under the [MIT License](LICENSE).
+TerminalRooster is released under the [MIT License](LICENSE).
 
 The bundled fonts keep their own license, the SIL Open Font License 1.1: JetBrains Mono and Noto Sans Symbols 2. Their license texts are in `crates/termroost-iced/fonts/`.
