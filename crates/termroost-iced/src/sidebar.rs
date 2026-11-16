@@ -221,7 +221,7 @@ impl App {
     /// The box that filters the projects list, with a ✕ to empty it.
     fn project_search_box(&self) -> Element<'_, Message> {
         // Room on the right for the ✕, so the text doesn't run under it.
-        let input = text_input("Search", &self.project_search)
+        let input = text_input(&self.keymap.hint("Search", Action::SearchProjects), &self.project_search)
             .id(PROJECT_SEARCH)
             .on_input(Message::ProjectSearch)
             .on_submit(Message::ProjectSearchSubmit)

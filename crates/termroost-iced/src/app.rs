@@ -1810,6 +1810,11 @@ impl App {
                     return self.update(Message::SelectProject(next));
                 }
             }
+            Action::SearchProjects => {
+                self.rename = None;
+                // Selected, so typing replaces the last search.
+                return Task::batch([operation::focus(PROJECT_SEARCH), operation::select_all(PROJECT_SEARCH)]);
+            }
             Action::MoveSessionUp | Action::MoveSessionDown => {
                 if let Some(project) = s.selected_project
                     && let Some(tab) = self.active_tab_id()

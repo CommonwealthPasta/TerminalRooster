@@ -20,6 +20,7 @@ pub enum Action {
     PrevSession,
     NextProject,
     PrevProject,
+    SearchProjects,
     MoveSessionUp,
     MoveSessionDown,
     MoveProjectUp,
@@ -54,13 +55,14 @@ struct Info {
 
 impl Action {
     /// In the order Settings lists them.
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 28] = [
         Action::NewProject,
         Action::NewSession,
         Action::NextSession,
         Action::PrevSession,
         Action::NextProject,
         Action::PrevProject,
+        Action::SearchProjects,
         Action::MoveSessionUp,
         Action::MoveSessionDown,
         Action::MoveProjectUp,
@@ -97,6 +99,7 @@ impl Action {
             }
             Action::NextProject => ("next_project", "Next project", GENERAL, &["Ctrl+Shift+PageDown"]),
             Action::PrevProject => ("previous_project", "Previous project", GENERAL, &["Ctrl+Shift+PageUp"]),
+            Action::SearchProjects => ("search_projects", "Search projects", GENERAL, &["Ctrl+Shift+P"]),
             Action::MoveSessionUp => ("move_session_up", "Move session up", GENERAL, &["Ctrl+Alt+PageUp"]),
             Action::MoveSessionDown => ("move_session_down", "Move session down", GENERAL, &["Ctrl+Alt+PageDown"]),
             Action::MoveProjectUp => ("move_project_up", "Move project up", GENERAL, &["Ctrl+Shift+Alt+PageUp"]),
