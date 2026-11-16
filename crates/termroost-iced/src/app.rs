@@ -595,11 +595,13 @@ impl App {
     }
 
     pub fn title(&self) -> String {
+        /// The app's name in the window title (and so the taskbar and Alt+Tab).
+        const NAME: &str = "Terminal Rooster";
         let s = self.core.state();
         match (s.selected_project.and_then(|p| s.project(p)), s.active_tab()) {
-            (Some(p), Some(t)) => format!("{} · {} — TerminalRooster", t.title, p.name),
-            (Some(p), None) => format!("{} — TerminalRooster", p.name),
-            _ => "TerminalRooster".to_owned(),
+            (Some(p), Some(t)) => format!("{} · {} — {NAME}", t.title, p.name),
+            (Some(p), None) => format!("{} — {NAME}", p.name),
+            _ => NAME.to_owned(),
         }
     }
 
