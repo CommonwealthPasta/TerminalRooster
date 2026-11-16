@@ -2,6 +2,7 @@
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text, text_input, tooltip};
 use iced::{Alignment, Element, Font, Length, font};
+use termroost_core::git::Head;
 use termroost_core::{Project, ProjectId, Tab, TabId};
 
 use crate::app::{App, DropTarget, Message, RENAME_INPUT, RenameTarget};
@@ -15,6 +16,29 @@ const ACTIONS_WIDTH: f32 = 26.0;
 const LIST_SPACING: f32 = 2.0;
 
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
+
+/// Powerline's branch symbol, which the bundled JetBrains Mono has.
+const BRANCH_SYMBOL: &str = "\u{E0A0}";
+
+/// A git branch (or detached commit) with the branch symbol, cut to `max` characters.
+pub fn branch_label<'a>(head: &Head, size: f32, max: usize) -> Element<'a, Message> {
+    let name = head.to_string();
+    let name = if name.chars().count() > max {
+        format!("{}…", name.chars().take(max.saturating_sub(1)).collect::<String>())
+    } else {
+        name
+    };
+    row![
+        text(BRANCH_SYMBOL)
+            .font(theme::MONO)
+            .size(size)
+            .style(|t: &iced::Theme| text::Style { color: Some(theme::accent(t)) }),
+        text(name).size(size).wrapping(text::Wrapping::None),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center)
+    .into()
+}
 
 pub fn icon_button<'a>(label: &'a str, msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
     tooltip(
@@ -224,13 +248,16 @@ impl App {
         } else {
             space::horizontal().width(0).into()
         };
-        let label = column![
+        let mut label = column![
             row![activity_dot(self.activity.contains(&tab.id)), text(&tab.title).size(14).width(Length::Fill), badge]
                 .spacing(4)
                 .align_y(Alignment::Center),
-            muted_text(subtitle),
         ]
         .spacing(1);
+        if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
+            label = label.push(branch_label(head, 11.0, 24));
+        }
+        let label = label.push(muted_text(subtitle));
         let target = DropTarget::Session(tab.id);
         let style = item_style(selected, self.is_drop_target(target));
         let body = mouse_area(container(label).padding([6, 8]).width(Length::Fill).style(style))

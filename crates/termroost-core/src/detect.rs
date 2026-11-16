@@ -296,6 +296,85 @@ fn attribute(
     }
 }
 
+/// Shells. The terminal's own shell may have any arguments; a shell started
+/// inside it counts as idle only without a script or command to run (`bash`,
+/// not `bash build.sh` or `pwsh -Command …`).
+const SHELLS: &[&str] =
+    &["bash", "sh", "dash", "zsh", "fish", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "pwsh", "powershell", "cmd"];
+
+/// Programs that only start a shell and wait for it: MSYS2's launcher runs
+/// `env … bash --login`, and console hosts.
+const LAUNCHERS: &[&str] = &["env", "conhost", "openconsole"];
+
+/// Whether a nested shell was started to sit at a prompt: only flags, and
+/// none that runs a command or script. Unknown flag values count as busy.
+fn interactive_shell(name: &str, args: &[std::ffi::OsString]) -> bool {
+    args.iter().all(|a| {
+        let a = a.to_string_lossy().to_lowercase();
+        match name {
+            "cmd" => a.starts_with('/') && !matches!(a.as_str(), "/c" | "/k" | "/r"),
+            // PowerShell accepts any unambiguous prefix of a parameter name.
+            "pwsh" | "powershell" => a.strip_prefix('-').is_some_and(|f| {
+                let runs = ["command", "file", "encodedcommand", "commandwithargs"].iter().any(|p| p.starts_with(f));
+                !f.is_empty() && !runs && f != "ec" && f != "cwa"
+            }),
+            // `-c` runs a command, also inside a cluster such as `-lc`.
+            _ => a.starts_with("--") || a.strip_prefix('-').is_some_and(|f| !f.is_empty() && !f.contains('c')),
+        }
+    })
+}
+
+/// The terminals (`(pane, shell pid)`) with only an idle shell in them, so
+/// restarting them loses no work. Anything unknown counts as busy, such as
+/// WSL, whose programs Windows cannot see.
+pub(crate) fn idle_shells(shells: &[(PaneId, u32)]) -> HashSet<PaneId> {
+    if shells.is_empty() {
+        return HashSet::new();
+    }
+    let Ok(mut sys) = System::new() else { return HashSet::new() };
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().without_tasks());
+    let mut children: HashMap<Pid, Vec<Pid>> = HashMap::new();
+    for (pid, p) in sys.processes() {
+        if let Some(parent) = p.parent() {
+            children.entry(parent).or_default().push(*pid);
+        }
+    }
+    // Each terminal's process tree, without looping on reused process ids.
+    let trees: Vec<(PaneId, Vec<Pid>)> = shells
+        .iter()
+        .map(|(pane, shell)| {
+            let mut seen = vec![Pid::from_u32(*shell)];
+            let mut i = 0;
+            while let Some(pid) = seen.get(i).copied() {
+                for kid in children.get(&pid).into_iter().flatten() {
+                    if !seen.contains(kid) {
+                        seen.push(*kid);
+                    }
+                }
+                i += 1;
+            }
+            (*pane, seen)
+        })
+        .collect();
+    // Command lines are slow to read on Windows: only for these processes.
+    let pids: Vec<Pid> = trees.iter().flat_map(|(_, t)| t.iter().copied()).collect();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        false,
+        ProcessRefreshKind::nothing().without_tasks().with_cmd(UpdateKind::Always),
+    );
+    let idle = |tree: &[Pid]| {
+        tree.iter().enumerate().all(|(i, pid)| {
+            let Some(p) = sys.process(*pid) else { return false };
+            let name = stem(p.name());
+            let shell = SHELLS.contains(&name.as_str());
+            let args = p.cmd().get(1..).unwrap_or_default();
+            LAUNCHERS.contains(&name.as_str()) || (shell && (i == 0 || interactive_shell(&name, args)))
+        })
+    };
+    trees.iter().filter(|(_, tree)| idle(tree)).map(|(pane, _)| *pane).collect()
+}
+
 /// Lowercased file stem of a program path (`/usr/bin/Codex.exe` -> `codex`).
 fn stem(s: &std::ffi::OsStr) -> String {
     Path::new(s).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
@@ -552,6 +631,28 @@ fn newest_main_thread(codex_home: &Path, ids: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_shells_with_a_command_are_busy() {
+        let idle = |name: &str, args: &[&str]| {
+            let args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+            interactive_shell(name, &args)
+        };
+        assert!(idle("bash", &[]));
+        assert!(idle("bash", &["-i", "-l"]));
+        assert!(idle("bash", &["--login"]));
+        assert!(!idle("bash", &["build.sh"]));
+        assert!(!idle("bash", &["-lc", "make"]));
+        assert!(!idle("sh", &["-"]));
+        assert!(idle("pwsh", &["-NoLogo", "-NoProfile"]));
+        assert!(!idle("pwsh", &["-Comm", "Get-Date"]));
+        assert!(!idle("pwsh", &["-f", "x.ps1"]));
+        assert!(!idle("powershell", &["-EC", "AAAA"]));
+        assert!(!idle("powershell", &["Get-Date"]));
+        assert!(idle("cmd", &["/d", "/q"]));
+        assert!(!idle("cmd", &["/C", "dir"]));
+        assert!(!idle("cmd", &["/k", "vcvars.bat"]));
+    }
 
     fn homes(dir: &Path) -> AgentHomes {
         AgentHomes { claude: dir.join("claude"), codex: dir.join("codex"), grok: dir.join("grok") }

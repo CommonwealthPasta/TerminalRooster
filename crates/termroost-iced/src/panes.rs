@@ -1,14 +1,15 @@
 //! The terminal area: header plus the split pane grid of the visible tab.
 
-use iced::widget::{button, center, column, container, pane_grid, pick_list, row, space, text};
+use iced::widget::{button, center, column, container, pane_grid, pick_list, row, space, text, tooltip};
 use iced::{Alignment, Element, Length};
 use termroost_core::{AgentKind, Axis, PaneId, Tab};
 
 use crate::app::{App, Message};
 use crate::keymap::Action;
-use crate::sidebar::{BOLD, icon_button, muted_text, short_dir};
+use crate::sidebar::{BOLD, branch_label, icon_button, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
 use crate::theme;
+use crate::worktree::WorktreeMsg;
 
 impl App {
     pub(crate) fn view_main(&self) -> Element<'_, Message> {
@@ -47,26 +48,44 @@ impl App {
                 .on_press(Message::ToggleTasks)
                 .into()
         };
-        let header = row![
-            text(&tab.title).size(14).font(BOLD),
-            muted_text(short_dir(&s.tab_working_dir(tab), 70)).wrapping(text::Wrapping::None),
-            space::horizontal(),
-            tasks_toggle,
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .padding([4, 10]);
+        let git = self.git_of(tab);
+        let mut header = row![text(&tab.title).size(14).font(BOLD)];
+        if let Some(head) = git.and_then(|g| g.head.as_ref()) {
+            header = header.push(branch_label(head, 12.0, 40));
+        }
+        header = header.push(muted_text(short_dir(&s.tab_working_dir(tab), 70)).wrapping(text::Wrapping::None));
+        header = header.push(space::horizontal());
+        if git.is_some() {
+            let new_worktree = button(text("New worktree").size(12))
+                .padding([3, 10])
+                .style(button::secondary)
+                .on_press(Message::Worktree(WorktreeMsg::Open));
+            header = header.push(tooltip(
+                new_worktree,
+                container(text("Make a git worktree beside this repository and move this session into it").size(12))
+                    .padding([4, 8])
+                    .style(container::rounded_box),
+                tooltip::Position::Bottom,
+            ));
+        }
+        let header = header.push(tasks_toggle).spacing(10).align_y(Alignment::Center).padding([4, 10]);
 
         let mut content = column![header];
-        if let Some(err) = &self.error {
-            content = content.push(
-                container(
-                    row![text(err).size(13).width(Length::Fill), icon_button("✕", Message::DismissError, "Dismiss")]
-                        .align_y(Alignment::Center),
-                )
-                .padding([4, 10])
-                .style(theme::error_banner),
-            );
+        let banners = [
+            (&self.error, Message::DismissError, theme::error_banner as fn(&iced::Theme) -> container::Style),
+            (&self.notice, Message::DismissNotice, theme::notice_banner),
+        ];
+        for (message, dismiss, style) in banners {
+            if let Some(message) = message {
+                content = content.push(
+                    container(
+                        row![text(message).size(13).width(Length::Fill), icon_button("✕", dismiss, "Dismiss")]
+                            .align_y(Alignment::Center),
+                    )
+                    .padding([4, 10])
+                    .style(style),
+                );
+            }
         }
         let grid: Element<'_, Message> = match self.grids.get(&tab.id) {
             Some(grid) => pane_grid(grid, move |_, pane, _| self.pane_content(*pane, tab))

@@ -11,7 +11,7 @@ use iced::{Element, Length, Subscription, Task, keyboard, window};
 use serde::{Deserialize, Serialize};
 use termroost_core::session::bundled_bash;
 use termroost_core::session::shell::{self, ShellOption};
-use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId};
+use termroost_core::{AgentKind, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TaskId, git};
 
 use crate::color_picker::{ColorPicker, Hsl};
 use crate::keymap::{Action, Combo, Keymap};
@@ -19,6 +19,10 @@ use crate::layout_conv;
 use crate::terminal_view;
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
+use crate::worktree::{WorktreeForm, WorktreeMsg};
+
+/// How often the branches of the visible sessions are read again.
+const GIT_POLL: Duration = Duration::from_secs(3);
 
 const PREFS_KEY: &str = "iced.prefs";
 pub const RENAME_INPUT: &str = "rename-input";
@@ -122,6 +126,8 @@ pub enum Dialog {
     CodexTrust(termroost_core::TerminalHandle),
     /// Says once what was carried over from TermRoost, the app's old name.
     Renamed(termroost_core::Renamed),
+    /// Make a git worktree and move the session into it.
+    Worktree(Box<WorktreeForm>),
 }
 
 /// State of the settings page while it is open.
@@ -290,7 +296,14 @@ pub enum Message {
     InstallBash,
     BashInstall(BashInstallEvent),
 
+    /// Time to read the visible sessions' branches again.
+    GitPoll,
+    /// Where each session directory stands in git (`None`: not in a repository).
+    GitStatus(Vec<(PathBuf, Option<git::Status>)>),
+    Worktree(WorktreeMsg),
+
     DismissError,
+    DismissNotice,
 }
 
 pub struct App {
@@ -306,6 +319,12 @@ pub struct App {
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     pub(crate) error: Option<String>,
+    /// Information worth a banner that is not an error.
+    pub(crate) notice: Option<String>,
+    /// Git status of session directories, read in the background.
+    pub(crate) git: HashMap<PathBuf, Option<git::Status>>,
+    /// A periodic git read is running.
+    git_polling: bool,
     pub(crate) themes: ThemeStore,
     themes_dirty: bool,
     pub(crate) settings: Option<SettingsState>,
@@ -375,6 +394,9 @@ impl App {
             task_edit: None,
             activity: HashSet::new(),
             error: None,
+            notice: None,
+            git: HashMap::new(),
+            git_polling: false,
             themes,
             themes_dirty: false,
             settings: None,
@@ -397,7 +419,12 @@ impl App {
         if renamed.moved_from.is_some() || renamed.codex_hook_updated {
             app.dialog = Some(Dialog::Renamed(renamed.clone()));
         }
-        let task = Task::batch([app.focus_active(), iced::system::theme().map(Message::SystemTheme), detect_shells()]);
+        let task = Task::batch([
+            app.focus_active(),
+            iced::system::theme().map(Message::SystemTheme),
+            detect_shells(),
+            app.read_git(),
+        ]);
         (app, task)
     }
 
@@ -475,6 +502,7 @@ impl App {
                 iced::Event::Window(window::Event::CloseRequested) => Some(Message::CloseRequested),
                 _ => None,
             }),
+            iced::time::every(GIT_POLL).map(|_| Message::GitPoll),
         ];
         if self.task_drag.is_some() {
             // Only while a task is held, so moving the mouse doesn't redraw the app otherwise.
@@ -494,7 +522,7 @@ impl App {
         Subscription::batch(subs)
     }
 
-    fn dispatch(&mut self, cmd: Command) -> Option<Outcome> {
+    pub(crate) fn dispatch(&mut self, cmd: Command) -> Option<Outcome> {
         match self.core.dispatch(cmd) {
             Ok(o) => Some(o),
             Err(e) => {
@@ -534,8 +562,35 @@ impl App {
         }
     }
 
+    /// Git status of a tab's working directory, from the last background read.
+    pub(crate) fn git_of(&self, tab: &termroost_core::Tab) -> Option<&git::Status> {
+        self.git.get(&self.core.state().tab_working_dir(tab))?.as_ref()
+    }
+
+    /// Reads the git status of the selected project's sessions on a thread
+    /// (directories may be on a slow network drive).
+    pub(crate) fn read_git(&self) -> Task<Message> {
+        let s = self.core.state();
+        let Some(project) = s.selected_project else { return Task::none() };
+        let mut dirs: Vec<PathBuf> = s.tabs_of(project).map(|t| s.tab_working_dir(t)).collect();
+        dirs.sort();
+        dirs.dedup();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let statuses = dirs
+                .into_iter()
+                .map(|d| {
+                    let status = git::Status::of(&d);
+                    (d, status)
+                })
+                .collect();
+            let _ = tx.send_blocking(statuses);
+        });
+        Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::GitStatus)
+    }
+
     /// Moves keyboard focus to the focused terminal of the visible tab.
-    fn focus_active(&self) -> Task<Message> {
+    pub(crate) fn focus_active(&self) -> Task<Message> {
         if self.dialog.is_some() || self.rename.is_some() || self.task_edit.is_some() {
             return Task::none();
         }
@@ -572,7 +627,7 @@ impl App {
             self.activity.remove(&tab);
         }
         self.ensure_active_grid();
-        self.focus_active()
+        Task::batch([self.focus_active(), self.read_git()])
     }
 
     fn grid_pane(&self, pane: pane_grid::Pane) -> Option<(TabId, PaneId)> {
@@ -1019,6 +1074,8 @@ impl App {
             Message::DialogSubmit => return self.submit_dialog(),
             Message::DialogCancel => {
                 match &self.dialog {
+                    // git is making the worktree; the result moves the session.
+                    Some(Dialog::Worktree(f)) if f.creating => return Task::none(),
                     Some(Dialog::CodexHook) => {
                         // "Not now": don't ask again; Settings → Integrations offers it.
                         self.prefs.codex_hook_asked = true;
@@ -1222,7 +1279,19 @@ impl App {
                 }
             }
             Message::TaskDragEnd => self.task_drag = None,
+            Message::GitPoll => {
+                if !self.git_polling {
+                    self.git_polling = true;
+                    return self.read_git();
+                }
+            }
+            Message::GitStatus(statuses) => {
+                self.git_polling = false;
+                self.git.extend(statuses);
+            }
+            Message::Worktree(msg) => return self.update_worktree(msg),
             Message::DismissError => self.error = None,
+            Message::DismissNotice => self.notice = None,
         }
         Task::none()
     }
@@ -1283,6 +1352,10 @@ impl App {
             }
             Dialog::Renamed(renamed) if renamed.codex_hook_updated => return self.update(Message::TrustCodexHook),
             Dialog::Renamed(_) => {}
+            Dialog::Worktree(form) => {
+                self.dialog = Some(Dialog::Worktree(form));
+                return self.update_worktree(WorktreeMsg::Submit);
+            }
         }
         self.focus_active()
     }
@@ -1521,7 +1594,7 @@ fn step<T: PartialEq>(items: &[T], item: T, down: bool) -> Option<usize> {
     if down { (i + 1 < items.len()).then_some(i + 1) } else { i.checked_sub(1) }
 }
 
-fn expand_home(p: &str) -> PathBuf {
+pub(crate) fn expand_home(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~")
         && (rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\'))
         && let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf())

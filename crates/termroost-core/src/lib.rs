@@ -18,6 +18,7 @@ pub mod codex_hook;
 pub mod command;
 pub mod detect;
 pub mod error;
+pub mod git;
 pub mod layout;
 pub mod model;
 pub mod paths;
@@ -386,6 +387,40 @@ impl Core {
                 t.working_dir = working_dir.filter(|d| !d.as_os_str().is_empty());
                 ops.push(StoreOp::UpsertTab(t.clone()));
                 Ok(Outcome::None)
+            }
+            C::RelocateTab { tab, working_dir } => {
+                let t = self.state.tab(tab).ok_or(Error::NotFound("session"))?;
+                if self.state.tab_working_dir(t) == working_dir {
+                    return Ok(Outcome::Relocated { left_running: 0 });
+                }
+                let follows_project = self.state.project(t.project).is_some_and(|p| p.working_dir == working_dir);
+                let panes = t.layout.panes();
+                let t = self.state.tab_mut(tab).expect("checked");
+                t.working_dir = (!follows_project).then(|| working_dir.clone());
+                ops.push(StoreOp::UpsertTab(t.clone()));
+
+                // Terminals not started yet, or exited, start in the new directory anyway.
+                let running: Vec<(PaneId, TerminalHandle)> = panes
+                    .iter()
+                    .filter_map(|p| Some((*p, self.terminal(*p)?)))
+                    .filter(|(_, h)| h.is_running())
+                    .collect();
+                let shells: Vec<(PaneId, u32)> =
+                    running.iter().filter_map(|(p, h)| Some((*p, h.shell_pid()?))).collect();
+                let idle = detect::idle_shells(&shells);
+                let mut left_running = 0;
+                for (pane, handle) in running {
+                    let has_agent = self.state.pane(pane).is_some_and(|p| p.agent.is_some());
+                    if idle.contains(&pane) && !has_agent {
+                        handle.print_notice(&format!("─── moved to {} ───", working_dir.display()));
+                        self.start_process(pane, &handle, false);
+                    } else {
+                        // Nothing is printed: it would garble a running program's screen.
+                        left_running += 1;
+                    }
+                }
+                tracing::info!(%tab, dir = %working_dir.display(), left_running, "session relocated");
+                Ok(Outcome::Relocated { left_running })
             }
             C::DeleteTab(tab) => {
                 let project = self.state.tab(tab).ok_or(Error::NotFound("session"))?.project;

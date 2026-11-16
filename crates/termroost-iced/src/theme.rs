@@ -197,3 +197,13 @@ pub fn drag_label(theme: &Theme) -> container::Style {
         ..container::Style::default()
     }
 }
+
+pub fn notice_banner(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.primary.weak.color)),
+        text_color: Some(p.primary.weak.text),
+        border: Border::default().rounded(4),
+        ..container::Style::default()
+    }
+}
