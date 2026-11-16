@@ -57,6 +57,8 @@ pub struct Prefs {
     pub notify_errors: Level,
     /// How to tell the user that a coding agent finished or needs them.
     pub notify_agents: Level,
+    /// Ask before quitting while terminals run programs.
+    pub confirm_quit: bool,
 }
 
 impl Default for Prefs {
@@ -77,6 +79,7 @@ impl Default for Prefs {
             shortcuts: BTreeMap::new(),
             notify_errors: Level::Subtle,
             notify_agents: Level::Prominent,
+            confirm_quit: true,
         }
     }
 }
@@ -100,6 +103,18 @@ impl Prefs {
             Category::Agent => self.notify_agents,
         }
     }
+}
+
+/// A terminal with programs running in it, listed when asking before quitting.
+#[derive(Clone, Debug)]
+pub struct RunningTerminal {
+    pub pane: PaneId,
+    /// "Session 2 · my-service".
+    pub place: String,
+    /// "Claude Code (working), cargo".
+    pub programs: String,
+    /// One of them is a coding agent.
+    pub agent: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +151,11 @@ pub enum Dialog {
     CodexTrust(termroost_core::TerminalHandle),
     /// Says once what was carried over from TermRoost, the app's old name.
     Renamed(termroost_core::Renamed),
+    /// Quitting while terminals still run programs.
+    ConfirmQuit {
+        running: Vec<RunningTerminal>,
+        dont_ask: bool,
+    },
 }
 
 /// State of the settings page while it is open.
@@ -200,6 +220,9 @@ pub enum Message {
     DismissToast(PaneId),
     NotifyLevel(Category, Level),
     ShellIntegration(bool),
+    ConfirmQuitPref(bool),
+    /// "Don't ask again" in the quit dialog.
+    DialogDontAsk(bool),
     TestNotification,
     Key(keyboard::Event),
     /// Escape, even when a text input captured it (closes dialogs and editors).
@@ -635,6 +658,15 @@ impl App {
             Message::ShellIntegration(on) => {
                 self.dispatch(Command::SetShellIntegration(on));
             }
+            Message::ConfirmQuitPref(on) => {
+                self.prefs.confirm_quit = on;
+                self.mark_prefs();
+            }
+            Message::DialogDontAsk(v) => {
+                if let Some(Dialog::ConfirmQuit { dont_ask, .. }) = &mut self.dialog {
+                    *dont_ask = v;
+                }
+            }
             Message::TestNotification => {
                 let pane = self.core.state().active_tab().and_then(|t| t.focused_pane).unwrap_or(PaneId(0));
                 notify::desktop(
@@ -657,10 +689,18 @@ impl App {
                 self.mark_prefs();
             }
             Message::CloseRequested => {
-                self.flush_pending();
-                self.core.shutdown();
-                self.closing = true;
-                return iced::exit();
+                if matches!(self.dialog, Some(Dialog::ConfirmQuit { .. })) {
+                    return Task::none();
+                }
+                if self.prefs.confirm_quit {
+                    let running = self.running_terminals();
+                    if !running.is_empty() {
+                        self.rename = None;
+                        self.dialog = Some(Dialog::ConfirmQuit { running, dont_ask: false });
+                        return Task::none();
+                    }
+                }
+                return self.quit();
             }
             Message::Escape => {
                 if matches!(self.dialog, Some(Dialog::CodexTrust(_))) {
@@ -689,7 +729,10 @@ impl App {
             }
             Message::Enter => {
                 // Dialogs with text fields submit through the fields themselves.
-                if matches!(self.dialog, Some(Dialog::ConfirmDeleteProject(_) | Dialog::ConfirmDeleteTab(_))) {
+                if matches!(
+                    self.dialog,
+                    Some(Dialog::ConfirmDeleteProject(_) | Dialog::ConfirmDeleteTab(_) | Dialog::ConfirmQuit { .. })
+                ) {
                     return self.submit_dialog();
                 }
             }
@@ -1286,8 +1329,48 @@ impl App {
             }
             Dialog::Renamed(renamed) if renamed.codex_hook_updated => return self.update(Message::TrustCodexHook),
             Dialog::Renamed(_) => {}
+            Dialog::ConfirmQuit { dont_ask, .. } => {
+                if dont_ask {
+                    self.prefs.confirm_quit = false;
+                    self.mark_prefs();
+                }
+                return self.quit();
+            }
         }
         self.focus_active()
+    }
+
+    /// Saves everything, stops the terminals and exits.
+    fn quit(&mut self) -> Task<Message> {
+        self.flush_pending();
+        self.core.shutdown();
+        self.closing = true;
+        iced::exit()
+    }
+
+    /// Terminals running programs, in sidebar order, for asking before quitting.
+    fn running_terminals(&self) -> Vec<RunningTerminal> {
+        let s = self.core.state();
+        let mut out: Vec<(usize, RunningTerminal)> = self
+            .core
+            .running_programs()
+            .into_iter()
+            .filter_map(|(pane, names)| {
+                let tab = s.pane(pane)?.tab;
+                let rank = s.tabs.iter().position(|t| t.id == tab).unwrap_or(usize::MAX);
+                let working = self.core.terminal(pane).is_some_and(|h| h.agent_working());
+                let is_agent = |n: &String| AgentKind::ALL.iter().any(|k| k.label() == n);
+                let programs = names
+                    .iter()
+                    .map(|n| if working && is_agent(n) { format!("{n} (working)") } else { n.clone() })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let agent = names.iter().any(is_agent);
+                Some((rank, RunningTerminal { pane, place: self.place_of(pane)?, programs, agent }))
+            })
+            .collect();
+        out.sort_by_key(|(rank, t)| (*rank, t.pane));
+        out.into_iter().map(|(_, t)| t).collect()
     }
 
     /// Where a terminal is, for notifications: "Session 2 · my-service".

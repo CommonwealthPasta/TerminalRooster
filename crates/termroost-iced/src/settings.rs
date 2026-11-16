@@ -383,6 +383,11 @@ impl App {
                      shells can report a command's status themselves with OSC 133;D. Applies to terminals started \
                      from now on.",
                 ),
+                checkbox(self.prefs.confirm_quit)
+                    .label("Ask before quitting while terminals run programs")
+                    .on_toggle(Message::ConfirmQuitPref)
+                    .size(16)
+                    .text_size(13),
             ]
             .spacing(12),
         )

@@ -93,6 +93,10 @@ No agent needs any setup.
 
 Other shells (zsh, fish, cmd, WSL) start unchanged. They work too if something in them sends `OSC 133;D;<status>`. Turn the integration off in Settings → Notifications.
 
+### Quitting with programs running
+
+Closing the window while terminals run programs (an agent, a build, a server) asks first and lists them. Agents come back in the same conversation on the next start, but a reply they are writing is cut off. Choose **Don't ask again** there, or switch it off in Settings → Notifications. Programs inside WSL can't be seen from Windows, so WSL terminals never count.
+
 ## Logging
 
 TerminalRooster logs with `tracing`, to stderr and to a daily file that keeps the last 7 days:
