@@ -208,11 +208,12 @@ fn apply(c: &Connection, op: &StoreOp) -> rusqlite::Result<()> {
         StoreOp::UpsertPane(p) => {
             let agent = p.agent.as_ref();
             c.execute(
-                "INSERT INTO panes (id, tab_id, resume_command, agent_kind, agent_session, agent_args, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "INSERT INTO panes (id, tab_id, resume_command, agent_kind, agent_session, agent_args, cwd, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO UPDATE SET tab_id = excluded.tab_id,
                    resume_command = excluded.resume_command, agent_kind = excluded.agent_kind,
-                   agent_session = excluded.agent_session, agent_args = excluded.agent_args",
+                   agent_session = excluded.agent_session, agent_args = excluded.agent_args,
+                   cwd = excluded.cwd",
                 params![
                     p.id.0,
                     p.tab.0,
@@ -220,6 +221,7 @@ fn apply(c: &Connection, op: &StoreOp) -> rusqlite::Result<()> {
                     agent.map(|a| a.kind.as_str()),
                     agent.and_then(|a| a.session_id.clone()),
                     agent.map(|a| a.args.clone()),
+                    p.cwd.as_deref().map(path_str),
                     p.created_at
                 ],
             )?;
@@ -329,8 +331,9 @@ fn load(c: &Connection) -> rusqlite::Result<AppState> {
         })
         .collect();
 
-    let mut stmt =
-        c.prepare("SELECT id, tab_id, resume_command, agent_kind, agent_session, agent_args, created_at FROM panes")?;
+    let mut stmt = c.prepare(
+        "SELECT id, tab_id, resume_command, agent_kind, agent_session, agent_args, created_at, cwd FROM panes",
+    )?;
     state.panes = stmt
         .query_map([], |r| {
             let kind: Option<String> = r.get(3)?;
@@ -344,6 +347,7 @@ fn load(c: &Connection) -> rusqlite::Result<AppState> {
                 tab: TabId(r.get(1)?),
                 resume_command: r.get(2)?,
                 agent,
+                cwd: r.get::<_, Option<String>>(7)?.map(PathBuf::from),
                 created_at: r.get(6)?,
             })
         })?
@@ -421,6 +425,7 @@ mod tests {
                 session_id: Some("0b7e0c4e-1d8f-4a43-9a43-1f0c3f9b2a11".into()),
                 args: "--model opus".into(),
             }),
+            cwd: Some("/tmp/api/src".into()),
             created_at: 1,
         };
         let task = Task {
@@ -460,6 +465,7 @@ mod tests {
         assert_eq!(state.tabs[0].layout, Layout::Pane(PaneId(100)));
         let pane = &state.panes[&PaneId(100)];
         assert_eq!(pane.resume_command.as_deref(), Some("make watch"));
+        assert_eq!(pane.cwd.as_deref(), Some(Path::new("/tmp/api/src")));
         let agent = pane.agent.as_ref().unwrap();
         assert_eq!(agent.kind, AgentKind::Claude);
         assert_eq!(agent.args, "--model opus");

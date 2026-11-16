@@ -245,8 +245,18 @@ impl Core {
 
     /// Records the effects of an event on the state. Call for every event.
     pub fn apply_event(&mut self, event: &Event) {
-        if let Event::AgentObserved { pane, agent } = event {
-            self.record_agent(*pane, agent.as_ref());
+        match event {
+            Event::AgentObserved { pane, agent } => self.record_agent(*pane, agent.as_ref()),
+            Event::CwdChanged { pane, dir } => {
+                if let Some(p) = self.state.panes.get_mut(pane)
+                    && p.cwd.as_ref() != Some(dir)
+                {
+                    tracing::debug!(%pane, dir = %dir.display(), "working directory changed");
+                    p.cwd = Some(dir.clone());
+                    self.store.write(vec![StoreOp::UpsertPane(p.clone())]);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -431,17 +441,27 @@ impl Core {
                 let shells: Vec<(PaneId, u32)> =
                     running.iter().filter_map(|(p, h)| Some((*p, h.shell_pid()?))).collect();
                 let idle = detect::idle_shells(&shells);
-                let mut left_running = 0;
-                for (pane, handle) in running {
-                    let has_agent = self.state.pane(pane).is_some_and(|p| p.agent.is_some());
-                    if idle.contains(&pane) && !has_agent {
-                        handle.print_notice(&format!("─── moved to {} ───", working_dir.display()));
-                        self.start_process(pane, &handle, false);
-                    } else {
-                        // Nothing is printed: it would garble a running program's screen.
-                        left_running += 1;
+                let stay: HashSet<PaneId> = running
+                    .iter()
+                    .map(|(p, _)| *p)
+                    .filter(|p| !idle.contains(p) || self.state.pane(*p).is_some_and(|p| p.agent.is_some()))
+                    .collect();
+                // The others forget where their old shell was.
+                for pane in panes.iter().filter(|p| !stay.contains(p)) {
+                    if let Some(p) = self.state.panes.get_mut(pane)
+                        && p.cwd.take().is_some()
+                    {
+                        ops.push(StoreOp::UpsertPane(p.clone()));
                     }
                 }
+                for (pane, handle) in running {
+                    if !stay.contains(&pane) {
+                        handle.print_notice(&format!("─── moved to {} ───", working_dir.display()));
+                        self.start_process(pane, &handle, false);
+                    }
+                    // Terminals that stay get nothing printed: it would garble a running program's screen.
+                }
+                let left_running = stay.len();
                 tracing::info!(%tab, dir = %working_dir.display(), left_running, "session relocated");
                 Ok(Outcome::Relocated { left_running })
             }
@@ -507,7 +527,14 @@ impl Core {
                 }
                 tab.focused_pane = Some(new);
                 ops.push(StoreOp::UpsertTab(tab.clone()));
-                let record = Pane { id: new, tab: tab_id, resume_command: None, agent: None, created_at: model::now() };
+                let record = Pane {
+                    id: new,
+                    tab: tab_id,
+                    resume_command: None,
+                    agent: None,
+                    cwd: None,
+                    created_at: model::now(),
+                };
                 ops.push(StoreOp::UpsertPane(record.clone()));
                 self.state.panes.insert(new, record);
 
@@ -737,7 +764,8 @@ impl Core {
             sort_order,
             created_at: model::now(),
         };
-        let pane = Pane { id: pane_id, tab: tab_id, resume_command: None, agent: None, created_at: model::now() };
+        let pane =
+            Pane { id: pane_id, tab: tab_id, resume_command: None, agent: None, cwd: None, created_at: model::now() };
         ops.push(StoreOp::UpsertTab(tab.clone()));
         ops.push(StoreOp::UpsertPane(pane.clone()));
         self.state.tabs.push(tab);
@@ -802,10 +830,12 @@ impl Core {
     }
 
     fn spawn_spec(&self, pane: PaneId) -> Option<SpawnSpec> {
-        let tab = self.state.tab(self.state.pane(pane)?.tab)?;
+        let record = self.state.pane(pane)?;
+        let tab = self.state.tab(record.tab)?;
         let project = self.state.project(tab.project)?;
         let mut shell = session::shell::resolve(project.shell.as_deref(), self.state.settings.default_shell.as_deref());
-        let cwd = self.state.tab_working_dir(tab);
+        // Where the shell last was, unless that directory is gone.
+        let cwd = record.cwd.clone().filter(|d| d.is_dir()).unwrap_or_else(|| self.state.tab_working_dir(tab));
         let mut env = base_env();
         env.insert("TERMINALROOSTER_PANE_ID".to_owned(), pane.to_string());
         env.insert("TERMINALROOSTER_PROJECT".to_owned(), project.name.clone());
@@ -1004,7 +1034,7 @@ fn repair(state: &mut AppState, next_id: &mut i64) -> Vec<StoreOp> {
         if owned.is_empty() {
             let id = PaneId(*next_id);
             *next_id += 1;
-            let pane = Pane { id, tab: tab.id, resume_command: None, agent: None, created_at: model::now() };
+            let pane = Pane { id, tab: tab.id, resume_command: None, agent: None, cwd: None, created_at: model::now() };
             state.panes.insert(id, pane.clone());
             tab.layout = Layout::Pane(id);
             ops.push(StoreOp::UpsertTab(tab.clone()));

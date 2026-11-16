@@ -1,5 +1,7 @@
 //! Shell integration: makes bash and PowerShell report how each command
-//! ended (`OSC 133 ; D ; <status>`), so failed commands can be noticed.
+//! ended (`OSC 133 ; D ; <status>`), so failed commands can be noticed, and
+//! their working directory (`OSC 633 ; P ; Cwd=<dir>`), so a restored
+//! terminal starts there.
 //!
 //! Nothing in the user's own startup files changes. TerminalRooster writes two
 //! small scripts into its data directory and starts the shells so that they

@@ -174,6 +174,13 @@ pub enum Event {
         pane: PaneId,
         agent: Option<ObservedAgent>,
     },
+    /// The shell in a terminal reported a new working directory.
+    /// [`crate::Core::apply_event`] records it, so the terminal starts there
+    /// again after a restart.
+    CwdChanged {
+        pane: PaneId,
+        dir: std::path::PathBuf,
+    },
     /// Something the user may want a notification for: a command failed, or
     /// the coding agent in the terminal finished its turn.
     Alert {

@@ -21,12 +21,14 @@ fn open(dir: &Path) -> Core {
     .expect("open core")
 }
 
-/// A shell command line that prints `text`, then stays alive (or exits with `code`).
+/// A shell command line that prints `text`, then stays alive (or exits with
+/// `code`). Staying alive, it reads what is typed, so that shows on screen.
 fn printer(text: &str, exit_code: Option<i32>) -> String {
     if cfg!(windows) {
         match exit_code {
             Some(c) => format!("cmd /c \"echo {text} & exit {c}\""),
-            None => format!("cmd /c \"echo {text} & ping -n 60 127.0.0.1 >nul\""),
+            // The console echoes typed lines only to a program that reads them.
+            None => format!("cmd /c \"echo {text} & more\""),
         }
     } else {
         match exit_code {
@@ -59,7 +61,12 @@ fn screen_text(core: &Core, pane: PaneId) -> String {
 }
 
 fn wait_for_text(core: &mut Core, pane: PaneId, needle: &str) {
-    wait_for(core, Duration::from_secs(15), |c, _| screen_text(c, pane).contains(needle));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    wait_for(core, Duration::from_secs(20), |c, _| {
+        let text = screen_text(c, pane);
+        assert!(Instant::now() < deadline, "timed out waiting for {needle:?} on the screen:\n{text}");
+        text.contains(needle)
+    });
 }
 
 fn only_pane(core: &Core) -> PaneId {
@@ -564,10 +571,17 @@ fn relocating_a_session_moves_idle_shells_only() {
     core.terminal(busy).unwrap().write(format!("{busy_line}\r"));
     wait_for_text(&mut core, busy, "busy-now");
     std::thread::sleep(Duration::from_millis(500));
+    // As if both shells had reported a directory of their own.
+    for pane in [idle, busy] {
+        core.apply_event(&Event::CwdChanged { pane, dir: dir.path().into() });
+    }
 
     let outcome = core.dispatch(Command::RelocateTab { tab, working_dir: moved.clone() }).unwrap();
     assert_eq!(outcome, Outcome::Relocated { left_running: 1 });
     assert_eq!(core.state().tab(tab).unwrap().working_dir.as_deref(), Some(moved.as_path()));
+    // The moved shell forgets where its old one was; the busy one is still there.
+    assert_eq!(core.state().pane(idle).unwrap().cwd, None);
+    assert_eq!(core.state().pane(busy).unwrap().cwd.as_deref(), Some(dir.path()));
     wait_for_text(&mut core, idle, "moved to");
     std::thread::sleep(Duration::from_millis(500));
     core.terminal(idle).unwrap().write(format!("{show_dir}\r"));
@@ -577,6 +591,42 @@ fn relocating_a_session_moves_idle_shells_only() {
     // Back in the project's directory, the session follows the project again.
     core.dispatch(Command::RelocateTab { tab, working_dir: project_dir }).unwrap();
     assert_eq!(core.state().tab(tab).unwrap().working_dir, None);
+}
+
+/// A restored terminal starts in the directory its shell last reported.
+#[test]
+fn restored_terminals_start_where_their_shell_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_dir = dir.path().join("app");
+    let inner = project_dir.join("restored-here");
+    std::fs::create_dir_all(&inner).unwrap();
+    let (shell, show_dir) = if cfg!(windows) { ("cmd.exe", "echo [%CD%]") } else { ("sh", "echo \"[$PWD]\"") };
+    let pane = {
+        let mut core = open(dir.path());
+        core.dispatch(Command::SetDefaultShell(Some(shell.into()))).unwrap();
+        core.dispatch(Command::CreateProject { name: "p".into(), working_dir: project_dir.clone(), shell: None })
+            .unwrap();
+        let pane = only_pane(&core);
+        // What the shell integration sends after a `cd`.
+        core.apply_event(&Event::CwdChanged { pane, dir: inner.clone() });
+        pane
+    };
+
+    let restart = || {
+        let core = open(dir.path());
+        std::thread::sleep(Duration::from_millis(500));
+        core.terminal(pane).unwrap().write(format!("{show_dir}\r"));
+        core
+    };
+    let mut core = restart();
+    assert_eq!(core.state().pane(pane).unwrap().cwd.as_deref(), Some(inner.as_path()));
+    wait_for_text(&mut core, pane, "restored-here]");
+    drop(core);
+
+    // Once that directory is gone, it starts in the project's directory.
+    std::fs::remove_dir(&inner).unwrap();
+    let mut core = restart();
+    wait_for_text(&mut core, pane, "app]");
 }
 
 /// Git Bash's `bin\bash.exe` runs the real bash as a child; an idle Git Bash
