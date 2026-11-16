@@ -336,6 +336,8 @@ pub struct TaskDrag {
     pub task: TaskId,
     /// Where the pointer was when it first moved after the press.
     origin: Option<iced::Point>,
+    /// Where the pointer is now (window coordinates).
+    pub cursor: Option<iced::Point>,
     /// Far enough from where it was picked up to be a drag rather than a click.
     pub moving: bool,
     /// The drop target under the pointer.
@@ -1190,11 +1192,12 @@ impl App {
                 self.mark_prefs();
             }
             Message::TaskGrab(task) => {
-                self.task_drag = Some(TaskDrag { task, origin: None, moving: false, over: None });
+                self.task_drag = Some(TaskDrag { task, origin: None, cursor: None, moving: false, over: None });
             }
             Message::TaskDragMove(p) => {
                 if let Some(d) = &mut self.task_drag {
                     let origin = *d.origin.get_or_insert(p);
+                    d.cursor = Some(p);
                     d.moving |= origin.distance(p) >= TASK_DRAG_THRESHOLD;
                 }
             }
@@ -1472,7 +1475,8 @@ impl App {
             if self.prefs.tasks_open && self.core.state().selected_project.is_some() {
                 main = main.push(self.view_tasks());
             }
-            container(main).width(Length::Fill).height(Length::Fill).into()
+            // The second layer shows a dragged task next to the pointer.
+            container(stack![main, self.view_task_drag()]).width(Length::Fill).height(Length::Fill).into()
         };
         match &self.dialog {
             Some(d) => stack![base, self.view_dialog(d)].into(),

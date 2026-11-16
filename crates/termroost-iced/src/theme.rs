@@ -170,3 +170,19 @@ pub fn error_banner(theme: &Theme) -> container::Style {
         ..container::Style::default()
     }
 }
+
+/// The label that follows the pointer while a task is dragged.
+pub fn drag_label(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.background.base.color)),
+        text_color: Some(p.background.base.text),
+        border: Border { width: 1.0, color: p.primary.base.color, radius: 6.0.into() },
+        shadow: iced::Shadow {
+            color: Color { a: 0.35, ..Color::BLACK },
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
+        },
+        ..container::Style::default()
+    }
+}
