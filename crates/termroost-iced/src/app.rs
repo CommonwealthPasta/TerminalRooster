@@ -129,7 +129,7 @@ pub struct SettingsState {
     pub shell_input: String,
 }
 
-/// Choice in a task's "linked tab" dropdown.
+/// Choice in a task's "linked session" dropdown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TabChoice {
     pub id: Option<TabId>,

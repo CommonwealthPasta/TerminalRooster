@@ -351,20 +351,20 @@ impl Core {
                 Ok(Outcome::Tab(tab))
             }
             C::RenameTab { tab, title } => {
-                let title = non_empty(&title, "tab title")?;
-                let t = self.state.tab_mut(tab).ok_or(Error::NotFound("tab"))?;
+                let title = non_empty(&title, "session name")?;
+                let t = self.state.tab_mut(tab).ok_or(Error::NotFound("session"))?;
                 t.title = title;
                 ops.push(StoreOp::UpsertTab(t.clone()));
                 Ok(Outcome::None)
             }
             C::SetTabDir { tab, working_dir } => {
-                let t = self.state.tab_mut(tab).ok_or(Error::NotFound("tab"))?;
+                let t = self.state.tab_mut(tab).ok_or(Error::NotFound("session"))?;
                 t.working_dir = working_dir.filter(|d| !d.as_os_str().is_empty());
                 ops.push(StoreOp::UpsertTab(t.clone()));
                 Ok(Outcome::None)
             }
             C::DeleteTab(tab) => {
-                let project = self.state.tab(tab).ok_or(Error::NotFound("tab"))?.project;
+                let project = self.state.tab(tab).ok_or(Error::NotFound("session"))?.project;
                 let siblings: Vec<TabId> = self.state.tabs_of(project).map(|t| t.id).collect();
                 let index = siblings.iter().position(|t| *t == tab).expect("tab in project");
                 self.stop_tab_sessions(tab);
@@ -390,9 +390,9 @@ impl Core {
                 Ok(Outcome::None)
             }
             C::MoveTab { tab, to_index } => {
-                let project = self.state.tab(tab).ok_or(Error::NotFound("tab"))?.project;
+                let project = self.state.tab(tab).ok_or(Error::NotFound("session"))?.project;
                 let mut ids: Vec<TabId> = self.state.tabs_of(project).map(|t| t.id).collect();
-                reorder(&mut ids, tab, to_index).ok_or(Error::NotFound("tab"))?;
+                reorder(&mut ids, tab, to_index).ok_or(Error::NotFound("session"))?;
                 for (i, id) in ids.iter().enumerate() {
                     let t = self.state.tab_mut(*id).expect("exists");
                     t.sort_order = i as i64;
@@ -402,7 +402,7 @@ impl Core {
                 Ok(Outcome::None)
             }
             C::SelectTab(tab) => {
-                let project = self.state.tab(tab).ok_or(Error::NotFound("tab"))?.project;
+                let project = self.state.tab(tab).ok_or(Error::NotFound("session"))?.project;
                 let p = self.state.project_mut(project).expect("project exists");
                 if p.active_tab != Some(tab) {
                     p.active_tab = Some(tab);
@@ -419,7 +419,7 @@ impl Core {
             C::SplitPane { pane, axis } => {
                 let tab_id = self.state.pane(pane).ok_or(Error::NotFound("pane"))?.tab;
                 let new = PaneId(self.alloc());
-                let tab = self.state.tab_mut(tab_id).ok_or(Error::NotFound("tab"))?;
+                let tab = self.state.tab_mut(tab_id).ok_or(Error::NotFound("session"))?;
                 if !tab.layout.split(pane, axis, new) {
                     return Err(Error::Invalid("pane is not in its tab layout".into()));
                 }
@@ -439,9 +439,11 @@ impl Core {
             }
             C::ClosePane(pane) => {
                 let tab_id = self.state.pane(pane).ok_or(Error::NotFound("pane"))?.tab;
-                let tab = self.state.tab_mut(tab_id).ok_or(Error::NotFound("tab"))?;
+                let tab = self.state.tab_mut(tab_id).ok_or(Error::NotFound("session"))?;
                 if !tab.layout.remove(pane) {
-                    return Err(Error::Invalid("the last pane of a tab cannot be closed; delete the tab".into()));
+                    return Err(Error::Invalid(
+                        "the last terminal of a session cannot be closed; delete the session".into(),
+                    ));
                 }
                 if tab.focused_pane == Some(pane) || !tab.focused_pane.is_some_and(|f| tab.layout.contains(f)) {
                     tab.focused_pane = Some(tab.layout.first_pane());
@@ -454,7 +456,7 @@ impl Core {
             }
             C::FocusPane(pane) => {
                 let tab_id = self.state.pane(pane).ok_or(Error::NotFound("pane"))?.tab;
-                let tab = self.state.tab_mut(tab_id).ok_or(Error::NotFound("tab"))?;
+                let tab = self.state.tab_mut(tab_id).ok_or(Error::NotFound("session"))?;
                 if tab.focused_pane != Some(pane) {
                     tab.focused_pane = Some(pane);
                     ops.push(StoreOp::UpsertTab(tab.clone()));
@@ -462,7 +464,7 @@ impl Core {
                 Ok(Outcome::None)
             }
             C::SetLayout { tab, mut layout } => {
-                let t = self.state.tab_mut(tab).ok_or(Error::NotFound("tab"))?;
+                let t = self.state.tab_mut(tab).ok_or(Error::NotFound("session"))?;
                 let mut a = t.layout.panes();
                 let mut b = layout.panes();
                 a.sort();
@@ -622,7 +624,7 @@ impl Core {
         let title = title
             .map(|t| t.trim().to_owned())
             .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| format!("Tab {}", count + 1));
+            .unwrap_or_else(|| format!("Session {}", count + 1));
         let tab = Tab {
             id: tab_id,
             project,

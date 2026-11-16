@@ -447,7 +447,7 @@ fn preview<'a>(t: &ThemeDef) -> Element<'a, Message> {
     let ui_mock = container(
         column![
             text("Interface").size(13).color(ui.text.color()),
-            text("Projects, tabs and tasks use these colors.").size(12).color(ui.text.color()),
+            text("Projects, sessions and tasks use these colors.").size(12).color(ui.text.color()),
             row![
                 chip("Accent", ui.primary, on(ui.primary)),
                 chip("Success", ui.success, on(ui.success)),
@@ -501,10 +501,10 @@ fn preview<'a>(t: &ThemeDef) -> Element<'a, Message> {
 
 fn shortcuts_section<'a>() -> Element<'a, Message> {
     const SHORTCUTS: [(&str, &str); 12] = [
-        ("Ctrl+Shift+T", "New tab"),
+        ("Ctrl+Shift+T", "New session"),
         ("Ctrl+Shift+E / Ctrl+Shift+O", "Split right / split down"),
         ("Ctrl+Shift+W", "Close terminal"),
-        ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous tab"),
+        ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous session"),
         ("Ctrl+Shift+PgDn / PgUp", "Next / previous project"),
         ("Alt+Arrows", "Move between terminals"),
         ("Ctrl+Shift+C / Ctrl+Shift+V", "Copy / paste"),

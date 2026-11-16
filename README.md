@@ -3,9 +3,9 @@
 A project-based terminal manager for running coding agents (Claude Code, Codex, Grok, …) side by side.
 
 - **Projects** on the left, each with a working directory.
-- **Tabs** per project: vertical, renamable (double-click). Each tab holds terminals in horizontal/vertical **splits**.
-- **Tasks** per project in the right panel. You can mark them done and link each one to a tab; tabs show a badge with their open-task count.
-- **Everything is persisted in SQLite** as it changes: projects, tabs, split layouts, focus, tasks, window geometry and terminal scrollback. After a crash or a normal close, the app reopens as you left it.
+- **Sessions** per project: vertical, renamable (double-click). Each session holds terminals in horizontal/vertical **splits**.
+- **Tasks** per project in the right panel. You can mark them done and link each one to a session; sessions show a badge with their open-task count.
+- **Everything is persisted in SQLite** as it changes: projects, sessions, split layouts, focus, tasks, window geometry and terminal scrollback. After a crash or a normal close, the app reopens as you left it.
 
 ## Running
 
@@ -71,10 +71,10 @@ Panics are written to the log with a backtrace. The level comes from `TERMROOST_
 Terminal processes cannot survive a crash, and they end when the app closes. On reopen, every terminal gets the following:
 
 - Its **saved scrollback**, with colors. It is saved every 5 seconds and on close, and shown under a "restored session" banner.
-- A **fresh shell** in the tab's working directory.
+- A **fresh shell** in the session's working directory.
 - Its **resume command**, which runs automatically.
 
-Restored tabs start their shells the first time you open them, so dozens of agents don't all launch at once.
+Restored sessions start their shells the first time you open them, so dozens of agents don't all launch at once.
 
 ### Exact agent sessions, not "continue last"
 
@@ -98,10 +98,10 @@ Terminals receive every plain `Ctrl+letter`. App shortcuts use `Ctrl+Shift` or `
 
 | Keys | Action |
 |---|---|
-| Ctrl+Shift+T | New tab |
+| Ctrl+Shift+T | New session |
 | Ctrl+Shift+E / Ctrl+Shift+O | Split right / split down |
-| Ctrl+Shift+W | Close terminal (the last one in a tab can't be closed; delete the tab) |
-| Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | Next / previous tab |
+| Ctrl+Shift+W | Close terminal (the last one in a session can't be closed; delete the session) |
+| Ctrl+Tab / Ctrl+Shift+Tab, Ctrl+PgDn / Ctrl+PgUp | Next / previous session |
 | Ctrl+Shift+PgDn / Ctrl+Shift+PgUp | Next / previous project |
 | Alt+Arrows | Move between terminals |
 | Ctrl+Shift+C / Ctrl+Shift+V, Shift+Insert | Copy / paste |

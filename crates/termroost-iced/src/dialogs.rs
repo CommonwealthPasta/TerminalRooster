@@ -112,7 +112,7 @@ impl App {
                 column![
                     text(format!("Delete project “{name}”?")).size(18).font(BOLD),
                     text(format!(
-                        "This closes {terms} terminal(s) in {tabs} tab(s) and deletes {tasks} task(s) and all saved \
+                        "This closes {terms} terminal(s) in {tabs} session(s) and deletes {tasks} task(s) and all saved \
                          scrollback. The directory on disk is not touched. This cannot be undone."
                     ))
                     .size(13),
@@ -123,17 +123,17 @@ impl App {
             }
             Dialog::ConfirmDeleteTab(t) => {
                 let tab = s.tab(*t);
-                let name = tab.map(|t| t.title.as_str()).unwrap_or("tab");
+                let name = tab.map(|t| t.title.as_str()).unwrap_or("session");
                 let terms = tab.map(|t| t.layout.panes().len()).unwrap_or(0);
                 let linked = s.tasks.iter().filter(|x| x.tab == Some(*t)).count();
                 column![
-                    text(format!("Delete tab “{name}”?")).size(18).font(BOLD),
+                    text(format!("Delete session “{name}”?")).size(18).font(BOLD),
                     text(format!(
                         "This closes {terms} terminal(s) and their saved scrollback. {linked} linked task(s) are kept \
                          and unlinked."
                     ))
                     .size(13),
-                    actions("Delete tab", true),
+                    actions("Delete session", true),
                 ]
                 .spacing(14)
                 .into()

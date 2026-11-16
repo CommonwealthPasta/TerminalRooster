@@ -14,7 +14,7 @@ impl App {
         let Some(project) = s.selected_project else { return space::horizontal().width(0).into() };
         let active_tab = self.active_tab_id();
 
-        let mut choices = vec![TabChoice { id: None, label: "no tab".into() }];
+        let mut choices = vec![TabChoice { id: None, label: "no session".into() }];
         choices.extend(s.tabs_of(project).map(|t| TabChoice { id: Some(t.id), label: t.title.clone() }));
 
         let (open, done) = s.tasks_of(project).fold((0, 0), |(o, d), t| if t.done { (o, d + 1) } else { (o + 1, d) });
@@ -30,7 +30,7 @@ impl App {
         let filters = row![
             checkbox(self.prefs.show_done).label("Show done").on_toggle(Message::ShowDone).size(14).text_size(12),
             checkbox(self.prefs.tasks_this_tab_only)
-                .label("This tab only")
+                .label("This session only")
                 .on_toggle(Message::ThisTabOnly)
                 .size(14)
                 .text_size(12),
@@ -38,7 +38,7 @@ impl App {
         .spacing(12);
 
         let input = text_input(
-            if self.prefs.tasks_this_tab_only { "Add a task to this tab…" } else { "Add a task…" },
+            if self.prefs.tasks_this_tab_only { "Add a task to this session…" } else { "Add a task…" },
             &self.new_task,
         )
         .id(TASK_INPUT)
@@ -88,13 +88,13 @@ impl App {
         };
         let selected = choices.iter().find(|c| c.id == task.tab).cloned();
         let mut link = row![
-            muted_text("tab"),
+            muted_text("session"),
             pick_list(choices.to_vec(), selected, move |c| Message::TaskTab(id, c)).text_size(11).padding([1, 6]),
         ]
         .spacing(6)
         .align_y(Alignment::Center);
         if let Some(tab) = task.tab.filter(|t| Some(*t) != active_tab) {
-            link = link.push(icon_button("↗", Message::SelectTab(tab), "Go to tab"));
+            link = link.push(icon_button("↗", Message::SelectTab(tab), "Go to session"));
         }
 
         let linked_here = task.tab.is_some() && task.tab == active_tab;

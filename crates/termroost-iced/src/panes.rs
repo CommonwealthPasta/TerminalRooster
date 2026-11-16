@@ -27,8 +27,8 @@ impl App {
         let Some(tab) = s.active_tab() else {
             return center(
                 column![
-                    text(format!("{} has no tabs", project.name)),
-                    button(text("New tab")).padding([6, 14]).on_press(Message::NewTab),
+                    text(format!("{} has no sessions", project.name)),
+                    button(text("New session")).padding([6, 14]).on_press(Message::NewTab),
                 ]
                 .spacing(12)
                 .align_x(Alignment::Center),

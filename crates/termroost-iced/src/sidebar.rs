@@ -170,17 +170,21 @@ impl App {
                 muted_text(short_dir(&project.working_dir, 26)).wrapping(text::Wrapping::None)
             ]
             .width(Length::Fill),
-            icon_button("+", Message::NewTab, "New tab (Ctrl+Shift+T)"),
+            icon_button("+", Message::NewTab, "New session (Ctrl+Shift+T)"),
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
         let items = column(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
-            .push(add_item(Message::NewTab, "New tab (Ctrl+Shift+T)"))
+            .push(add_item(Message::NewTab, "New session (Ctrl+Shift+T)"))
             .spacing(2)
             .padding([0, 6]);
         container(
-            column![header, section_title("TABS").width(Length::Fill).center(), scrollable(items).height(Length::Fill)]
-                .spacing(4),
+            column![
+                header,
+                section_title("SESSIONS").width(Length::Fill).center(),
+                scrollable(items).height(Length::Fill)
+            ]
+            .spacing(4),
         )
         .width(210)
         .height(Length::Fill)
@@ -220,8 +224,8 @@ impl App {
             .on_double_click(Message::StartRename(RenameTarget::Tab(tab.id)));
         let actions: Element<'_, Message> = if selected {
             column![
-                icon_button("✎", Message::StartRename(RenameTarget::Tab(tab.id)), "Rename tab"),
-                icon_button("✕", Message::AskDeleteTab(tab.id), "Delete tab"),
+                icon_button("✎", Message::StartRename(RenameTarget::Tab(tab.id)), "Rename session"),
+                icon_button("✕", Message::AskDeleteTab(tab.id), "Delete session"),
             ]
             .into()
         } else {

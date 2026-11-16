@@ -202,7 +202,7 @@ fn delete_semantics() {
     };
     let tab1 = core.state().active_tab().unwrap().id;
     let Outcome::Tab(tab2) = core.dispatch(Command::CreateTab { project: p, title: None }).unwrap() else { panic!() };
-    assert_eq!(core.state().tab(tab2).unwrap().title, "Tab 2");
+    assert_eq!(core.state().tab(tab2).unwrap().title, "Session 2");
     let Outcome::Task(task) =
         core.dispatch(Command::CreateTask { project: p, title: "t".into(), tab: Some(tab2) }).unwrap()
     else {
