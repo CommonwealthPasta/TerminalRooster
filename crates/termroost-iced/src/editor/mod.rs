@@ -3,6 +3,7 @@
 
 mod disk;
 mod external;
+mod highlight;
 mod history;
 mod keys;
 mod saved;

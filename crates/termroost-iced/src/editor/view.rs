@@ -4,7 +4,7 @@ use iced::widget::{button, center, column, container, row, space, text, text_edi
 use iced::{Alignment, Element, Length};
 
 use super::text::char_column;
-use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, keys};
+use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, highlight, keys};
 use crate::app::{App, Message};
 use crate::sidebar::{display_dir, icon_button, muted_text};
 use crate::terminal_view::TerminalView;
@@ -82,6 +82,11 @@ impl App {
                 if self.dialog.is_none() {
                     editor = editor.on_action(move |a| Message::Editor(EditorMsg::Action(id, a)));
                 }
+                let dark = self.theme().extended_palette().is_dark;
+                let editor = editor.highlight_with::<highlight::DocHighlighter>(
+                    highlight::Settings::new(id, &doc.path, dark),
+                    highlight::format,
+                );
                 // The banner goes below the text: above it, appearing moves the
                 // editor, which then loses the keyboard (seen with iced 0.14;
                 // cause not found). The text doesn't jump this way either.
