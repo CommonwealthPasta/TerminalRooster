@@ -901,7 +901,7 @@ impl App {
                 return self.quit();
             }
             Message::Escape => {
-                if self.task_drag.take().is_some() {
+                if self.task_drag.take().is_some() || self.close_files_menu() {
                     return Task::none();
                 }
                 if matches!(self.dialog, Some(Dialog::CodexTrust(_))) {

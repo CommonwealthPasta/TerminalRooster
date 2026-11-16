@@ -7,6 +7,9 @@
 //! While the tab is on screen, the folders shown are read again every few
 //! seconds, since agents add and remove files all the time.
 //!
+//! Right-clicking an entry (or the folder at the top) opens a small menu
+//! under it, to show the entry in the system's file manager.
+//!
 //! What git leaves out (`.gitignore`, `.git/info/exclude`, the global
 //! excludes file) is dimmed, along with everything inside it.
 
@@ -14,10 +17,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iced::widget::{button, column, row, scrollable, space, text};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
+use crate::reveal;
 use crate::side_panel::SideTab;
 use crate::sidebar::{icon_button, muted_text, short_dir};
 use crate::theme;
@@ -53,6 +57,8 @@ pub struct FilesState {
     listings: HashMap<PathBuf, Listing>,
     /// Folders being read right now.
     reading: HashSet<PathBuf>,
+    /// The entry whose menu is open (it was right-clicked).
+    menu: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,6 +73,12 @@ pub enum FilesMsg {
     Poll,
     /// The refresh button.
     Refresh,
+    /// An entry was right-clicked: open its menu (or close it, if open).
+    Menu(PathBuf),
+    /// Show a file, or open a folder, in the system's file manager.
+    Reveal { path: PathBuf, is_dir: bool },
+    /// The file manager was started, or why not.
+    Revealed(Result<(), String>),
 }
 
 /// The files and folders in `dir`: folders first, then by name ignoring case.
@@ -116,6 +128,8 @@ pub enum Row<'a> {
     },
     /// "Loading…", an error, or how many entries are not shown.
     Note { text: String, depth: usize },
+    /// The menu of the entry above it.
+    Menu { entry: &'a Entry, depth: usize },
 }
 
 /// The tree under `root` as lines: each open folder's listing below it.
@@ -148,6 +162,9 @@ fn push_rows<'a>(dir: &Path, depth: usize, dim: bool, state: &'a FilesState, out
                 let open = entry.is_dir && state.expanded.contains(&entry.path);
                 let dim = dim || entry.ignored;
                 out.push(Row::Entry { entry, depth, open, dim });
+                if state.menu.as_ref() == Some(&entry.path) {
+                    out.push(Row::Menu { entry, depth });
+                }
                 if open {
                     push_rows(&entry.path, depth + 1, dim, state, out);
                 }
@@ -187,6 +204,11 @@ impl App {
         Some(self.read_dirs(vec![root]))
     }
 
+    /// Closes the menu of an entry, if one is open.
+    pub(crate) fn close_files_menu(&mut self) -> bool {
+        self.files.menu.take().is_some()
+    }
+
     /// Reads the folders the Files tab shows again, if it is on screen.
     pub(crate) fn refresh_files(&mut self) -> Task<Message> {
         match self.files_root().filter(|_| self.files_shown()) {
@@ -215,6 +237,7 @@ impl App {
     pub(crate) fn update_files(&mut self, msg: FilesMsg) -> Task<Message> {
         match msg {
             FilesMsg::Toggle(dir) => {
+                self.files.menu = None;
                 let read = if self.files.expanded.remove(&dir) {
                     Task::none()
                 } else {
@@ -237,9 +260,35 @@ impl App {
                 }
                 Task::none()
             }
-            FilesMsg::Open(path) => self.open_file(path),
+            FilesMsg::Open(path) => {
+                self.files.menu = None;
+                self.open_file(path)
+            }
             FilesMsg::Poll => self.refresh_files(),
-            FilesMsg::Refresh => Task::batch([self.refresh_files(), self.focus_active()]),
+            FilesMsg::Refresh => {
+                self.files.menu = None;
+                Task::batch([self.refresh_files(), self.focus_active()])
+            }
+            FilesMsg::Menu(path) => {
+                self.files.menu = if self.files.menu.as_ref() == Some(&path) { None } else { Some(path) };
+                Task::none()
+            }
+            FilesMsg::Reveal { path, is_dir } => {
+                self.files.menu = None;
+                let (tx, rx) = async_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let _ = tx.send_blocking(reveal::reveal(&path, is_dir));
+                });
+                let revealed = Task::perform(async move { rx.recv().await.unwrap_or(Ok(())) }, |r| {
+                    Message::Files(FilesMsg::Revealed(r))
+                });
+                Task::batch([revealed, self.focus_active()])
+            }
+            FilesMsg::Revealed(Ok(())) => Task::none(),
+            FilesMsg::Revealed(Err(e)) => {
+                self.error = Some(format!("Could not open the file manager: {e}"));
+                Task::none()
+            }
         }
     }
 
@@ -247,12 +296,16 @@ impl App {
     pub(crate) fn view_files(&self) -> Element<'_, Message> {
         let Some(root) = self.files_root() else { return space::horizontal().width(0).into() };
         let lines = rows(&root, &self.files).into_iter().map(file_row);
-        let top = row![
-            muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill),
-            icon_button("↻", Message::Files(FilesMsg::Refresh), "Read the folders again"),
-        ]
-        .align_y(Alignment::Center);
-        column![top, scrollable(column(lines).width(Length::Fill)).height(Length::Fill),].spacing(8).into()
+        let path = mouse_area(muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill))
+            .on_right_press(Message::Files(FilesMsg::Menu(root.clone())));
+        let top = row![path, icon_button("↻", Message::Files(FilesMsg::Refresh), "Read the folders again")]
+            .align_y(Alignment::Center);
+        // The folder's own menu, under its name; always there, so the tree keeps its place.
+        let root_menu: Element<'_, Message> = match &self.files.menu {
+            Some(m) if *m == root => file_menu(root.clone(), true, 0.0),
+            _ => space::vertical().height(0).into(),
+        };
+        column![top, root_menu, scrollable(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
     }
 }
 
@@ -274,17 +327,30 @@ fn file_row(r: Row<'_>) -> Element<'_, Message> {
             .align_y(Alignment::Center);
             let press =
                 if entry.is_dir { FilesMsg::Toggle(entry.path.clone()) } else { FilesMsg::Open(entry.path.clone()) };
-            button(label)
+            let line = button(label)
                 .width(Length::Fill)
                 .padding([2, 4])
                 .style(theme::tree_row)
-                .on_press(Message::Files(press))
-                .into()
+                .on_press(Message::Files(press));
+            mouse_area(line).on_right_press(Message::Files(FilesMsg::Menu(entry.path.clone()))).into()
         }
+        Row::Menu { entry, depth } => file_menu(entry.path.clone(), entry.is_dir, depth as f32 * INDENT + 16.0),
         Row::Note { text: note, depth } => {
             row![space::horizontal().width(depth as f32 * INDENT + 18.0), muted_text(note)].padding([2, 4]).into()
         }
     }
+}
+
+/// The menu of an entry: for now, showing it in the system's file manager.
+fn file_menu<'a>(path: PathBuf, is_dir: bool, indent: f32) -> Element<'a, Message> {
+    let reveal = button(text(reveal::label(is_dir)).size(13))
+        .width(Length::Fill)
+        .padding([4, 10])
+        .style(theme::tree_row)
+        .on_press(Message::Files(FilesMsg::Reveal { path, is_dir }));
+    row![space::horizontal().width(indent), container(reveal).padding(3).width(220).style(theme::menu)]
+        .padding([0, 4])
+        .into()
 }
 
 #[cfg(test)]
@@ -380,6 +446,7 @@ mod tests {
                     format!("{depth}:{mark}{}{}", entry.name, if dim { "~" } else { "" })
                 }
                 Row::Note { text, depth } => format!("{depth}:({text})"),
+                Row::Menu { entry, depth } => format!("{depth}:[menu of {}]", entry.name),
             })
             .collect()
     }
@@ -413,6 +480,19 @@ mod tests {
         let dirs: Vec<PathBuf> = ["/r", "/r/a", "/r/a/x"].into_iter().map(PathBuf::from).collect();
         assert_eq!(shown_dirs(Path::new("/r"), &state), dirs);
         assert_eq!(shown_dirs(Path::new("/r/a"), &state), dirs[1..]);
+    }
+
+    #[test]
+    fn a_menu_opens_under_its_entry() {
+        let mut state = FilesState::default();
+        state.listings.insert("/r".into(), Listing::Ready(vec![entry("/r/src", true), entry("/r/x.md", false)]));
+        state.listings.insert("/r/src".into(), Listing::Ready(vec![entry("/r/src/lib.rs", false)]));
+        state.expanded.insert("/r/src".into());
+        state.menu = Some("/r/src".into());
+        assert_eq!(lines("/r", &state), ["0:▾src", "0:[menu of src]", "1:lib.rs", "0:x.md"]);
+        state.menu = Some("/r/src/lib.rs".into());
+        assert_eq!(lines("/r", &state), ["0:▾src", "1:lib.rs", "1:[menu of lib.rs]", "0:x.md"]);
+        assert_eq!(shown_dirs(Path::new("/r"), &state).len(), 2, "menus aren't folders to read");
     }
 
     #[test]

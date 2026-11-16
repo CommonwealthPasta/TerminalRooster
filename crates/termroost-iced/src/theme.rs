@@ -128,6 +128,22 @@ pub fn tree_row(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// A small menu, such as an entry's in the Files tab.
+pub fn menu(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(Background::Color(p.background.base.color)),
+        text_color: Some(p.background.base.text),
+        border: Border { width: 1.0, color: p.background.strong.color, radius: 6.0.into() },
+        shadow: iced::Shadow {
+            color: Color { a: 0.3, ..Color::BLACK },
+            offset: iced::Vector::new(0.0, 2.0),
+            blur_radius: 6.0,
+        },
+        ..container::Style::default()
+    }
+}
+
 /// The file editor: square, framed like a terminal, in the accent color while it has the keyboard.
 pub fn file_editor(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
     let p = theme.extended_palette();

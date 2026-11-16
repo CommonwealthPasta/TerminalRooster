@@ -15,6 +15,7 @@ mod notify;
 mod on_escape;
 mod panes;
 mod reorder;
+mod reveal;
 mod settings;
 mod side_panel;
 mod sidebar;
