@@ -126,6 +126,7 @@ pub struct RunningTerminal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenameTarget {
     Project(ProjectId),
+    Group(GroupId),
     Tab(TabId),
 }
 
@@ -251,6 +252,9 @@ pub enum Message {
     ArrangeProjects(Command),
     /// Show or hide a group's projects.
     ToggleGroup(GroupId),
+    /// A double click on a group: rename it. Its first click opened or
+    /// closed the group, so that is undone.
+    GroupDoubleClicked(GroupId),
     /// Move a session to this index of its project's list without it.
     MoveTab(TabId, usize),
     /// The text in the projects search box changed.
@@ -918,13 +922,23 @@ impl App {
                 }
             }
             Message::ArrangeProjects(cmd) => {
-                self.dispatch(cmd);
+                // A new group gets its name right away.
+                if let Some(Outcome::Group(group)) = self.dispatch(cmd) {
+                    return self.update(Message::StartRename(RenameTarget::Group(group)));
+                }
             }
             Message::ToggleGroup(group) => {
                 if let Some(g) = self.core.state().group(group) {
                     let collapsed = !g.collapsed;
                     self.dispatch(Command::SetGroupCollapsed { group, collapsed });
                 }
+            }
+            Message::GroupDoubleClicked(group) => {
+                // While searching, clicks don't open or close groups.
+                if !self.searching_projects() {
+                    let _ = self.update(Message::ToggleGroup(group));
+                }
+                return self.update(Message::StartRename(RenameTarget::Group(group)));
             }
             Message::MoveTab(tab, to_index) => {
                 self.dispatch(Command::MoveTab { tab, to_index });
@@ -1300,6 +1314,7 @@ impl App {
                 let s = self.core.state();
                 let value = match target {
                     RenameTarget::Project(p) => s.project(p).map(|p| p.name.clone()),
+                    RenameTarget::Group(g) => s.group(g).map(|g| g.name.clone()),
                     RenameTarget::Tab(t) => s.tab(t).map(|t| t.title.clone()),
                 };
                 if let Some(value) = value {
@@ -1316,6 +1331,7 @@ impl App {
                 if let Some(r) = self.rename.take() {
                     let cmd = match r.target {
                         RenameTarget::Project(project) => Command::RenameProject { project, name: r.value },
+                        RenameTarget::Group(group) => Command::RenameGroup { group, name: r.value },
                         RenameTarget::Tab(tab) => Command::RenameTab { tab, title: r.value },
                     };
                     self.dispatch(cmd);

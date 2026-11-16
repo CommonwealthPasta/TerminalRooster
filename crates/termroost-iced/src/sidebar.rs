@@ -250,7 +250,7 @@ impl App {
         })
     }
 
-    fn searching_projects(&self) -> bool {
+    pub(crate) fn searching_projects(&self) -> bool {
         self.project_search.split_whitespace().next().is_some()
     }
 
@@ -274,6 +274,9 @@ impl App {
 
     /// A group's row: a click shows or hides its projects.
     fn group_item<'a>(&'a self, group: &'a ProjectGroup, searching: bool) -> Element<'a, Message> {
+        if let Some(input) = self.rename_input(RenameTarget::Group(group.id)) {
+            return input;
+        }
         let s = self.core.state();
         let projects: Vec<&Project> = s.projects_in(group.id).collect();
         let open = searching || !group.collapsed;
@@ -291,12 +294,14 @@ impl App {
         }
         let label = label.push(muted_text(projects.len().to_string()));
         let mut body =
-            mouse_area(container(label).padding([5, 8]).width(Length::Fill).style(item_style(selected, false)));
+            mouse_area(container(label).padding([5, 8]).width(Length::Fill).style(item_style(selected, false)))
+                .on_double_click(Message::GroupDoubleClicked(group.id));
         if !searching {
             // On release, so pressing it to drag it doesn't open or close it.
             body = body.on_release(Message::ToggleGroup(group.id));
         }
-        row![body, space::horizontal().width(ACTIONS_WIDTH)].align_y(Alignment::Center).into()
+        let rename = icon_button("✎", Message::StartRename(RenameTarget::Group(group.id)), "Rename group");
+        row![body, container(rename).width(ACTIONS_WIDTH)].align_y(Alignment::Center).into()
     }
 
     /// A project's row; `nested` in a group, it is drawn further right.
