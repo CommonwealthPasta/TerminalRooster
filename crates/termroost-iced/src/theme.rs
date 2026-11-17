@@ -7,10 +7,10 @@
 //!   color at a low opacity over what is behind them.
 //! - The accent marks what is selected, focused or switched on. Filled
 //!   buttons are drawn in the text color, so they don't compete with it.
-//! - Corners are [`RADIUS_SM`] on small controls, and [`RADIUS`] on
-//!   buttons, fields and list items.
-//! - What is raised (cards, menus, the selected list item) is lighter than
-//!   what it sits on, and casts a soft shadow.
+//! - Corners are [`RADIUS_SM`] on small controls, [`RADIUS`] on buttons,
+//!   fields and list items, and [`RADIUS_LG`] on pop-ups.
+//! - What is raised (cards, menus, pop-ups, the selected list item) is
+//!   lighter than what it sits on, and casts a soft shadow.
 
 use std::sync::LazyLock;
 
@@ -176,6 +176,11 @@ fn shadow_md(t: &Theme) -> Shadow {
     shadow(t, 0.12, 0.45, 4.0, 14.0)
 }
 
+/// Under dialogs.
+fn shadow_lg(t: &Theme) -> Shadow {
+    shadow(t, 0.2, 0.55, 12.0, 36.0)
+}
+
 /// The kinds of message a note or badge can carry, each in its own color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -271,6 +276,19 @@ pub fn button_tonal(t: &Theme, status: button::Status) -> button::Style {
         button::Status::Hovered => button_style(fill(0.10, 0.13), ink(t), RADIUS),
         button::Status::Pressed => button_style(fill(0.14, 0.17), ink(t), RADIUS),
         button::Status::Disabled => button_style(fill(0.04, 0.05), faint(t), RADIUS),
+    }
+}
+
+/// A button that reads as a link, in `tone`'s color.
+pub fn button_link(tone: Tone) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |t, status| {
+        let c = if tone == Tone::Neutral { accent(t) } else { tone_text(t, tone) };
+        match status {
+            button::Status::Active => button_style(None, c, RADIUS_SM),
+            button::Status::Hovered => button_style(Some(c.scale_alpha(0.1)), c, RADIUS_SM),
+            button::Status::Pressed => button_style(Some(c.scale_alpha(0.16)), c, RADIUS_SM),
+            button::Status::Disabled => button_style(None, faint(t), RADIUS_SM),
+        }
     }
 }
 
@@ -615,6 +633,27 @@ pub fn notice_tone(category: crate::notify::Category) -> Tone {
     }
 }
 
+/// A pop-up about a terminal that is out of view.
+pub fn toast(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(raised(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.0, color: line(t), radius: RADIUS_LG.into() },
+        shadow: shadow_lg(t),
+        ..container::Style::default()
+    }
+}
+
+/// The round mark at the start of a toast, tinted with its alert's color.
+pub fn toast_mark(category: crate::notify::Category) -> impl Fn(&Theme) -> container::Style {
+    move |t| container::Style {
+        background: Some(notice_color(t, category).scale_alpha(0.16).into()),
+        text_color: Some(notice_color(t, category)),
+        border: border::rounded(PILL),
+        ..container::Style::default()
+    }
+}
+
 /// Small borderless icon buttons.
 pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
     let p = theme.extended_palette();
@@ -660,23 +699,5 @@ pub fn modal_card(theme: &Theme) -> container::Style {
         text_color: Some(p.background.weak.text),
         border: Border { width: 1.0, color: p.background.strong.color, radius: 8.0.into() },
         ..container::Style::default()
-    }
-}
-
-/// A pop-up about a terminal that is out of view.
-pub fn toast(category: crate::notify::Category) -> impl Fn(&Theme) -> container::Style {
-    move |theme| {
-        let p = theme.extended_palette();
-        container::Style {
-            background: Some(Background::Color(p.background.weak.color)),
-            text_color: Some(p.background.weak.text),
-            border: Border { width: 1.5, color: notice_color(theme, category), radius: 8.0.into() },
-            shadow: iced::Shadow {
-                color: Color { a: 0.35, ..Color::BLACK },
-                offset: iced::Vector::new(0.0, 4.0),
-                blur_radius: 12.0,
-            },
-            ..container::Style::default()
-        }
     }
 }
