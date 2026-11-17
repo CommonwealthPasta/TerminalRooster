@@ -1,5 +1,6 @@
 //! Files opened from the Files tab. Each session has its own open files, and
-//! one of them can be shown in place of the session's terminals.
+//! one of them can be shown in place of the session's terminals. A commit
+//! picked in the Git tab opens among them too (see `git_view`).
 
 mod disk;
 mod external;
@@ -21,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use termroost_core::{GridSize, PaneId, TabId, TerminalHandle};
 
 use crate::app::{App, Dialog, Message, RunningTerminal};
+use crate::git_view::CommitDoc;
 use disk::{FileText, OnDisk, Reaction, SaveError, Stamp};
 use history::{History, Snapshot};
 pub use text::{Format, Indent};
@@ -63,6 +65,19 @@ impl OpenFile {
     pub fn modified(&self) -> bool {
         matches!(&self.kind, DocKind::Text(t) if t.modified())
     }
+
+    /// Its name in the strip of open files.
+    pub fn label(&self) -> String {
+        match &self.kind {
+            DocKind::Commit(c) => format!("Commit {}", c.short()),
+            _ => self.path.file_name().map_or_else(|| self.path.display().to_string(), |n| n.to_string_lossy().into()),
+        }
+    }
+
+    /// It is a file (not a commit), so it is opened again after a restart.
+    pub fn is_file(&self) -> bool {
+        !matches!(self.kind, DocKind::Commit(_))
+    }
 }
 
 #[derive(Debug)]
@@ -82,6 +97,8 @@ pub enum DocKind {
         name: String,
         started: Instant,
     },
+    /// A commit of the repository at `path`.
+    Commit(Box<CommitDoc>),
 }
 
 /// A text file in the built-in editor.
@@ -306,7 +323,7 @@ impl App {
     fn text_mut(&mut self, id: DocId) -> Option<&mut TextDoc> {
         match &mut self.doc_mut(id)?.kind {
             DocKind::Text(t) => Some(t),
-            DocKind::Loading | DocKind::Restored { .. } | DocKind::Terminal { .. } => None,
+            DocKind::Loading | DocKind::Restored { .. } | DocKind::Terminal { .. } | DocKind::Commit(_) => None,
         }
     }
 
@@ -411,7 +428,7 @@ impl App {
         Some(match &self.shown_doc()?.kind {
             DocKind::Text(_) => operation::focus(FILE_EDITOR),
             DocKind::Terminal { handle, .. } => operation::focus(crate::terminal_view::widget_id(handle.pane())),
-            DocKind::Loading | DocKind::Restored { .. } => Task::none(),
+            DocKind::Loading | DocKind::Restored { .. } | DocKind::Commit(_) => Task::none(),
         })
     }
 
@@ -428,8 +445,7 @@ impl App {
             files.shown = Some(doc.id);
             return self.focus_active();
         }
-        self.next_doc += 1;
-        let id = DocId(self.next_doc);
+        let id = self.new_doc_id();
         if self.prefs.file_editor == FileEditor::Terminal {
             let Some(kind) = self.launch_editor(tab, &path) else { return Task::none() };
             let files = self.editors.entry(tab).or_default();
@@ -573,6 +589,12 @@ impl App {
             async move { rx.recv().await.unwrap_or_else(|_| Err(SaveError::Io("writing it stopped".into()))) },
             move |r| Message::Editor(EditorMsg::Saved(id, version, r)),
         )
+    }
+
+    /// An id for a new open file.
+    pub(crate) fn new_doc_id(&mut self) -> DocId {
+        self.next_doc += 1;
+        DocId(self.next_doc)
     }
 
     fn next_version(&mut self) -> u64 {

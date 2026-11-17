@@ -30,8 +30,7 @@ impl App {
             .spacing(4)
             .align_y(Alignment::Center);
         for doc in &files.open {
-            let mut name =
-                doc.path.file_name().map_or_else(|| doc.path.display().to_string(), |n| n.to_string_lossy().into());
+            let mut name = doc.label();
             if doc.modified() {
                 name.push_str(" ●");
             }
@@ -48,6 +47,7 @@ impl App {
     /// A file shown in place of the terminals.
     pub(crate) fn view_doc<'a>(&'a self, doc: &'a OpenFile) -> Element<'a, Message> {
         match &doc.kind {
+            DocKind::Commit(c) => self.view_commit(doc.id, c),
             DocKind::Loading | DocKind::Restored { .. } => center(muted_text("Reading…")).into(),
             // Neovim or Vim: a terminal like the session's, with the keyboard
             // unless a dialog is open.

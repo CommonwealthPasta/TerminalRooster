@@ -19,6 +19,7 @@ use crate::color_picker::{ColorPicker, Hsl};
 use crate::editor::{DocId, EditorMsg, FileEditor, SessionFiles};
 use crate::files::{FilesMsg, FilesState};
 use crate::git_panel::{GitLog, GitSync, LogRead, SyncOp};
+use crate::git_view::GitViewMsg;
 use crate::groups;
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
@@ -447,6 +448,8 @@ pub enum Message {
     PullRebase(bool),
     DismissSync,
     Remotes(RemotesMsg),
+    /// Commits shown in place of the terminals.
+    GitView(GitViewMsg),
 
     /// Puts text on the clipboard.
     CopyText(String),
@@ -913,6 +916,7 @@ impl App {
         let quiet = match &message {
             Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
             Message::Editor(msg) => !msg.loggable(),
+            Message::GitView(msg) => !msg.loggable(),
             _ => false,
         };
         if !quiet {
@@ -1771,6 +1775,7 @@ impl App {
             }
             Message::DismissSync => self.git_sync = None,
             Message::Remotes(msg) => return self.update_remotes(msg),
+            Message::GitView(msg) => return self.update_git_view(msg),
             Message::LogAllBranches(all) => {
                 self.prefs.log_all_branches = all;
                 self.mark_prefs();

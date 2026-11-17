@@ -3,15 +3,17 @@
 //! every git poll compares the repository's refs and config, and reads the
 //! log again when they changed. Commits that are on no remote are marked,
 //! and the branch's distance to its upstream is shown, with Pull (rebasing
-//! by default) and Push.
+//! by default) and Push. A commit clicked shows what it changed in place of
+//! the terminals (see `git_view`).
 
 use std::path::PathBuf;
 
-use iced::widget::{column, container, pick_list, row, space, text};
+use iced::widget::{button, column, pick_list, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
+use crate::git_view::GitViewMsg;
 use crate::icons::Icon;
 use crate::remotes::RemotesMsg;
 use crate::side_panel::SideTab;
@@ -76,7 +78,7 @@ fn shorten(s: &str, max: usize) -> String {
 }
 
 /// "5m ago", or the date for anything older than a week.
-fn ago(time: i64, now: i64) -> String {
+pub(crate) fn ago(time: i64, now: i64) -> String {
     let secs = (now - time).max(0);
     match secs {
         0..60 => "just now".to_owned(),
@@ -217,7 +219,8 @@ impl App {
             Some(Ok(commits)) => {
                 let now = chrono::Utc::now().timestamp();
                 let unpushed = |c: &Commit| tracking.is_some_and(|t| t.unpushed.contains(&c.id));
-                let list = column(commits.iter().map(|c| commit_item(c, unpushed(c), now)))
+                let shown = self.shown_commit();
+                let list = column(commits.iter().map(|c| commit_item(c, unpushed(c), shown == Some(&c.id), now)))
                     .spacing(4)
                     .padding(iced::Padding { right: 10.0, ..iced::Padding::ZERO });
                 ui::scroll(list).height(Length::Fill).into()
@@ -393,8 +396,9 @@ fn remote_status(t: &Tracking, head: Option<&Head>) -> Option<String> {
 }
 
 /// One commit: subject, then id, author and age, then branches and tags,
-/// and whether it is on no remote yet.
-fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
+/// and whether it is on no remote yet. Pressed, it shows what it changed;
+/// the one `shown` is raised.
+fn commit_item(c: &Commit, unpushed: bool, shown: bool, now: i64) -> Element<'_, Message> {
     let meta = row![
         text(&c.short)
             .font(theme::MONO)
@@ -418,7 +422,12 @@ fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
         );
         item = item.push(row(badges).spacing(4).wrap().vertical_spacing(4));
     }
-    container(item).padding([6, 8]).width(Length::Fill).into()
+    button(item)
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(theme::list_button(shown))
+        .on_press(Message::GitView(GitViewMsg::OpenCommit(c.id.clone())))
+        .into()
 }
 
 #[cfg(test)]

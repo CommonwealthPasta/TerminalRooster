@@ -335,6 +335,28 @@ pub fn row_button(t: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// An item of a list that is pressed to show it, such as a commit in the
+/// Git tab; the one `selected` (shown now) is raised.
+pub fn list_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |t, status| {
+        if selected {
+            return button::Style { shadow: shadow_sm(t), ..button_style(Some(chosen(t)), ink(t), RADIUS) };
+        }
+        match status {
+            button::Status::Active | button::Status::Disabled => button_style(None, ink(t), RADIUS),
+            button::Status::Hovered => button_style(Some(hover_fill(t)), ink(t), RADIUS),
+            button::Status::Pressed => button_style(Some(press_fill(t)), ink(t), RADIUS),
+        }
+    }
+}
+
+/// A button drawn as nothing but its content, such as a file's name in a
+/// diff, which folds the file.
+pub fn button_bare(t: &Theme, status: button::Status) -> button::Style {
+    let text_color = if status == button::Status::Disabled { faint(t) } else { ink(t) };
+    button_style(None, text_color, 0.0)
+}
+
 /// "New project" and "New session" under their lists: quiet until hovered.
 pub fn add_item_button(t: &Theme, status: button::Status) -> button::Style {
     match status {
@@ -712,6 +734,72 @@ pub fn pane_grid_style(t: &Theme) -> pane_grid::Style {
     style.hovered_region.background = accent(t).scale_alpha(0.15).into();
     style.hovered_region.border = Border { width: 1.5, color: accent(t), radius: RADIUS.into() };
     style
+}
+
+// Diffs
+
+/// The colors of a diff's lines.
+#[derive(Clone, Copy, Debug)]
+pub struct DiffColors {
+    /// Behind an added line.
+    pub added: Color,
+    /// Behind a removed line.
+    pub removed: Color,
+    pub added_sign: Color,
+    pub removed_sign: Color,
+    /// Over chosen lines.
+    pub chosen: Color,
+    /// The bar at the edge of chosen lines.
+    pub chosen_bar: Color,
+    pub number: Color,
+    pub text: Color,
+}
+
+pub fn diff_colors(t: &Theme) -> DiffColors {
+    DiffColors {
+        added: tone_color(t, Tone::Success).scale_alpha(by_tone(t, 0.13, 0.16)),
+        removed: tone_color(t, Tone::Danger).scale_alpha(by_tone(t, 0.11, 0.15)),
+        added_sign: tone_text(t, Tone::Success),
+        removed_sign: tone_text(t, Tone::Danger),
+        chosen: accent(t).scale_alpha(by_tone(t, 0.16, 0.22)),
+        chosen_bar: accent(t),
+        number: faint(t),
+        text: ink(t),
+    }
+}
+
+/// A file in a diff: framed, its text on the background the terminals have.
+pub fn diff_file(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(background(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.0, color: line(t), radius: RADIUS.into() },
+        ..container::Style::default()
+    }
+}
+
+/// The bar at the top of a file in a diff, with its name and buttons.
+pub fn diff_file_header(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(title_fill(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { radius: border::top(RADIUS), ..Border::default() },
+        ..container::Style::default()
+    }
+}
+
+/// The line over a hunk: where it is in the file, and what it can do.
+pub fn hunk_header(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(ink(t).scale_alpha(by_tone(t, 0.035, 0.045)).into()),
+        text_color: Some(muted(t)),
+        ..container::Style::default()
+    }
+}
+
+/// The green or red of a count of added or removed lines.
+pub fn diff_count(added: bool) -> impl Fn(&Theme) -> iced::widget::text::Style {
+    move |t| iced::widget::text::Style { color: Some(tone_text(t, if added { Tone::Success } else { Tone::Danger })) }
 }
 
 // Dialogs and pop-ups
