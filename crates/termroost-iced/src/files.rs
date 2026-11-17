@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text};
+use iced::widget::{button, column, container, mouse_area, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
@@ -26,7 +26,7 @@ use crate::reveal;
 use crate::side_panel::SideTab;
 use crate::sidebar::{muted_text, short_dir};
 use crate::theme;
-use crate::ui::icon_button;
+use crate::ui::{self, icon_button};
 
 /// Entries shown per folder; the rest are counted.
 const MAX_ENTRIES: usize = 1000;
@@ -307,7 +307,7 @@ impl App {
             Some(m) if *m == root => file_menu(root.clone(), true, 0.0),
             _ => space::vertical().height(0).into(),
         };
-        column![top, root_menu, scrollable(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
+        column![top, root_menu, ui::scroll(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
     }
 }
 
@@ -331,14 +331,14 @@ fn file_row(r: Row<'_>) -> Element<'_, Message> {
                 if entry.is_dir { FilesMsg::Toggle(entry.path.clone()) } else { FilesMsg::Open(entry.path.clone()) };
             let line = button(label)
                 .width(Length::Fill)
-                .padding([2, 4])
-                .style(theme::tree_row)
+                .padding([3, 6])
+                .style(theme::row_button)
                 .on_press(Message::Files(press));
             mouse_area(line).on_right_press(Message::Files(FilesMsg::Menu(entry.path.clone()))).into()
         }
         Row::Menu { entry, depth } => file_menu(entry.path.clone(), entry.is_dir, depth as f32 * INDENT + 16.0),
         Row::Note { text: note, depth } => {
-            row![space::horizontal().width(depth as f32 * INDENT + 18.0), muted_text(note)].padding([2, 4]).into()
+            row![space::horizontal().width(depth as f32 * INDENT + 22.0), muted_text(note)].padding([3, 6]).into()
         }
     }
 }
@@ -347,11 +347,11 @@ fn file_row(r: Row<'_>) -> Element<'_, Message> {
 fn file_menu<'a>(path: PathBuf, is_dir: bool, indent: f32) -> Element<'a, Message> {
     let reveal = button(text(reveal::label(is_dir)).size(13))
         .width(Length::Fill)
-        .padding([4, 10])
-        .style(theme::tree_row)
+        .padding([5, 10])
+        .style(theme::row_button)
         .on_press(Message::Files(FilesMsg::Reveal { path, is_dir }));
-    row![space::horizontal().width(indent), container(reveal).padding(3).width(220).style(theme::menu)]
-        .padding([0, 4])
+    row![space::horizontal().width(indent), container(reveal).padding(4).width(220).style(theme::menu)]
+        .padding([2, 6])
         .into()
 }
 

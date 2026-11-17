@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use iced::widget::{button, checkbox, column, container, row, scrollable, space, text};
+use iced::widget::{column, container, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 use termroost_core::git::{Commit, Head, Repo, Tracking};
 
@@ -185,10 +185,9 @@ impl App {
         }
         let title = title.push(
             options.push(space::horizontal()).push(
-                checkbox(self.prefs.log_all_branches)
+                ui::check(self.prefs.log_all_branches)
                     .label("All branches")
                     .on_toggle(Message::LogAllBranches)
-                    .size(14)
                     .text_size(12),
             ),
         );
@@ -207,16 +206,15 @@ impl App {
 
         let body: Element<'_, Message> = match self.git_log.as_ref().and_then(|l| l.commits.as_ref()) {
             None => muted_text("Reading the log…").size(12).into(),
-            Some(Err(e)) => text(e).size(12).style(text::danger).into(),
+            Some(Err(e)) => ui::note_text(Tone::Danger, e),
             Some(Ok(commits)) if commits.is_empty() => muted_text("No commits yet.").size(12).into(),
             Some(Ok(commits)) => {
                 let now = chrono::Utc::now().timestamp();
                 let unpushed = |c: &Commit| tracking.is_some_and(|t| t.unpushed.contains(&c.id));
-                scrollable(
-                    column(commits.iter().map(|c| commit_item(c, unpushed(c), now))).spacing(12).padding([0, 10]),
-                )
-                .height(Length::Fill)
-                .into()
+                let list = column(commits.iter().map(|c| commit_item(c, unpushed(c), now)))
+                    .spacing(4)
+                    .padding(iced::Padding { right: 10.0, ..iced::Padding::ZERO });
+                ui::scroll(list).height(Length::Fill).into()
             }
         };
         column![title, body].spacing(10).into()
@@ -227,18 +225,16 @@ impl App {
         let running = self.git_sync.as_ref().filter(|s| s.result.is_none()).map(|s| s.op);
         let on_branch = matches!(head, Some(Head::Branch(_)));
         let idle = running.is_none() && on_branch;
-        let action = |label: &'a str, busy: &'a str, op: SyncOp, enabled: bool| {
-            button(text(if running == Some(op) { busy } else { label }).size(12))
-                .padding([3, 10])
-                .style(button::secondary)
+        let action = |glyph: Icon, label: &'a str, busy: &'a str, op: SyncOp, enabled: bool| {
+            ui::small_with_icon(glyph, if running == Some(op) { busy } else { label }, theme::button_secondary)
                 .on_press_maybe((idle && enabled).then_some(Message::GitSync(op)))
         };
         row![
             // Pulling needs a remote branch to pull from.
-            action("↓ Pull", "Pulling…", SyncOp::Pull, t.upstream.is_some()),
-            checkbox(self.prefs.pull_rebase).label("Rebase").on_toggle(Message::PullRebase).size(14).text_size(12),
+            action(Icon::ArrowDown, "Pull", "Pulling…", SyncOp::Pull, t.upstream.is_some()),
+            ui::check(self.prefs.pull_rebase).label("Rebase").on_toggle(Message::PullRebase).text_size(12),
             space::horizontal(),
-            action("↑ Push", "Pushing…", SyncOp::Push, true),
+            action(Icon::ArrowUp, "Push", "Pushing…", SyncOp::Push, true),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -250,16 +246,15 @@ impl App {
         let sync = self.git_sync.as_ref()?;
         let shown = self.git_log.as_ref().is_some_and(|l| l.worktree == sync.worktree);
         let result = sync.result.as_ref().filter(|_| shown)?;
-        let message: Element<'_, Message> = match result {
-            Ok(done) => muted_text(done).size(12).into(),
-            Err(e) => text(e).size(12).style(text::danger).into(),
+        let (message, tone) = match result {
+            Ok(done) => (done, Tone::Neutral),
+            Err(e) => (e, Tone::Danger),
         };
-        Some(
-            row![container(message).width(Length::Fill), icon_button(Icon::Close, Message::DismissSync, "Dismiss")]
+        let line =
+            row![text(message).size(12).width(Length::Fill), icon_button(Icon::Close, Message::DismissSync, "Dismiss")]
                 .spacing(4)
-                .align_y(Alignment::Start)
-                .into(),
-        )
+                .align_y(Alignment::Start);
+        Some(ui::note(tone, line))
     }
 
     /// Pulls or pushes the Git tab's repository on a thread.
@@ -336,7 +331,7 @@ fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
         muted_text(ago(c.time, now)).wrapping(text::Wrapping::None),
     ]
     .spacing(6);
-    let mut item = column![text(&c.subject).size(13), meta].spacing(2);
+    let mut item = column![text(&c.subject).size(13), meta].spacing(3);
     if !c.refs.is_empty() || unpushed {
         let head_branch = c.head.then(|| c.refs.first()).flatten();
         let mut badges: Vec<Element<'_, Message>> = Vec::new();
@@ -350,7 +345,7 @@ fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
         );
         item = item.push(row(badges).spacing(4).wrap().vertical_spacing(4));
     }
-    item.into()
+    container(item).padding([6, 8]).width(Length::Fill).into()
 }
 
 #[cfg(test)]

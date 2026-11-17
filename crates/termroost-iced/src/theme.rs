@@ -9,14 +9,14 @@
 //!   buttons are drawn in the text color, so they don't compete with it.
 //! - Corners are [`RADIUS_SM`] on small controls, and [`RADIUS`] on
 //!   buttons, fields and list items.
-//! - What is raised (menus, the selected list item) is lighter than what
-//!   it sits on, and casts a soft shadow.
+//! - What is raised (cards, menus, the selected list item) is lighter than
+//!   what it sits on, and casts a soft shadow.
 
 use std::sync::LazyLock;
 
 use iced::border;
 use iced::overlay::menu;
-use iced::widget::{button, container, pane_grid, pick_list, scrollable, text_editor, text_input};
+use iced::widget::{button, checkbox, container, pane_grid, pick_list, scrollable, text_editor, text_input};
 use iced::{Background, Border, Color, Font, Shadow, Theme, Vector, font};
 
 /// Bundled terminal font (JetBrains Mono, SIL Open Font License 1.1).
@@ -70,6 +70,8 @@ pub const TEXT_SM: f32 = 12.0;
 pub const RADIUS_SM: f32 = 6.0;
 /// Corners of buttons, fields, menus and list items.
 pub const RADIUS: f32 = 8.0;
+/// Corners of cards, dialogs and pop-ups.
+pub const RADIUS_LG: f32 = 12.0;
 /// Fully round ends.
 const PILL: f32 = 999.0;
 
@@ -297,6 +299,15 @@ pub fn segment_tray(t: &Theme) -> container::Style {
     }
 }
 
+/// A line of a list or menu that takes clicks, such as a file in the Files tab.
+pub fn row_button(t: &Theme, status: button::Status) -> button::Style {
+    match status {
+        button::Status::Active | button::Status::Disabled => button_style(None, ink(t), RADIUS_SM),
+        button::Status::Hovered => button_style(Some(hover_fill(t)), ink(t), RADIUS_SM),
+        button::Status::Pressed => button_style(Some(press_fill(t)), ink(t), RADIUS_SM),
+    }
+}
+
 /// "New project" and "New session" under their lists: quiet until hovered.
 pub fn add_item_button(t: &Theme, status: button::Status) -> button::Style {
     match status {
@@ -350,6 +361,29 @@ pub fn dropdown_menu(t: &Theme) -> menu::Style {
         selected_text_color: ink(t),
         selected_background: hover_fill(t).into(),
         shadow: shadow_md(t),
+    }
+}
+
+pub fn check(t: &Theme, status: checkbox::Status) -> checkbox::Style {
+    let (checked, hovered, disabled) = match status {
+        checkbox::Status::Active { is_checked } => (is_checked, false, false),
+        checkbox::Status::Hovered { is_checked } => (is_checked, true, false),
+        checkbox::Status::Disabled { is_checked } => (is_checked, false, true),
+    };
+    let p = t.extended_palette();
+    let (fill, edge_color) = match (checked, disabled) {
+        (_, true) => (press_fill(t), line(t)),
+        (true, false) => {
+            let fill = if hovered { mix(accent(t), ink(t), 0.12) } else { accent(t) };
+            (fill, fill)
+        }
+        (false, false) => (field(t), if hovered { ink(t).scale_alpha(0.4) } else { edge(t) }),
+    };
+    checkbox::Style {
+        background: fill.into(),
+        icon_color: p.primary.base.text,
+        border: Border { width: 1.0, color: edge_color, radius: 4.0.into() },
+        text_color: None,
     }
 }
 
@@ -407,6 +441,32 @@ pub fn side_column(t: &Theme) -> container::Style {
 /// A hairline between two parts of the window.
 pub fn divider(t: &Theme) -> container::Style {
     container::Style { background: Some(line(t).into()), ..container::Style::default() }
+}
+
+/// A task in the Tasks tab; one `linked` to the session on screen is outlined in the accent.
+pub fn task_card(linked: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| container::Style {
+        background: Some(raised(t).into()),
+        text_color: Some(ink(t)),
+        border: Border {
+            width: 1.0,
+            color: if linked { accent(t).scale_alpha(0.7) } else { line(t) },
+            radius: RADIUS.into(),
+        },
+        shadow: shadow_sm(t),
+        ..container::Style::default()
+    }
+}
+
+/// A small menu, such as an entry's in the Files tab.
+pub fn menu(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(raised(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.0, color: line(t), radius: RADIUS.into() },
+        shadow: shadow_md(t),
+        ..container::Style::default()
+    }
 }
 
 /// A tooltip, in the text color so it stands out from whatever it covers.
@@ -522,6 +582,27 @@ pub fn pane_grid_style(t: &Theme) -> pane_grid::Style {
 
 // Dialogs and pop-ups
 
+/// The terminals of the shown session while a task is held over them.
+pub fn drop_target(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(accent(t).scale_alpha(0.12).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.5, color: accent(t), radius: RADIUS_LG.into() },
+        ..container::Style::default()
+    }
+}
+
+/// The label that follows the pointer while a task is dragged.
+pub fn drag_label(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(raised(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.0, color: accent(t).scale_alpha(0.6), radius: RADIUS.into() },
+        shadow: shadow_md(t),
+        ..container::Style::default()
+    }
+}
+
 /// The color of an alert: danger for failures, success for agents.
 pub fn notice_color(t: &Theme, category: crate::notify::Category) -> Color {
     tone_color(t, notice_tone(category))
@@ -531,16 +612,6 @@ pub fn notice_tone(category: crate::notify::Category) -> Tone {
     match category {
         crate::notify::Category::Error => Tone::Danger,
         crate::notify::Category::Agent => Tone::Success,
-    }
-}
-
-/// Background of the side columns.
-pub fn sidebar(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.background.weak.color)),
-        text_color: Some(p.background.weak.text),
-        ..container::Style::default()
     }
 }
 
@@ -558,52 +629,6 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
         },
         border: Border::default().rounded(4),
         ..button::Style::default()
-    }
-}
-
-/// A tab of the right panel's header.
-pub fn panel_tab(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |theme, status| {
-        let p = theme.extended_palette();
-        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-        button::Style {
-            background: if selected {
-                Some(Background::Color(p.primary.weak.color))
-            } else {
-                hovered.then_some(Background::Color(p.background.strong.color))
-            },
-            text_color: if selected { p.primary.weak.text } else { p.background.base.text },
-            border: Border::default().rounded(4),
-            ..button::Style::default()
-        }
-    }
-}
-
-/// A line of the file tree: plain until hovered.
-pub fn tree_row(theme: &Theme, status: button::Status) -> button::Style {
-    let p = theme.extended_palette();
-    button::Style {
-        background: matches!(status, button::Status::Hovered | button::Status::Pressed)
-            .then_some(Background::Color(p.background.strong.color)),
-        text_color: p.background.base.text,
-        border: Border::default().rounded(3),
-        ..button::Style::default()
-    }
-}
-
-/// A small menu, such as an entry's in the Files tab.
-pub fn menu(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.background.base.color)),
-        text_color: Some(p.background.base.text),
-        border: Border { width: 1.0, color: p.background.strong.color, radius: 6.0.into() },
-        shadow: iced::Shadow {
-            color: Color { a: 0.3, ..Color::BLACK },
-            offset: iced::Vector::new(0.0, 2.0),
-            blur_radius: 6.0,
-        },
-        ..container::Style::default()
     }
 }
 
@@ -634,33 +659,6 @@ pub fn modal_card(theme: &Theme) -> container::Style {
         background: Some(Background::Color(p.background.weak.color)),
         text_color: Some(p.background.weak.text),
         border: Border { width: 1.0, color: p.background.strong.color, radius: 8.0.into() },
-        ..container::Style::default()
-    }
-}
-
-/// The terminals of the shown session while a task is held over them.
-pub fn drop_target(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.primary.base.color.scale_alpha(0.18))),
-        text_color: Some(p.background.base.text),
-        border: Border { width: 2.0, color: p.primary.base.color, radius: 6.0.into() },
-        ..container::Style::default()
-    }
-}
-
-/// The label that follows the pointer while a task is dragged.
-pub fn drag_label(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.background.base.color)),
-        text_color: Some(p.background.base.text),
-        border: Border { width: 1.0, color: p.primary.base.color, radius: 6.0.into() },
-        shadow: iced::Shadow {
-            color: Color { a: 0.35, ..Color::BLACK },
-            offset: iced::Vector::new(0.0, 2.0),
-            blur_radius: 8.0,
-        },
         ..container::Style::default()
     }
 }

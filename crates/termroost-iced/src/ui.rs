@@ -3,9 +3,10 @@
 
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    Button, Column, Scrollable, TextInput, button, container, row, scrollable, space, text, text_input, tooltip,
+    Button, Checkbox, Column, Scrollable, TextInput, button, checkbox, container, row, scrollable, space, text,
+    text_input, tooltip,
 };
-use iced::{Element, Length, Theme};
+use iced::{Alignment, Element, Length, Theme};
 
 use crate::app::Message;
 use crate::icons::{Icon, icon};
@@ -61,9 +62,26 @@ pub fn small<'a>(
     labeled(label, TEXT_SM).padding([4, 10]).style(style)
 }
 
+/// A smaller button with an icon before its label.
+pub fn small_with_icon<'a>(
+    glyph: Icon,
+    label: impl text::IntoFragment<'a>,
+    style: impl Fn(&Theme, button::Status) -> button::Style + 'a,
+) -> Button<'a, Message> {
+    let content = row![icon(glyph, 13.0, theme::ink), text(label).size(TEXT_SM).wrapping(text::Wrapping::None)]
+        .spacing(5)
+        .align_y(Alignment::Center);
+    button(content).padding([4, 10]).style(style)
+}
+
 /// A text field.
 pub fn input<'a>(placeholder: &str, value: &str) -> TextInput<'a, Message> {
     text_input(placeholder, value).size(TEXT).padding([6, 10]).style(theme::input)
+}
+
+/// A checkbox; give it a label with `.label(…)`.
+pub fn check<'a>(checked: bool) -> Checkbox<'a, Message> {
+    checkbox(checked).size(15).text_size(TEXT).spacing(8).style(theme::check)
 }
 
 /// A vertical scrollable with thin scrollbars over the content's edge.
@@ -86,6 +104,11 @@ pub fn vertical_divider<'a>() -> Element<'a, Message> {
 /// A tinted box with a message.
 pub fn note<'a>(tone: Tone, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content).padding([8, 12]).width(Length::Fill).style(theme::note(tone)).into()
+}
+
+/// A tinted box with a line of text.
+pub fn note_text<'a>(tone: Tone, message: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    note(tone, text(message).size(TEXT))
 }
 
 /// A small rounded label.
