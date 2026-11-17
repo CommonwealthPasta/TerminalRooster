@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Message};
 use crate::keymap::Action;
-use crate::sidebar::{BOLD, icon_button};
-use crate::theme;
+use crate::sidebar::icon_button;
+use crate::theme::{self, BOLD};
 
 /// Which tab the right panel shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

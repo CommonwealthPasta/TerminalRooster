@@ -10,9 +10,9 @@ use crate::keymap::Action;
 use crate::leave_room::leave_room;
 use crate::notify::Category;
 use crate::side_panel::SideTab;
-use crate::sidebar::{BOLD, ICON_BUTTON_WIDTH, branch_label, icon_button, muted_text, short_dir};
+use crate::sidebar::{ICON_BUTTON_WIDTH, branch_label, icon_button, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
-use crate::theme;
+use crate::theme::{self, BOLD};
 use crate::worktree::WorktreeMsg;
 
 /// Space between the buttons of a terminal's title bar.

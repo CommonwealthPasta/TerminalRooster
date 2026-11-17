@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input, tooltip};
-use iced::{Alignment, Element, Font, Length, Padding, font};
+use iced::{Alignment, Element, Length, Padding};
 use termroost_core::git::Head;
 use termroost_core::{AgentKind, PaneId, Project, ProjectGroup, Tab, TabId};
 
@@ -16,7 +16,7 @@ use crate::keymap::Action;
 use crate::notify::{Category, Notice};
 use crate::on_escape::on_escape;
 use crate::reorder::reorder;
-use crate::theme;
+use crate::theme::{self, BOLD};
 
 /// Width of the edit/delete button column next to the selected list item.
 const ACTIONS_WIDTH: f32 = 26.0;
@@ -24,8 +24,6 @@ const ACTIONS_WIDTH: f32 = 26.0;
 const LIST_SPACING: f32 = 2.0;
 /// How far right a group's projects are.
 const GROUP_INDENT: f32 = 12.0;
-
-pub const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
 
 /// Powerline's branch symbol, which the bundled JetBrains Mono has.
 const BRANCH_SYMBOL: &str = "\u{E0A0}";

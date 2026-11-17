@@ -12,7 +12,8 @@ use termroost_core::detect::{self, FolderProcess};
 use termroost_core::git::{self, Head, Repo};
 
 use crate::app::{App, Dialog, Message, RunningTerminal};
-use crate::sidebar::{BOLD, branch_label, display_dir, muted_text};
+use crate::sidebar::{branch_label, display_dir, muted_text};
+use crate::theme::BOLD;
 use crate::worktree::WorktreeForm;
 
 /// How long to wait for the stopped terminals' processes before git deletes

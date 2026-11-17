@@ -14,7 +14,8 @@ use termroost_core::{Command, Outcome, TabId};
 
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message, expand_home};
 use crate::dialogs::field;
-use crate::sidebar::{BOLD, branch_label, display_dir, muted_text, short_dir};
+use crate::sidebar::{branch_label, display_dir, muted_text, short_dir};
+use crate::theme::BOLD;
 use crate::worktree_remove::RemoveMsg;
 
 /// State of the Worktrees dialog.

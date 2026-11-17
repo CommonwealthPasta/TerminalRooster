@@ -12,9 +12,9 @@ use termroost_core::session::shell;
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message};
 use crate::editor::EditorMsg;
 use crate::keymap::Keymap;
-use crate::sidebar::{BOLD, muted_text};
+use crate::sidebar::muted_text;
 use crate::terminal_view::{KeyboardFocus, TerminalView};
-use crate::theme;
+use crate::theme::{self, BOLD};
 
 pub(crate) fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     column![text(label).size(12), input.into()].spacing(4).into()

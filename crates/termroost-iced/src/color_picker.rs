@@ -7,8 +7,8 @@ use iced::widget::{Column, button, column, container, row, slider, space, text};
 use iced::{Alignment, Border, Element, Length};
 
 use crate::app::Message;
-use crate::sidebar::{BOLD, muted_text};
-use crate::theme::{self, MONO};
+use crate::sidebar::muted_text;
+use crate::theme::{self, BOLD, MONO};
 use crate::themes::{ColorField, Hex, ThemeDef};
 
 /// Side of one palette swatch, in pixels.

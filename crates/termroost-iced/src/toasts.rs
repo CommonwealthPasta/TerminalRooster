@@ -5,8 +5,8 @@ use iced::{Alignment, Element, Length};
 
 use crate::app::{App, Message};
 use crate::notify::Toast;
-use crate::sidebar::{BOLD, muted_text};
-use crate::theme;
+use crate::sidebar::muted_text;
+use crate::theme::{self, BOLD};
 
 fn toast(t: &Toast) -> Element<'_, Message> {
     let n = &t.notice;

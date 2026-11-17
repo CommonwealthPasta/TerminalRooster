@@ -127,6 +127,8 @@ fn main() -> iced::Result {
     .subscription(App::subscription)
     .theme(App::theme)
     .window(window)
+    .settings(iced::Settings { default_text_size: theme::TEXT.into(), ..iced::Settings::default() })
+    .default_font(theme::UI)
     .antialiasing(true);
     for font in theme::FONTS {
         application = application.font(font);

@@ -12,8 +12,8 @@ use crate::color_picker;
 use crate::editor::FileEditor;
 use crate::keymap::{Action, Combo};
 use crate::notify::{Category, Level};
-use crate::sidebar::{BOLD, muted_text};
-use crate::theme::{self, MONO};
+use crate::sidebar::muted_text;
+use crate::theme::{self, BOLD, MONO};
 use crate::themes::{ANSI_NAMES, ColorField, Hex, ThemeDef};
 
 fn swatch<'a>(hex: Hex, size: f32) -> Element<'a, Message> {

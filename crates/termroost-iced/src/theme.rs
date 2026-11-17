@@ -3,7 +3,7 @@
 use std::sync::LazyLock;
 
 use iced::widget::{button, container, pane_grid, text_editor};
-use iced::{Background, Border, Color, Font, Theme};
+use iced::{Background, Border, Color, Font, Theme, font};
 
 /// Bundled terminal font (JetBrains Mono, SIL Open Font License 1.1).
 pub const MONO: Font = Font::with_name("JetBrains Mono");
@@ -40,6 +40,13 @@ pub fn glyph_font(c: char, styled: Font) -> Font {
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 14.0;
+
+/// The interface font. Named on Windows, so its bold and semibold weights are found too.
+pub const UI: Font = if cfg!(windows) { Font::with_name("Segoe UI") } else { Font::DEFAULT };
+pub const BOLD: Font = Font { weight: font::Weight::Bold, ..UI };
+
+/// Body text.
+pub const TEXT: f32 = 13.0;
 
 pub fn accent(theme: &Theme) -> Color {
     theme.extended_palette().primary.base.color
