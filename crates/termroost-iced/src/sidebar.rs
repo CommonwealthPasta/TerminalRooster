@@ -19,6 +19,7 @@ use crate::on_escape::on_escape;
 use crate::reorder::reorder;
 use crate::theme::{self, BOLD, SEMIBOLD, Tone};
 use crate::ui::{self, icon_button, tip};
+use crate::worktree::WorktreeMsg;
 
 /// Width of the edit/delete buttons in the selected list item.
 const ACTIONS_WIDTH: f32 = 26.0;
@@ -368,9 +369,17 @@ impl App {
         let list = reorder(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
             .spacing(LIST_SPACING)
             .on_move_if(self.rename.is_none(), move |from, to| Message::MoveTab(ids[from], to));
-        let items = column![list, add_item(Message::NewTab, "New session")]
-            .spacing(LIST_SPACING)
-            .padding([0.0, COLUMN_PADDING]);
+        let mut items = column![list, add_item(Message::NewTab, "New session")];
+        // In a repository, the Worktrees dialog too: a new worktree gets a
+        // session of its own.
+        if self.in_repo() {
+            items = items.push(tip(
+                add_item(Message::Worktree(WorktreeMsg::Open), "New worktree"),
+                "Make a git worktree, in a new session\nOr open an existing one",
+                tooltip::Position::Bottom,
+            ));
+        }
+        let items = items.spacing(LIST_SPACING).padding([0.0, COLUMN_PADDING]);
         let heading =
             container(ui::heading("Sessions")).padding(Padding { left: HEADER_PADDING.left, ..Padding::ZERO });
         container(column![header, heading, ui::scroll(items).height(Length::Fill)].spacing(6))
