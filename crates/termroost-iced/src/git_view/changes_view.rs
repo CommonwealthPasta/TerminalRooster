@@ -1,8 +1,9 @@
 //! How the uncommitted changes look: a section for each kind of change,
 //! with a button to stage (or unstage) all of it, then its files, each with
-//! a button for the whole file and one for each hunk.
+//! a button for the whole file and one for each hunk. Lines chosen in a
+//! hunk are marked, and its button then stages just those.
 
-use iced::widget::{Row, button, center, column, container, row, space, text};
+use iced::widget::{Row, button, center, column, container, row, space, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 use termroost_core::git::{FileDiff, FileStatus};
 
@@ -16,7 +17,7 @@ use crate::files::FilesMsg;
 use crate::icons::Icon;
 use crate::sidebar::muted_text;
 use crate::theme::{self, SEMIBOLD, Tone};
-use crate::ui::{self, icon_button};
+use crate::ui::{self, icon_button, tip};
 
 /// Files shown per section; the rest are counted.
 const MAX_FILES: usize = 200;
@@ -107,19 +108,44 @@ impl App {
         if !folded {
             let digits = file_digits(file);
             let font_size = self.prefs.font_size;
-            let hunk_label = format!("{} hunk", verb(section));
-            let body = file_body_with(
-                file,
-                |_, hunk| DiffLines::new(&hunk.lines, digits, font_size),
-                |i| {
-                    if !file.splittable() {
-                        return Row::new();
-                    }
+            let splittable = file.splittable();
+            let chosen = |i: usize| c.chosen.as_ref().filter(|ch| ch.is(section, &file.path, i)).map(|ch| &ch.lines);
+            let lines = |i: usize, hunk: &'a termroost_core::git::Hunk| {
+                let lines = DiffLines::new(&hunk.lines, digits, font_size);
+                if !splittable {
+                    return lines;
+                }
+                let path = file.path.clone();
+                let press = move |line, mods| {
+                    Message::GitView(GitViewMsg::ChooseLine(doc, section, path.clone(), i, line, mods))
+                };
+                let drag = move |line| Message::GitView(GitViewMsg::DragLine(doc, line));
+                lines.chosen(chosen(i)).on_choose(press, drag)
+            };
+            let actions = |i: usize| {
+                if !splittable {
+                    return Row::new();
+                }
+                let Some(lines) = chosen(i) else {
                     let press = pick(Pick::Hunk(section, file.path.clone(), i));
-                    row![hunk_button(hunk_label.clone(), press)]
-                },
-            );
-            block = block.push(body);
+                    let hint = format!(
+                        "Or press lines to {} only those: drag over them, or hold Shift for a range and Ctrl for \
+                         one more",
+                        verb(section).to_lowercase()
+                    );
+                    return row![tip(
+                        hunk_button(format!("{} hunk", verb(section)), press),
+                        hint,
+                        tooltip::Position::Top
+                    )];
+                };
+                let n = lines.len();
+                let label = format!("{} {n} line{}", verb(section), if n == 1 { "" } else { "s" });
+                let press = pick(Pick::Lines(section, file.path.clone(), i, lines.clone()));
+                let clear = Message::GitView(GitViewMsg::ClearChosen(doc));
+                row![hunk_button(label, press), icon_button(Icon::Close, clear, "Choose no lines")]
+            };
+            block = block.push(file_body_with(file, lines, actions));
         }
         container(block).width(Length::Fill).style(theme::diff_file).into()
     }

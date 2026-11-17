@@ -78,6 +78,12 @@ pub enum GitViewMsg {
     Move(DocId, Pick),
     /// It was staged or unstaged (or why not), and the changes read again.
     Moved(DocId, u64, Result<(), String>, Box<Result<WorkingChanges, String>>),
+    /// A line of a hunk was pressed (section, path, hunk, line, keys held).
+    ChooseLine(DocId, Section, String, usize, usize, iced::keyboard::Modifiers),
+    /// The pointer, pressed on a line, was dragged onto this line of its hunk.
+    DragLine(DocId, usize),
+    /// Choose no lines.
+    ClearChosen(DocId),
     DismissChangesError(DocId),
 }
 

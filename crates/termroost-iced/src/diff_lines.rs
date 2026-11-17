@@ -40,7 +40,7 @@ pub struct DiffLines<'a, M> {
     digits: usize,
     font_size: f32,
     chosen: Option<&'a BTreeSet<usize>>,
-    on_press: Option<Box<dyn Fn(usize, bool) -> M + 'a>>,
+    on_press: Option<Box<dyn Fn(usize, keyboard::Modifiers) -> M + 'a>>,
     on_drag: Option<Box<dyn Fn(usize) -> M + 'a>>,
 }
 
@@ -55,9 +55,13 @@ impl<'a, M> DiffLines<'a, M> {
         self
     }
 
-    /// Lines can be chosen: `press` gets the line pressed and whether Shift
-    /// was held, `drag` each line the pointer is then dragged onto.
-    pub fn on_choose(mut self, press: impl Fn(usize, bool) -> M + 'a, drag: impl Fn(usize) -> M + 'a) -> Self {
+    /// Lines can be chosen: `press` gets the line pressed and the modifier
+    /// keys held, `drag` each line the pointer is then dragged onto.
+    pub fn on_choose(
+        mut self,
+        press: impl Fn(usize, keyboard::Modifiers) -> M + 'a,
+        drag: impl Fn(usize) -> M + 'a,
+    ) -> Self {
         self.on_press = Some(Box::new(press));
         self.on_drag = Some(Box::new(drag));
         self
@@ -222,7 +226,7 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for DiffLines<'_, M> {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 let (Some(press), Some(at)) = (&self.on_press, cursor.position_in(bounds)) else { return };
                 if let Some(line) = Self::line_at(state, &m, at.y) {
-                    shell.publish(press(line, state.modifiers.shift()));
+                    shell.publish(press(line, state.modifiers));
                     state.drag = Some(line);
                     shell.capture_event();
                 }
@@ -243,13 +247,21 @@ impl<M: Clone> Widget<M, Theme, iced::Renderer> for DiffLines<'_, M> {
 
     fn mouse_interaction(
         &self,
-        _tree: &widget::Tree,
+        tree: &widget::Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
         _renderer: &iced::Renderer,
     ) -> mouse::Interaction {
-        if self.on_press.is_some() && cursor.is_over(layout.bounds()) {
+        let state = tree.state.downcast_ref::<State>();
+        let m = self.metrics(state);
+        // A hand over the lines that can be chosen: the changed ones.
+        let changed = cursor
+            .position_in(layout.bounds())
+            .and_then(|p| Self::line_at(state, &m, p.y))
+            .and_then(|i| self.lines.get(i))
+            .is_some_and(|l| l.kind != LineKind::Context);
+        if self.on_press.is_some() && (changed || state.drag.is_some()) {
             mouse::Interaction::Pointer
         } else {
             mouse::Interaction::None
