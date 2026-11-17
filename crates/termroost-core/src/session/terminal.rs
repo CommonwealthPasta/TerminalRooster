@@ -357,15 +357,15 @@ impl TerminalHandle {
     }
 
     /// Replays saved scrollback before the shell starts.
-    pub(crate) fn replay(&self, data: &[u8], banner: Option<&str>) {
-        snapshot::replay(&mut *self.0.term.lock(), data, banner);
+    pub(crate) fn replay(&self, data: &[u8]) {
+        snapshot::replay(&mut *self.0.term.lock(), data);
         self.0.shared.bump();
     }
 
     /// Prints a message into the terminal (e.g. a spawn error).
     pub(crate) fn print_notice(&self, text: &str) {
         let msg = format!("\r\n\x1b[0;33m{text}\x1b[0m\r\n");
-        self.replay(msg.as_bytes(), None);
+        self.replay(msg.as_bytes());
         self.0.shared.wake();
     }
 
@@ -427,7 +427,7 @@ impl TerminalHandle {
             return;
         }
         // Scrolls everything up to the last non-blank line into the history.
-        snapshot::replay(&mut term, b"\x1b[0m\x1b[2J\x1b[H", None);
+        snapshot::replay(&mut term, b"\x1b[0m\x1b[2J\x1b[H");
         let pin = if term.grid().history_size() > 0 { Pin::starting() } else { Pin::Off };
         *self.0.shared.pin.lock().unwrap() = pin;
         drop(term);

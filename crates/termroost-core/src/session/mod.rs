@@ -12,7 +12,7 @@ mod snapshot;
 mod tap;
 mod terminal;
 
-pub(crate) use snapshot::just_a_prompt;
+pub(crate) use snapshot::{just_a_prompt, without_restore_banners};
 pub(crate) use terminal::SpawnSpec;
 pub use terminal::{Activity, GridSize, SelectionKind, TerminalHandle};
 

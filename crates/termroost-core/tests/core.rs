@@ -150,14 +150,18 @@ fn state_and_scrollback_survive_restart() {
     assert_eq!(s.open_task_count(tab), 0);
 
     // The visible tab is started again with its old scrollback and resume command.
-    wait_for_text(&mut core, panes[0], "restored session");
+    wait_for_text(&mut core, panes[0], "typed-ok");
     let text = screen_text(&core, panes[0]);
-    assert!(text.contains("marker-123") && text.contains("typed-ok"), "{text}");
+    assert!(text.contains("marker-123"), "{text}");
     wait_for_text(&mut core, panes[0], "resumed-ok");
-    // Nothing was typed in the other terminal, so it starts fresh.
+    // Nothing was typed in the other terminal, so it starts fresh: its
+    // marker shows once, from its new shell. Once what is typed now shows,
+    // the shell has printed.
     wait_for_text(&mut core, panes[1], "marker-123");
+    core.terminal(panes[1]).unwrap().text("fresh-ok\r");
+    wait_for_text(&mut core, panes[1], "fresh-ok");
     let text = screen_text(&core, panes[1]);
-    assert!(!text.contains("restored session"), "{text}");
+    assert_eq!(text.matches("marker-123").count(), 1, "{text}");
 }
 
 #[test]
@@ -191,7 +195,7 @@ fn agents_resume_their_exact_session() {
     wait_for_text(&mut core, pane, &format!("claude --resume {session_id} --model opus"));
     // The agent shows its own conversation; the old screen is not replayed.
     let text = screen_text(&core, pane);
-    assert!(!text.contains("restored session") && !text.contains("--session-id"), "{text}");
+    assert!(!text.contains("--session-id"), "{text}");
     core.dispatch(Command::ClearAgent(pane)).unwrap();
     assert!(core.state().pane(pane).unwrap().agent.is_none());
 }
@@ -418,9 +422,9 @@ fn state_survives_a_crash() {
     assert_eq!(s.tasks[0].title, "persist me");
     assert_eq!(s.open_task_count(tab.id), 1);
     let pane = tab.layout.first_pane();
-    wait_for_text(&mut core, pane, "restored session");
+    wait_for_text(&mut core, pane, "typed-before-crash");
     let text = screen_text(&core, pane);
-    assert!(text.contains("crash-marker") && text.contains("typed-before-crash"), "{text}");
+    assert!(text.contains("crash-marker"), "{text}");
 }
 
 #[test]

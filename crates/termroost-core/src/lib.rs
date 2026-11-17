@@ -1007,13 +1007,10 @@ impl Core {
         let had_agent = self.state.pane(pane).is_some_and(|p| p.agent.is_some());
         if restored
             && !had_agent
-            && let Some((data, saved_at)) = self.store.load_scrollback(pane)
+            && let Some((data, _)) = self.store.load_scrollback(pane)
             && !session::just_a_prompt(&data)
         {
-            let when = chrono::DateTime::from_timestamp(saved_at, 0)
-                .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_default();
-            handle.replay(&data, Some(&format!("restored session from {when}")));
+            handle.replay(&session::without_restore_banners(&data));
         }
         handle.set_agent(self.state.pane(pane).and_then(|p| p.agent.as_ref()).map(|a| a.kind));
         self.bg.sessions.lock().unwrap().insert(pane, handle.clone());
