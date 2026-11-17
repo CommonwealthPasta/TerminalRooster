@@ -960,7 +960,8 @@ impl App {
                 self.window_id = Some(id);
                 self.window_focused = focused;
                 if focused {
-                    return self.update(Message::Editor(EditorMsg::DiskPoll));
+                    let changes = self.poll_changes();
+                    return Task::batch([self.update(Message::Editor(EditorMsg::DiskPoll)), changes]);
                 }
             }
             Message::WindowFound(id) => self.window_id = self.window_id.or(id),
@@ -1750,10 +1751,13 @@ impl App {
             }
             Message::TaskDragEnd => self.task_drag = None,
             Message::GitPoll => {
+                // The changes on screen follow what agents do to the files.
+                let changes = if self.window_focused { self.poll_changes() } else { Task::none() };
                 if !self.git_polling {
                     self.git_polling = true;
-                    return self.read_git();
+                    return Task::batch([self.read_git(), changes]);
                 }
+                return changes;
             }
             Message::GitStatus { statuses, gone } => {
                 self.git_polling = false;

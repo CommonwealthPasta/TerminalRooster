@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use termroost_core::{GridSize, PaneId, TabId, TerminalHandle};
 
 use crate::app::{App, Dialog, Message, RunningTerminal};
-use crate::git_view::CommitDoc;
+use crate::git_view::{ChangesDoc, CommitDoc};
 use disk::{FileText, OnDisk, Reaction, SaveError, Stamp};
 use history::{History, Snapshot};
 pub use text::{Format, Indent};
@@ -70,13 +70,15 @@ impl OpenFile {
     pub fn label(&self) -> String {
         match &self.kind {
             DocKind::Commit(c) => format!("Commit {}", c.short()),
+            DocKind::Changes(_) => "Changes".to_owned(),
             _ => self.path.file_name().map_or_else(|| self.path.display().to_string(), |n| n.to_string_lossy().into()),
         }
     }
 
-    /// It is a file (not a commit), so it is opened again after a restart.
+    /// It is a file (not a commit or the changes), so it is opened again
+    /// after a restart.
     pub fn is_file(&self) -> bool {
-        !matches!(self.kind, DocKind::Commit(_))
+        !matches!(self.kind, DocKind::Commit(_) | DocKind::Changes(_))
     }
 }
 
@@ -99,6 +101,8 @@ pub enum DocKind {
     },
     /// A commit of the repository at `path`.
     Commit(Box<CommitDoc>),
+    /// The uncommitted changes of the repository at `path`.
+    Changes(Box<ChangesDoc>),
 }
 
 /// A text file in the built-in editor.
@@ -323,7 +327,11 @@ impl App {
     fn text_mut(&mut self, id: DocId) -> Option<&mut TextDoc> {
         match &mut self.doc_mut(id)?.kind {
             DocKind::Text(t) => Some(t),
-            DocKind::Loading | DocKind::Restored { .. } | DocKind::Terminal { .. } | DocKind::Commit(_) => None,
+            DocKind::Loading
+            | DocKind::Restored { .. }
+            | DocKind::Terminal { .. }
+            | DocKind::Commit(_)
+            | DocKind::Changes(_) => None,
         }
     }
 
@@ -428,7 +436,7 @@ impl App {
         Some(match &self.shown_doc()?.kind {
             DocKind::Text(_) => operation::focus(FILE_EDITOR),
             DocKind::Terminal { handle, .. } => operation::focus(crate::terminal_view::widget_id(handle.pane())),
-            DocKind::Loading | DocKind::Restored { .. } | DocKind::Commit(_) => Task::none(),
+            DocKind::Loading | DocKind::Restored { .. } | DocKind::Commit(_) | DocKind::Changes(_) => Task::none(),
         })
     }
 

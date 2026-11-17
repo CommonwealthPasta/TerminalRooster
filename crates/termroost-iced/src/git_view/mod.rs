@@ -1,14 +1,19 @@
 //! Commits clicked in the Git tab, shown in place of the session's
 //! terminals like an open file: the message, who made it and when, and
-//! what it changed, file by file and hunk by hunk.
+//! what it changed, file by file and hunk by hunk. And the changes not
+//! committed yet, which are staged and unstaged there (see `changes`).
 
+mod changes;
+mod changes_view;
 mod view;
 
 use std::collections::HashSet;
 
 use iced::Task;
 use iced::widget::operation::{self, RelativeOffset};
-use termroost_core::git::{CommitDetails, FileDiff, Repo};
+use termroost_core::git::{CommitDetails, FileDiff, Repo, WorkingChanges};
+
+pub use changes::{ChangesDoc, Pick, Section};
 
 use crate::app::{App, Message};
 use crate::editor::{DocId, DocKind, OpenFile};
@@ -63,12 +68,23 @@ pub enum GitViewMsg {
     CommitRead(DocId, String, Box<Result<CommitDetails, String>>),
     /// Fold or unfold a file of the commit shown.
     ToggleFile(DocId, String),
+    /// Show the uncommitted changes of the session's repository.
+    OpenChanges,
+    /// The changes were read (the read's number, for the changes view of `DocId`).
+    ChangesRead(DocId, u64, Box<Result<WorkingChanges, String>>),
+    /// Fold or unfold a file of the changes.
+    ToggleChange(DocId, Section, String),
+    /// Stage what is picked, or unstage it when it is staged.
+    Move(DocId, Pick),
+    /// It was staged or unstaged (or why not), and the changes read again.
+    Moved(DocId, u64, Result<(), String>, Box<Result<WorkingChanges, String>>),
+    DismissChangesError(DocId),
 }
 
 impl GitViewMsg {
     /// Whether the message may be logged: some carry what is in files.
     pub fn loggable(&self) -> bool {
-        !matches!(self, GitViewMsg::CommitRead(..))
+        !matches!(self, GitViewMsg::CommitRead(..) | GitViewMsg::ChangesRead(..) | GitViewMsg::Moved(..))
     }
 }
 
@@ -160,6 +176,7 @@ impl App {
                     c.toggled.insert(path);
                 }
             }
+            other => return self.update_changes(other),
         }
         Task::none()
     }

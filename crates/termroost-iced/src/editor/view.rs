@@ -48,6 +48,7 @@ impl App {
     pub(crate) fn view_doc<'a>(&'a self, doc: &'a OpenFile) -> Element<'a, Message> {
         match &doc.kind {
             DocKind::Commit(c) => self.view_commit(doc.id, c),
+            DocKind::Changes(c) => self.view_changes(doc.id, c),
             DocKind::Loading | DocKind::Restored { .. } => center(muted_text("Reading…")).into(),
             // Neovim or Vim: a terminal like the session's, with the keyboard
             // unless a dialog is open.
