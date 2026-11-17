@@ -9,6 +9,7 @@ mod color_picker;
 mod desktop_entry;
 mod dialogs;
 mod editor;
+mod file_icons;
 mod files;
 mod git_panel;
 mod gone_folders;
