@@ -21,6 +21,7 @@ use iced::widget::{button, column, container, mouse_area, row, scrollable, space
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
+use crate::icons::{Icon, icon};
 use crate::reveal;
 use crate::side_panel::SideTab;
 use crate::sidebar::{icon_button, muted_text, short_dir};
@@ -298,7 +299,7 @@ impl App {
         let lines = rows(&root, &self.files).into_iter().map(file_row);
         let path = mouse_area(muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill))
             .on_right_press(Message::Files(FilesMsg::Menu(root.clone())));
-        let top = row![path, icon_button("↻", Message::Files(FilesMsg::Refresh), "Read the folders again")]
+        let top = row![path, icon_button(Icon::Refresh, Message::Files(FilesMsg::Refresh), "Read the folders again")]
             .align_y(Alignment::Center);
         // The folder's own menu, under its name; always there, so the tree keeps its place.
         let root_menu: Element<'_, Message> = match &self.files.menu {
@@ -312,18 +313,18 @@ impl App {
 fn file_row(r: Row<'_>) -> Element<'_, Message> {
     match r {
         Row::Entry { entry, depth, open, dim } => {
-            let arrow = match (entry.is_dir, open) {
-                (true, true) => "▾",
-                (true, false) => "▸",
-                (false, _) => "",
+            let chevron: Element<'_, Message> = match (entry.is_dir, open) {
+                (true, true) => icon(Icon::ChevronDown, 12.0, theme::muted).into(),
+                (true, false) => icon(Icon::ChevronRight, 12.0, theme::muted).into(),
+                (false, _) => space::horizontal().width(12).into(),
             };
             let style = move |t: &iced::Theme| text::Style { color: dim.then(|| theme::muted(t)) };
             let label = row![
                 space::horizontal().width(depth as f32 * INDENT),
-                text(arrow).size(11).width(12).style(style),
+                chevron,
                 text(&entry.name).size(13).wrapping(text::Wrapping::None).style(style),
             ]
-            .spacing(2)
+            .spacing(4)
             .align_y(Alignment::Center);
             let press =
                 if entry.is_dir { FilesMsg::Toggle(entry.path.clone()) } else { FilesMsg::Open(entry.path.clone()) };

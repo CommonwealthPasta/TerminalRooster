@@ -6,6 +6,7 @@ use termroost_core::{AgentKind, Axis, PaneId, Tab};
 
 use crate::agent_icon::agent_icon;
 use crate::app::{App, Message};
+use crate::icons::Icon;
 use crate::keymap::Action;
 use crate::leave_room::leave_room;
 use crate::notify::Category;
@@ -95,7 +96,7 @@ impl App {
             if let Some(message) = message {
                 banners = banners.push(
                     container(
-                        row![text(message).size(13).width(Length::Fill), icon_button("✕", dismiss, "Dismiss")]
+                        row![text(message).size(13).width(Length::Fill), icon_button(Icon::Close, dismiss, "Dismiss")]
                             .align_y(Alignment::Center),
                     )
                     .padding([4, 10])
@@ -181,17 +182,25 @@ impl App {
                 .placeholder("Start agent")
                 .text_size(12)
                 .padding([2, 6]),
-            icon_button("⚙", Message::PaneSettings(pane), "Terminal settings & resume command"),
-            icon_button("◫", Message::Split(pane, Axis::Vertical), k.hint("Split right", Action::SplitRight)),
-            icon_button("⊟", Message::Split(pane, Axis::Horizontal), k.hint("Split down", Action::SplitDown)),
-            icon_button("✕", Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
+            icon_button(Icon::Settings, Message::PaneSettings(pane), "Terminal settings & resume command"),
+            icon_button(
+                Icon::SplitRight,
+                Message::Split(pane, Axis::Vertical),
+                k.hint("Split right", Action::SplitRight)
+            ),
+            icon_button(
+                Icon::SplitDown,
+                Message::Split(pane, Axis::Horizontal),
+                k.hint("Split down", Action::SplitDown)
+            ),
+            icon_button(Icon::Close, Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
         ]
         .spacing(CONTROL_SPACING)
         .align_y(Alignment::Center);
         // Narrow panes get only the essentials. Keep `COMPACT_CONTROLS_WIDTH` in step.
         let compact = row![
-            icon_button("⚙", Message::PaneSettings(pane), "Terminal settings, agents & resume command"),
-            icon_button("✕", Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
+            icon_button(Icon::Settings, Message::PaneSettings(pane), "Terminal settings, agents & resume command"),
+            icon_button(Icon::Close, Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
         ]
         .spacing(CONTROL_SPACING)
         .align_y(Alignment::Center);

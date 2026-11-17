@@ -6,6 +6,7 @@ use iced::{Alignment, Element, Length};
 use super::text::char_column;
 use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, highlight, keys};
 use crate::app::{App, Message};
+use crate::icons::Icon;
 use crate::sidebar::{display_dir, icon_button, muted_text};
 use crate::terminal_view::TerminalView;
 use crate::theme::{self, MONO};
@@ -34,7 +35,7 @@ impl App {
             }
             let item = row![
                 tab(name, files.shown == Some(doc.id), Message::Editor(EditorMsg::Show(Some(doc.id)))),
-                icon_button("✕", Message::Editor(EditorMsg::Close(doc.id)), "Close"),
+                icon_button(Icon::Close, Message::Editor(EditorMsg::Close(doc.id)), "Close"),
             ]
             .align_y(Alignment::Center);
             strip = strip.push(tooltip(

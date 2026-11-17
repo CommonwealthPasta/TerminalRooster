@@ -12,6 +12,7 @@ mod editor;
 mod files;
 mod git_panel;
 mod groups;
+mod icons;
 mod keymap;
 mod layout_conv;
 mod leave_room;

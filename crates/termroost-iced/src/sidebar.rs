@@ -12,6 +12,7 @@ use crate::agent_icon::{agent_icon, terminal_icon};
 use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget};
 use crate::busy::busy_mark;
 use crate::groups::{self, Row};
+use crate::icons::{Icon, icon};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
 use crate::on_escape::on_escape;
@@ -48,18 +49,16 @@ pub fn branch_label<'a>(head: &Head, size: f32, max: usize) -> Element<'a, Messa
     .into()
 }
 
-/// Width of the glyph in an [`icon_button`], and the padding on either side of it.
-const ICON_GLYPH_WIDTH: f32 = 18.0;
+/// Size of the icon in an [`icon_button`], and the padding around it.
+const ICON_SIZE: f32 = 14.0;
 const ICON_PADDING: f32 = 4.0;
-/// Width of an [`icon_button`].
-pub const ICON_BUTTON_WIDTH: f32 = ICON_GLYPH_WIDTH + 2.0 * ICON_PADDING;
+/// Width (and height) of an [`icon_button`].
+pub const ICON_BUTTON_WIDTH: f32 = ICON_SIZE + 2.0 * ICON_PADDING;
 
-pub fn icon_button<'a>(label: &'a str, msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+pub fn icon_button<'a>(glyph: Icon, msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
+    let ink = |t: &iced::Theme| t.extended_palette().background.base.text;
     tooltip(
-        button(text(label).size(14).align_x(Alignment::Center).width(ICON_GLYPH_WIDTH))
-            .padding([2.0, ICON_PADDING])
-            .style(theme::icon_button)
-            .on_press(msg),
+        button(icon(glyph, ICON_SIZE, ink)).padding(ICON_PADDING).style(theme::icon_button).on_press(msg),
         container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),
         tooltip::Position::Bottom,
     )
@@ -229,8 +228,8 @@ impl App {
         let header = row![
             section_title("PROJECTS"),
             space::horizontal(),
-            icon_button("⚙", Message::OpenSettings, "Settings"),
-            icon_button("+", Message::NewProject, self.keymap.hint("New project", Action::NewProject)),
+            icon_button(Icon::Settings, Message::OpenSettings, "Settings"),
+            icon_button(Icon::Plus, Message::NewProject, self.keymap.hint("New project", Action::NewProject)),
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
@@ -294,7 +293,7 @@ impl App {
         // The input stays the first layer, so it keeps its focus when the ✕ comes and goes.
         let mut field = stack![on_escape(input, Message::ProjectSearchEscape)];
         if !self.project_search.is_empty() {
-            let clear = icon_button("✕", Message::ProjectSearchClear, "Clear search");
+            let clear = icon_button(Icon::Close, Message::ProjectSearchClear, "Clear search");
             field = field.push(container(clear).padding([0, 2]).align_right(Length::Fill).center_y(Length::Fill));
         }
         container(field).padding(Padding { top: 0.0, right: 6.0, bottom: 6.0, left: 6.0 }).into()
@@ -308,7 +307,7 @@ impl App {
         let s = self.core.state();
         let projects: Vec<&Project> = s.projects_in(group.id).collect();
         let open = searching || !group.collapsed;
-        let arrow = text(if open { "▼" } else { "▶" }).font(theme::MONO).size(9).width(12);
+        let arrow = icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.0, theme::muted);
         let mut label = row![arrow, text(&group.name).size(13).font(BOLD).width(Length::Fill)]
             .spacing(4)
             .align_y(Alignment::Center);
@@ -329,7 +328,7 @@ impl App {
             // On release, so pressing it to drag it doesn't open or close it.
             body = body.on_release(Message::ToggleGroup(group.id));
         }
-        let rename = icon_button("✎", Message::StartRename(RenameTarget::Group(group.id)), "Rename group");
+        let rename = icon_button(Icon::Edit, Message::StartRename(RenameTarget::Group(group.id)), "Rename group");
         row![body, container(rename).width(ACTIONS_WIDTH)].align_y(Alignment::Center).into()
     }
 
@@ -366,8 +365,8 @@ impl App {
         // its click state and a double click on an unselected item still registers.
         let actions: Element<'_, Message> = if selected {
             column![
-                icon_button("✎", Message::EditProject(p.id), "Edit project"),
-                icon_button("✕", Message::AskDeleteProject(p.id), "Delete project"),
+                icon_button(Icon::Edit, Message::EditProject(p.id), "Edit project"),
+                icon_button(Icon::Trash, Message::AskDeleteProject(p.id), "Delete project"),
             ]
             .into()
         } else {
@@ -387,7 +386,7 @@ impl App {
                 muted_text(short_dir(&project.working_dir, 26)).wrapping(text::Wrapping::None)
             ]
             .width(Length::Fill),
-            icon_button("+", Message::NewTab, self.keymap.hint("New session", Action::NewSession)),
+            icon_button(Icon::Plus, Message::NewTab, self.keymap.hint("New session", Action::NewSession)),
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
@@ -471,8 +470,8 @@ impl App {
             .on_double_click(Message::StartRename(RenameTarget::Tab(tab.id)));
         let actions: Element<'_, Message> = if selected {
             column![
-                icon_button("✎", Message::StartRename(RenameTarget::Tab(tab.id)), "Rename session"),
-                icon_button("✕", Message::AskDeleteTab(tab.id), "Delete session"),
+                icon_button(Icon::Edit, Message::StartRename(RenameTarget::Tab(tab.id)), "Rename session"),
+                icon_button(Icon::Trash, Message::AskDeleteTab(tab.id), "Delete session"),
             ]
             .into()
         } else {

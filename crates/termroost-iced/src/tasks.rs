@@ -8,6 +8,7 @@ use iced::{Alignment, Element, Length, Point, mouse};
 use termroost_core::Task;
 
 use crate::app::{App, DropTarget, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
+use crate::icons::Icon;
 use crate::sidebar::{icon_button, muted_text};
 use crate::theme::{self, BOLD};
 
@@ -164,7 +165,7 @@ impl App {
         .spacing(6)
         .align_y(Alignment::Center);
         if let Some(tab) = task.tab.filter(|t| Some(*t) != active_tab) {
-            link = link.push(icon_button("↗", Message::SelectTab(tab), "Go to session"));
+            link = link.push(icon_button(Icon::Open, Message::SelectTab(tab), "Go to session"));
         }
 
         let linked_here = task.tab.is_some() && task.tab == active_tab;
@@ -175,8 +176,8 @@ impl App {
                 row![
                     checkbox(task.done).on_toggle(move |d| Message::TaskDone(id, d)).size(16),
                     title,
-                    icon_button("✎", Message::EditTask(id), "Edit"),
-                    icon_button("✕", Message::DeleteTask(id), "Delete task"),
+                    icon_button(Icon::Edit, Message::EditTask(id), "Edit"),
+                    icon_button(Icon::Trash, Message::DeleteTask(id), "Delete task"),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),

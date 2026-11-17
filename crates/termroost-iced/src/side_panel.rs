@@ -6,6 +6,7 @@ use iced::{Alignment, Element, Length};
 use serde::{Deserialize, Serialize};
 
 use crate::app::{App, Message};
+use crate::icons::Icon;
 use crate::keymap::Action;
 use crate::sidebar::icon_button;
 use crate::theme::{self, BOLD};
@@ -71,8 +72,8 @@ impl App {
             Some(action) => self.keymap.hint("Hide panel", action),
             None => "Hide panel".to_owned(),
         };
-        let header =
-            row![tabs, space::horizontal(), icon_button("✕", Message::ClosePanel, hide)].align_y(Alignment::Center);
+        let header = row![tabs, space::horizontal(), icon_button(Icon::Close, Message::ClosePanel, hide)]
+            .align_y(Alignment::Center);
 
         let body = match current {
             SideTab::Tasks => self.view_tasks(),

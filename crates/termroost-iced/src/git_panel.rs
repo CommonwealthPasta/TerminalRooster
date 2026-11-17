@@ -12,6 +12,7 @@ use iced::{Alignment, Element, Length, Task};
 use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
+use crate::icons::Icon;
 use crate::side_panel::SideTab;
 use crate::sidebar::{branch_label, icon_button, muted_text};
 use crate::theme;
@@ -253,7 +254,7 @@ impl App {
             Err(e) => text(e).size(12).style(text::danger).into(),
         };
         Some(
-            row![container(message).width(Length::Fill), icon_button("✕", Message::DismissSync, "Dismiss")]
+            row![container(message).width(Length::Fill), icon_button(Icon::Close, Message::DismissSync, "Dismiss")]
                 .spacing(4)
                 .align_y(Alignment::Start)
                 .into(),
