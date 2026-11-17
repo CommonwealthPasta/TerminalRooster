@@ -19,10 +19,11 @@ pub enum Icon {
     Open,
     ChevronDown,
     ChevronRight,
+    Search,
 }
 
 /// The files, in the order of [`Icon`].
-const SOURCES: [&[u8]; 11] = [
+const SOURCES: [&[u8]; 12] = [
     include_bytes!("../icons/ui/plus.svg"),
     include_bytes!("../icons/ui/close.svg"),
     include_bytes!("../icons/ui/edit.svg"),
@@ -34,6 +35,7 @@ const SOURCES: [&[u8]; 11] = [
     include_bytes!("../icons/ui/open.svg"),
     include_bytes!("../icons/ui/chevron_down.svg"),
     include_bytes!("../icons/ui/chevron_right.svg"),
+    include_bytes!("../icons/ui/search.svg"),
 ];
 
 // Built once so every view hands iced the same handles, and their rasterized

@@ -27,6 +27,7 @@ use crate::side_panel::SideTab;
 use crate::terminal_view::{self, KeyboardFocus};
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
+use crate::ui;
 use crate::worktree::{WorktreeForm, WorktreeMsg};
 use crate::worktree_remove::{RemoveForm, RemoveMsg};
 
@@ -2165,9 +2166,11 @@ impl App {
             self.view_settings()
         } else {
             let terminals = self.drop_zone(self.view_main());
-            let mut main = row![self.view_projects(), self.view_tabs(), terminals].height(Length::Fill);
+            let mut main =
+                row![self.view_projects(), ui::vertical_divider(), self.view_tabs(), ui::vertical_divider(), terminals]
+                    .height(Length::Fill);
             if self.prefs.panel_open && self.core.state().selected_project.is_some() {
-                main = main.push(self.view_side_panel());
+                main = main.push(ui::vertical_divider()).push(self.view_side_panel());
             }
             // The second layer shows a dragged task next to the pointer.
             container(stack![main, self.view_task_drag()]).width(Length::Fill).height(Length::Fill).into()

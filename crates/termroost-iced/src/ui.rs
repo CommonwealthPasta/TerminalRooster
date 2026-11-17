@@ -1,12 +1,13 @@
 //! Building blocks the views share, each in the look `theme` describes: so
 //! that a button, a field or a note looks the same wherever it is.
 
-use iced::widget::{Column, button, container, text, tooltip};
-use iced::{Element, Theme};
+use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::{Column, Scrollable, TextInput, button, container, scrollable, space, text, text_input, tooltip};
+use iced::{Element, Length, Theme};
 
 use crate::app::Message;
 use crate::icons::{Icon, icon};
-use crate::theme::{self, TEXT_SM, Tone};
+use crate::theme::{self, SEMIBOLD, TEXT, TEXT_SM, Tone};
 
 /// Size of the icon in an [`icon_button`], and the padding around it.
 const ICON_SIZE: f32 = 14.0;
@@ -41,7 +42,34 @@ pub fn icon_button<'a>(glyph: Icon, msg: Message, label: impl Into<String>) -> E
     )
 }
 
+/// A text field.
+pub fn input<'a>(placeholder: &str, value: &str) -> TextInput<'a, Message> {
+    text_input(placeholder, value).size(TEXT).padding([6, 10]).style(theme::input)
+}
+
+/// A vertical scrollable with thin scrollbars over the content's edge.
+pub fn scroll<'a>(content: impl Into<Element<'a, Message>>) -> Scrollable<'a, Message> {
+    scrollable(content)
+        .direction(Direction::Vertical(Scrollbar::new().width(6).scroller_width(6).margin(2)))
+        .style(theme::scrollbars)
+}
+
+/// A hairline down the height it is given.
+pub fn vertical_divider<'a>() -> Element<'a, Message> {
+    container(space()).width(1).height(Length::Fill).style(theme::divider).into()
+}
+
 /// A small rounded label.
 pub fn badge<'a>(label: impl text::IntoFragment<'a>, tone: Tone) -> Element<'a, Message> {
     container(text(label).size(11).wrapping(text::Wrapping::None)).padding([1, 7]).style(theme::badge(tone)).into()
+}
+
+/// Text in the muted color, at its default size.
+pub fn muted(t: &Theme) -> text::Style {
+    text::Style { color: Some(theme::muted(t)) }
+}
+
+/// A small heading over a group of things, such as a column's list.
+pub fn heading<'a>(label: &'a str) -> text::Text<'a> {
+    text(label).size(TEXT_SM).font(SEMIBOLD).style(muted)
 }

@@ -6,12 +6,15 @@
 //!   look. Lines, fills under the pointer and quiet surfaces are the text
 //!   color at a low opacity over what is behind them.
 //! - The accent marks what is selected, focused or switched on.
-//! - Corners are [`RADIUS_SM`] on small controls.
+//! - Corners are [`RADIUS_SM`] on small controls, and [`RADIUS`] on fields
+//!   and list items.
+//! - What is raised (the selected list item) is lighter than what it sits
+//!   on, and casts a soft shadow.
 
 use std::sync::LazyLock;
 
 use iced::border;
-use iced::widget::{button, container, pane_grid, text_editor};
+use iced::widget::{button, container, pane_grid, scrollable, text_editor, text_input};
 use iced::{Background, Border, Color, Font, Shadow, Theme, Vector, font};
 
 /// Bundled terminal font (JetBrains Mono, SIL Open Font License 1.1).
@@ -52,6 +55,8 @@ pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 
 /// The interface font. Named on Windows, so its bold and semibold weights are found too.
 pub const UI: Font = if cfg!(windows) { Font::with_name("Segoe UI") } else { Font::DEFAULT };
+/// Titles, headings and names that lead a line.
+pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..UI };
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..UI };
 
 /// Text sizes: body text and small print.
@@ -60,6 +65,8 @@ pub const TEXT_SM: f32 = 12.0;
 
 /// Corners of small controls such as icon buttons.
 pub const RADIUS_SM: f32 = 6.0;
+/// Corners of buttons, fields, menus and list items.
+pub const RADIUS: f32 = 8.0;
 /// Fully round ends.
 const PILL: f32 = 999.0;
 
@@ -101,6 +108,16 @@ pub fn faint(t: &Theme) -> Color {
     ink(t).scale_alpha(0.42)
 }
 
+/// Hairlines: dividers, and the edges of cards and panes.
+pub fn line(t: &Theme) -> Color {
+    ink(t).scale_alpha(by_tone(t, 0.10, 0.12))
+}
+
+/// The edge of a field or an outlined button.
+fn edge(t: &Theme) -> Color {
+    ink(t).scale_alpha(by_tone(t, 0.22, 0.18))
+}
+
 /// The fill of something under the pointer.
 fn hover_fill(t: &Theme) -> Color {
     ink(t).scale_alpha(by_tone(t, 0.06, 0.08))
@@ -111,12 +128,32 @@ fn press_fill(t: &Theme) -> Color {
     ink(t).scale_alpha(by_tone(t, 0.10, 0.13))
 }
 
+/// The chosen one of several: a selected tab, or the selected item of a list.
+fn chosen(t: &Theme) -> Color {
+    if is_dark(t) { mix(background(t), ink(t), 0.14) } else { Color::WHITE }
+}
+
+/// The side columns, a step further from the text color than the terminals.
+fn side(t: &Theme) -> Color {
+    if is_dark(t) { mix(background(t), Color::BLACK, 0.2) } else { mix(background(t), ink(t), 0.03) }
+}
+
+/// What text is typed on: set into dark themes, white in light ones.
+fn field(t: &Theme) -> Color {
+    if is_dark(t) { mix(background(t), Color::BLACK, 0.12) } else { Color::WHITE }
+}
+
 fn shadow(t: &Theme, light: f32, dark: f32, y: f32, blur: f32) -> Shadow {
     Shadow {
         color: Color { a: by_tone(t, light, dark), ..Color::BLACK },
         offset: Vector::new(0.0, y),
         blur_radius: blur,
     }
+}
+
+/// Under buttons and the selected item.
+fn shadow_sm(t: &Theme) -> Shadow {
+    shadow(t, 0.07, 0.3, 1.0, 2.0)
 }
 
 /// Under menus, tooltips and pop-ups.
@@ -172,6 +209,76 @@ pub fn button_ghost(t: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// "New project" and "New session" under their lists: quiet until hovered.
+pub fn add_item_button(t: &Theme, status: button::Status) -> button::Style {
+    match status {
+        button::Status::Active | button::Status::Disabled => button_style(None, muted(t), RADIUS),
+        button::Status::Hovered => button_style(Some(hover_fill(t)), ink(t), RADIUS),
+        button::Status::Pressed => button_style(Some(press_fill(t)), ink(t), RADIUS),
+    }
+}
+
+// Fields and other controls
+
+pub fn input(t: &Theme, status: text_input::Status) -> text_input::Style {
+    let edge_color = match status {
+        text_input::Status::Active => edge(t),
+        text_input::Status::Hovered => ink(t).scale_alpha(0.32),
+        text_input::Status::Focused { .. } => accent(t),
+        text_input::Status::Disabled => line(t),
+    };
+    text_input::Style {
+        background: field(t).into(),
+        border: Border { width: 1.0, color: edge_color, radius: RADIUS.into() },
+        icon: muted(t),
+        placeholder: faint(t),
+        value: ink(t),
+        selection: accent(t).scale_alpha(0.35),
+    }
+}
+
+/// Thin rounded scrollbars with no track, darker while used.
+pub fn scrollbars(t: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let (hovered, dragged) = match status {
+        scrollable::Status::Active { .. } => (false, false),
+        scrollable::Status::Hovered { is_vertical_scrollbar_hovered, is_horizontal_scrollbar_hovered, .. } => {
+            (is_vertical_scrollbar_hovered || is_horizontal_scrollbar_hovered, false)
+        }
+        scrollable::Status::Dragged { is_vertical_scrollbar_dragged, is_horizontal_scrollbar_dragged, .. } => {
+            (false, is_vertical_scrollbar_dragged || is_horizontal_scrollbar_dragged)
+        }
+    };
+    let alpha = if dragged {
+        0.5
+    } else if hovered {
+        0.38
+    } else {
+        0.22
+    };
+    let rail = scrollable::Rail {
+        background: None,
+        border: Border::default(),
+        scroller: scrollable::Scroller { background: ink(t).scale_alpha(alpha).into(), border: border::rounded(PILL) },
+    };
+    scrollable::Style {
+        container: container::Style::default(),
+        vertical_rail: rail,
+        horizontal_rail: rail,
+        gap: None,
+        auto_scroll: scrollable::default(t, status).auto_scroll,
+    }
+}
+
+/// The side columns: projects, sessions and the right panel.
+pub fn side_column(t: &Theme) -> container::Style {
+    container::Style { background: Some(side(t).into()), text_color: Some(ink(t)), ..container::Style::default() }
+}
+
+/// A hairline between two parts of the window.
+pub fn divider(t: &Theme) -> container::Style {
+    container::Style { background: Some(line(t).into()), ..container::Style::default() }
+}
+
 /// A tooltip, in the text color so it stands out from whatever it covers.
 pub fn tooltip(t: &Theme) -> container::Style {
     container::Style {
@@ -186,6 +293,36 @@ pub fn tooltip(t: &Theme) -> container::Style {
 /// The smaller lines under a tooltip's first, such as a keyboard shortcut.
 pub fn tooltip_hint(t: &Theme) -> Color {
     background(t).scale_alpha(0.7)
+}
+
+/// A list item; the selected one is raised, and `drop_target` outlines it
+/// while a task is held over it.
+pub fn list_item(selected: bool, drop_target: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| {
+        let mut style = container::Style {
+            text_color: Some(ink(t)),
+            border: border::rounded(RADIUS),
+            ..container::Style::default()
+        };
+        if selected {
+            style.background = Some(chosen(t).into());
+            style.shadow = shadow_sm(t);
+        }
+        if drop_target {
+            style.background = Some(accent(t).scale_alpha(0.14).into());
+            style.border = style.border.width(1.5).color(accent(t));
+        }
+        style
+    }
+}
+
+/// The bar at the left edge of the selected list item; nothing on the others.
+pub fn selection_bar(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| container::Style {
+        background: selected.then(|| accent(t).into()),
+        border: border::rounded(PILL),
+        ..container::Style::default()
+    }
 }
 
 /// A small rounded label, such as a branch in the git log.
@@ -228,15 +365,6 @@ pub fn sidebar(theme: &Theme) -> container::Style {
     }
 }
 
-pub fn sidebar_deep(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.background.weakest.color)),
-        text_color: Some(p.background.weakest.text),
-        ..container::Style::default()
-    }
-}
-
 /// Small borderless icon buttons.
 pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
     let p = theme.extended_palette();
@@ -249,18 +377,6 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
             button::Status::Disabled => p.background.strong.color,
             _ => p.background.base.text,
         },
-        border: Border::default().rounded(4),
-        ..button::Style::default()
-    }
-}
-
-/// The "+" at the end of the project and tab lists: quiet until hovered.
-pub fn add_item_button(theme: &Theme, status: button::Status) -> button::Style {
-    let p = theme.extended_palette();
-    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-    button::Style {
-        background: hovered.then_some(Background::Color(p.background.strong.color)),
-        text_color: if hovered { p.background.base.text } else { muted(theme) },
         border: Border::default().rounded(4),
         ..button::Style::default()
     }
