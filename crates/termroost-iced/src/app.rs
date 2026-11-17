@@ -433,7 +433,7 @@ pub enum Message {
     RemoveWorktree(RemoveMsg),
     LogRead(LogRead),
     LogAllBranches(bool),
-    /// Pull or push the Git tab's repository.
+    /// Pull, push or change the remote of the Git tab's repository.
     GitSync(SyncOp),
     GitSynced(PathBuf, Result<String, String>),
     PullRebase(bool),
@@ -480,7 +480,7 @@ pub struct App {
     git_polling: bool,
     /// The log in the side panel's Git tab.
     pub(crate) git_log: Option<GitLog>,
-    /// The Git tab's last pull or push.
+    /// The Git tab's last pull, push or change of remote.
     pub(crate) git_sync: Option<GitSync>,
     /// The log is being read.
     pub(crate) log_reading: bool,

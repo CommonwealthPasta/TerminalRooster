@@ -329,6 +329,33 @@ impl Repo {
         })
     }
 
+    /// Makes the checked-out branch pull from and push to `remote`, tracking
+    /// the same branch it tracks now (or one of its own name) there. The
+    /// remote is fetched first, so how the branch stands against it is
+    /// current; when that fails, nothing changes. Returns what happened, in
+    /// a sentence.
+    pub fn use_remote(&self, remote: &str) -> Result<String, String> {
+        let Some(Head::Branch(branch)) = self.head() else {
+            return Err("Not on a branch: check one out to choose its remote.".into());
+        };
+        let merge_key = format!("branch.{branch}.merge");
+        // git fails when it is not set.
+        let merge = git(&self.worktree, &["config", "--get", &merge_key])
+            .map(|m| m.trim().to_owned())
+            .ok()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| format!("refs/heads/{branch}"));
+        git_remote(&self.worktree, &["fetch", "--", remote])
+            .map_err(|e| format!("Could not fetch {remote}, so {branch} was left as it was.\n{e}"))?;
+        git(&self.worktree, &["config", &format!("branch.{branch}.remote"), remote])?;
+        git(&self.worktree, &["config", &merge_key, &merge])?;
+        let name = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        Ok(match self.tracking(false, 1)?.upstream {
+            Some(upstream) => format!("{branch} now pulls from and pushes to {upstream}."),
+            None => format!("{branch} now uses {remote}, which has no {name} branch yet: Push makes it."),
+        })
+    }
+
     /// The latest `limit` commits of this working tree's HEAD, or of every
     /// branch and tag when `all`, newest first.
     pub fn log(&self, all: bool, limit: usize) -> Result<Vec<Commit>, String> {
@@ -1208,6 +1235,49 @@ mod tests {
         assert_eq!(a.push().unwrap(), "Pushed main to fork, which it now tracks.");
         let t = a.tracking(false, 50).unwrap();
         assert_eq!((t.remote.as_deref(), t.upstream.as_deref()), (Some("fork"), Some("fork/main")));
+    }
+
+    /// Moving a branch from one remote to another, with git installed.
+    #[test]
+    fn switches_remotes_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(origin) = bare(dir.path(), "origin.git") else {
+            eprintln!("git not available; skipping");
+            return;
+        };
+        let fork = bare(dir.path(), "fork.git").unwrap();
+        let a = clone_repo(dir.path(), &origin, "a");
+        let run = |args: &[&str]| git(&a.worktree, args).unwrap();
+        run(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        a.push().unwrap();
+        run(&["remote", "add", "fork", &fork.to_string_lossy()]);
+        let standing = || {
+            let t = a.tracking(false, 50).unwrap();
+            (t.remote.unwrap(), t.upstream, t.ahead, t.behind)
+        };
+
+        // fork has no main yet; the first push makes it.
+        assert_eq!(a.use_remote("fork").unwrap(), "main now uses fork, which has no main branch yet: Push makes it.");
+        assert_eq!(standing(), ("fork".into(), None, 0, 0));
+        assert_eq!(a.push().unwrap(), "Pushed main to fork, which it now tracks.");
+
+        // Back on origin, a commit made meanwhile is counted at once.
+        run(&["commit", "-q", "--allow-empty", "-m", "two"]);
+        assert_eq!(a.use_remote("origin").unwrap(), "main now pulls from and pushes to origin/main.");
+        assert_eq!(standing(), ("origin".into(), Some("origin/main".into()), 1, 0));
+
+        // A remote that can't be fetched leaves the branch as it was.
+        run(&["remote", "add", "gone", &dir.path().join("gone.git").to_string_lossy()]);
+        let err = a.use_remote("gone").unwrap_err();
+        assert!(err.starts_with("Could not fetch gone, so main was left as it was.\n"), "{err}");
+        assert_eq!(standing().0, "origin");
+
+        // A branch tracking another name keeps tracking that name.
+        run(&["switch", "-q", "-c", "feature", "--track", "origin/main"]);
+        assert_eq!(a.use_remote("fork").unwrap(), "feature now pulls from and pushes to fork/main.");
+
+        run(&["switch", "-q", "--detach"]);
+        assert!(a.use_remote("origin").unwrap_err().contains("Not on a branch"));
     }
 
     #[test]
