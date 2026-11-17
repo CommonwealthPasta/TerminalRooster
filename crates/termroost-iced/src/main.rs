@@ -30,6 +30,7 @@ mod terminal_view;
 mod theme;
 mod themes;
 mod toasts;
+mod ui;
 mod worktree;
 mod worktree_remove;
 

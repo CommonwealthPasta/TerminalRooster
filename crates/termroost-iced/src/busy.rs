@@ -81,7 +81,7 @@ pub fn busy_mark<'a>(busy: Busy, ink: impl Fn(&Theme) -> Color + 'a) -> Element<
     }
     tooltip(
         mark,
-        container(text(tip.join("\n")).size(12)).padding([4, 8]).style(container::rounded_box),
+        container(text(tip.join("\n")).size(12)).padding([5, 9]).style(crate::theme::tooltip),
         tooltip::Position::Bottom,
     )
     .into()

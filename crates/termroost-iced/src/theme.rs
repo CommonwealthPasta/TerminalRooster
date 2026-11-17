@@ -1,9 +1,18 @@
 //! Fonts, colors and widget styles.
+//!
+//! Every part of the window follows the same few rules, so the parts look
+//! like they belong together:
+//! - All colors come from the theme's six, so a custom theme gets the same
+//!   look. Lines, fills under the pointer and quiet surfaces are the text
+//!   color at a low opacity over what is behind them.
+//! - The accent marks what is selected, focused or switched on.
+//! - Corners are [`RADIUS_SM`] on small controls.
 
 use std::sync::LazyLock;
 
+use iced::border;
 use iced::widget::{button, container, pane_grid, text_editor};
-use iced::{Background, Border, Color, Font, Theme, font};
+use iced::{Background, Border, Color, Font, Shadow, Theme, Vector, font};
 
 /// Bundled terminal font (JetBrains Mono, SIL Open Font License 1.1).
 pub const MONO: Font = Font::with_name("JetBrains Mono");
@@ -45,16 +54,168 @@ pub const DEFAULT_FONT_SIZE: f32 = 14.0;
 pub const UI: Font = if cfg!(windows) { Font::with_name("Segoe UI") } else { Font::DEFAULT };
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..UI };
 
-/// Body text.
+/// Text sizes: body text and small print.
 pub const TEXT: f32 = 13.0;
+pub const TEXT_SM: f32 = 12.0;
 
-pub fn accent(theme: &Theme) -> Color {
-    theme.extended_palette().primary.base.color
+/// Corners of small controls such as icon buttons.
+pub const RADIUS_SM: f32 = 6.0;
+/// Fully round ends.
+const PILL: f32 = 999.0;
+
+/// `a` moved toward `b` by `t` (0 is `a`, 1 is `b`), as `b` laid over `a` at that opacity.
+fn mix(a: Color, b: Color, t: f32) -> Color {
+    Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
+}
+
+fn is_dark(t: &Theme) -> bool {
+    t.extended_palette().is_dark
+}
+
+/// One amount for light themes, another for dark ones, where the same
+/// opacity shows less.
+fn by_tone(t: &Theme, light: f32, dark: f32) -> f32 {
+    if is_dark(t) { dark } else { light }
+}
+
+fn background(t: &Theme) -> Color {
+    t.extended_palette().background.base.color
+}
+
+/// The text color.
+pub fn ink(t: &Theme) -> Color {
+    t.extended_palette().background.base.text
+}
+
+pub fn accent(t: &Theme) -> Color {
+    t.extended_palette().primary.base.color
 }
 
 /// Secondary text: the text color at reduced opacity, readable on light and dark backgrounds.
-pub fn muted(theme: &Theme) -> Color {
-    theme.extended_palette().background.base.text.scale_alpha(0.62)
+pub fn muted(t: &Theme) -> Color {
+    ink(t).scale_alpha(0.62)
+}
+
+/// Placeholders and what can't be used right now.
+pub fn faint(t: &Theme) -> Color {
+    ink(t).scale_alpha(0.42)
+}
+
+/// The fill of something under the pointer.
+fn hover_fill(t: &Theme) -> Color {
+    ink(t).scale_alpha(by_tone(t, 0.06, 0.08))
+}
+
+/// The fill of something being pressed.
+fn press_fill(t: &Theme) -> Color {
+    ink(t).scale_alpha(by_tone(t, 0.10, 0.13))
+}
+
+fn shadow(t: &Theme, light: f32, dark: f32, y: f32, blur: f32) -> Shadow {
+    Shadow {
+        color: Color { a: by_tone(t, light, dark), ..Color::BLACK },
+        offset: Vector::new(0.0, y),
+        blur_radius: blur,
+    }
+}
+
+/// Under menus, tooltips and pop-ups.
+fn shadow_md(t: &Theme) -> Shadow {
+    shadow(t, 0.12, 0.45, 4.0, 14.0)
+}
+
+/// The kinds of message a note or badge can carry, each in its own color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Neutral,
+    Accent,
+    Success,
+    Warning,
+    Danger,
+}
+
+fn tone_color(t: &Theme, tone: Tone) -> Color {
+    let p = t.extended_palette();
+    match tone {
+        Tone::Neutral => ink(t),
+        Tone::Accent => p.primary.base.color,
+        Tone::Success => p.success.base.color,
+        Tone::Warning => p.warning.base.color,
+        Tone::Danger => p.danger.base.color,
+    }
+}
+
+/// Text in a tone's color, nudged toward the text color so it reads on a tint of itself.
+fn tone_text(t: &Theme, tone: Tone) -> Color {
+    let c = tone_color(t, tone);
+    if tone == Tone::Neutral { c } else { mix(c, ink(t), by_tone(t, 0.25, 0.15)) }
+}
+
+// Buttons
+
+fn button_style(background: Option<Color>, text_color: Color, radius: f32) -> button::Style {
+    button::Style {
+        background: background.map(Background::Color),
+        text_color,
+        border: border::rounded(radius),
+        ..button::Style::default()
+    }
+}
+
+/// Icon buttons, and other buttons that show only a fill under the pointer.
+pub fn button_ghost(t: &Theme, status: button::Status) -> button::Style {
+    match status {
+        button::Status::Active => button_style(None, ink(t).scale_alpha(0.78), RADIUS_SM),
+        button::Status::Hovered => button_style(Some(hover_fill(t)), ink(t), RADIUS_SM),
+        button::Status::Pressed => button_style(Some(press_fill(t)), ink(t), RADIUS_SM),
+        button::Status::Disabled => button_style(None, faint(t), RADIUS_SM),
+    }
+}
+
+/// A tooltip, in the text color so it stands out from whatever it covers.
+pub fn tooltip(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(ink(t).into()),
+        text_color: Some(background(t)),
+        border: border::rounded(RADIUS_SM),
+        shadow: shadow_md(t),
+        ..container::Style::default()
+    }
+}
+
+/// The smaller lines under a tooltip's first, such as a keyboard shortcut.
+pub fn tooltip_hint(t: &Theme) -> Color {
+    background(t).scale_alpha(0.7)
+}
+
+/// A small rounded label, such as a branch in the git log.
+pub fn badge(tone: Tone) -> impl Fn(&Theme) -> container::Style {
+    move |t| {
+        let (fill, text_color) = match tone {
+            Tone::Neutral => (ink(t).scale_alpha(by_tone(t, 0.07, 0.1)), ink(t).scale_alpha(0.85)),
+            _ => (tone_color(t, tone).scale_alpha(by_tone(t, 0.12, 0.16)), tone_text(t, tone)),
+        };
+        container::Style {
+            background: Some(fill.into()),
+            text_color: Some(text_color),
+            border: border::rounded(PILL),
+            ..container::Style::default()
+        }
+    }
+}
+
+// Terminals
+
+/// The color of an alert: danger for failures, success for agents.
+pub fn notice_color(t: &Theme, category: crate::notify::Category) -> Color {
+    tone_color(t, notice_tone(category))
+}
+
+pub fn notice_tone(category: crate::notify::Category) -> Tone {
+    match category {
+        crate::notify::Category::Error => Tone::Danger,
+        crate::notify::Category::Agent => Tone::Success,
+    }
 }
 
 /// Background of the side columns.
@@ -168,38 +329,6 @@ pub fn file_editor(theme: &Theme, status: text_editor::Status) -> text_editor::S
     }
 }
 
-pub fn badge(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.secondary.base.color)),
-        text_color: Some(p.secondary.base.text),
-        border: Border::default().rounded(8),
-        ..container::Style::default()
-    }
-}
-
-/// A badge that stands out, such as the branch checked out in the git log.
-pub fn accent_badge(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.primary.weak.color)),
-        text_color: Some(p.primary.weak.text),
-        border: Border::default().rounded(8),
-        ..container::Style::default()
-    }
-}
-
-/// A badge for something still to do, such as a commit not pushed yet.
-pub fn warning_badge(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.warning.weak.color)),
-        text_color: Some(p.warning.weak.text),
-        border: Border::default().rounded(8),
-        ..container::Style::default()
-    }
-}
-
 pub fn title_bar(active: bool) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let p = theme.extended_palette();
@@ -297,32 +426,6 @@ pub fn notice_banner(theme: &Theme) -> container::Style {
         text_color: Some(p.primary.weak.text),
         border: Border::default().rounded(4),
         ..container::Style::default()
-    }
-}
-
-/// The color of an alert: danger for failures, success for agents.
-pub fn notice_color(theme: &Theme, category: crate::notify::Category) -> Color {
-    let p = theme.extended_palette();
-    match category {
-        crate::notify::Category::Error => p.danger.base.color,
-        crate::notify::Category::Agent => p.success.base.color,
-    }
-}
-
-/// A small label in a terminal's title bar saying what happened in it.
-pub fn notice_chip(category: crate::notify::Category) -> impl Fn(&Theme) -> container::Style {
-    move |theme| {
-        let p = theme.extended_palette();
-        let pair = match category {
-            crate::notify::Category::Error => p.danger.base,
-            crate::notify::Category::Agent => p.success.base,
-        };
-        container::Style {
-            background: Some(Background::Color(pair.color)),
-            text_color: Some(pair.text),
-            border: Border::default().rounded(8),
-            ..container::Style::default()
-        }
     }
 }
 

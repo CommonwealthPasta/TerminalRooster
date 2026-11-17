@@ -7,9 +7,10 @@ use super::text::char_column;
 use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, highlight, keys};
 use crate::app::{App, Message};
 use crate::icons::Icon;
-use crate::sidebar::{display_dir, icon_button, muted_text};
+use crate::sidebar::{display_dir, muted_text};
 use crate::terminal_view::TerminalView;
 use crate::theme::{self, MONO};
+use crate::ui::{icon_button, tip};
 
 impl App {
     /// "Terminals", then each file the visible session has open. Nothing
@@ -38,11 +39,7 @@ impl App {
                 icon_button(Icon::Close, Message::Editor(EditorMsg::Close(doc.id)), "Close"),
             ]
             .align_y(Alignment::Center);
-            strip = strip.push(tooltip(
-                item,
-                container(text(display_dir(&doc.path)).size(12)).padding([4, 8]).style(container::rounded_box),
-                tooltip::Position::Bottom,
-            ));
+            strip = strip.push(tip(item, display_dir(&doc.path), tooltip::Position::Bottom));
         }
         container(strip.wrap()).padding([2, 8]).into()
     }

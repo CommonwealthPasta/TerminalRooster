@@ -17,7 +17,8 @@ use crate::keymap::Action;
 use crate::notify::{Category, Notice};
 use crate::on_escape::on_escape;
 use crate::reorder::reorder;
-use crate::theme::{self, BOLD};
+use crate::theme::{self, BOLD, Tone};
+use crate::ui::{self, icon_button, tip};
 
 /// Width of the edit/delete button column next to the selected list item.
 const ACTIONS_WIDTH: f32 = 26.0;
@@ -46,22 +47,6 @@ pub fn branch_label<'a>(head: &Head, size: f32, max: usize) -> Element<'a, Messa
     ]
     .spacing(4)
     .align_y(Alignment::Center)
-    .into()
-}
-
-/// Size of the icon in an [`icon_button`], and the padding around it.
-const ICON_SIZE: f32 = 14.0;
-const ICON_PADDING: f32 = 4.0;
-/// Width (and height) of an [`icon_button`].
-pub const ICON_BUTTON_WIDTH: f32 = ICON_SIZE + 2.0 * ICON_PADDING;
-
-pub fn icon_button<'a>(glyph: Icon, msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
-    let ink = |t: &iced::Theme| t.extended_palette().background.base.text;
-    tooltip(
-        button(icon(glyph, ICON_SIZE, ink)).padding(ICON_PADDING).style(theme::icon_button).on_press(msg),
-        container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),
-        tooltip::Position::Bottom,
-    )
     .into()
 }
 
@@ -156,17 +141,16 @@ fn group_rail<'a>() -> Element<'a, Message> {
 }
 
 /// A "+" under the last item of a list, as wide as the list.
-fn add_item<'a>(msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
-    tooltip(
+fn add_item<'a>(msg: Message, label: String) -> Element<'a, Message> {
+    tip(
         button(text("+").size(18).width(Length::Fill).align_x(Alignment::Center))
             .width(Length::Fill)
             .padding([2, 8])
             .style(theme::add_item_button)
             .on_press(msg),
-        container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),
+        label,
         tooltip::Position::Bottom,
     )
-    .into()
 }
 
 /// The color of a list item's busy mark: the accent, or the item's text
@@ -188,15 +172,14 @@ fn activity_dot<'a>(on: bool) -> Element<'a, Message> {
 fn marker<'a>(notice: Option<&Notice>, activity: bool) -> Element<'a, Message> {
     let Some(n) = notice else { return activity_dot(activity) };
     let category = n.category;
-    tooltip(
+    tip(
         text(n.glyph())
             .size(13)
             .font(BOLD)
             .style(move |t: &iced::Theme| text::Style { color: Some(theme::notice_color(t, category)) }),
-        container(text(n.headline.clone()).size(12)).padding([4, 8]).style(container::rounded_box),
+        n.headline.clone(),
         tooltip::Position::Bottom,
     )
-    .into()
 }
 
 impl App {
@@ -229,7 +212,7 @@ impl App {
             section_title("PROJECTS"),
             space::horizontal(),
             icon_button(Icon::Settings, Message::OpenSettings, "Settings"),
-            icon_button(Icon::Plus, Message::NewProject, self.keymap.hint("New project", Action::NewProject)),
+            icon_button(Icon::Plus, Message::NewProject, self.keymap.tip("New project", Action::NewProject)),
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
@@ -259,7 +242,7 @@ impl App {
         if shown.is_empty() && !s.projects.is_empty() {
             items = items.push(container(muted_text("No projects match")).padding([6, 8]));
         }
-        let items = items.push(add_item(Message::NewProject, self.keymap.hint("New project", Action::NewProject)));
+        let items = items.push(add_item(Message::NewProject, self.keymap.tip("New project", Action::NewProject)));
         container(column![header, self.project_search_box(), scrollable(items).height(Length::Fill)])
             .width(190)
             .height(Length::Fill)
@@ -386,7 +369,7 @@ impl App {
                 muted_text(short_dir(&project.working_dir, 26)).wrapping(text::Wrapping::None)
             ]
             .width(Length::Fill),
-            icon_button(Icon::Plus, Message::NewTab, self.keymap.hint("New session", Action::NewSession)),
+            icon_button(Icon::Plus, Message::NewTab, self.keymap.tip("New session", Action::NewSession)),
         ]
         .align_y(Alignment::Center)
         .padding([8, 10]);
@@ -394,7 +377,7 @@ impl App {
         let list = reorder(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
             .spacing(LIST_SPACING)
             .on_move_if(self.rename.is_none(), move |from, to| Message::MoveTab(ids[from], to));
-        let items = column![list, add_item(Message::NewTab, self.keymap.hint("New session", Action::NewSession))]
+        let items = column![list, add_item(Message::NewTab, self.keymap.tip("New session", Action::NewSession))]
             .spacing(LIST_SPACING)
             .padding([0, 6]);
         container(
@@ -427,7 +410,7 @@ impl App {
         }
         let open = s.open_task_count(tab.id);
         let badge: Element<'_, Message> = if open > 0 {
-            container(text(open.to_string()).size(11)).padding([1, 6]).style(theme::badge).into()
+            tip(ui::badge(open.to_string(), Tone::Neutral), "Open tasks", tooltip::Position::Bottom)
         } else {
             space::horizontal().width(0).into()
         };
@@ -442,16 +425,12 @@ impl App {
         }
         // A session without an agent is plain terminals: TerminalRooster's own icon.
         if kinds.is_empty() {
-            marks = marks.push(tooltip(
-                terminal_icon(NAME_SIZE),
-                container(text("Terminal").size(12)).padding([4, 8]).style(container::rounded_box),
-                tooltip::Position::Bottom,
-            ));
+            marks = marks.push(tip(terminal_icon(NAME_SIZE), "Terminal", tooltip::Position::Bottom));
         }
         for kind in kinds {
-            marks = marks.push(tooltip(
+            marks = marks.push(tip(
                 agent_icon(kind, NAME_SIZE, move |t| item_text(t, selected)),
-                container(text(kind.label()).size(12)).padding([4, 8]).style(container::rounded_box),
+                kind.label(),
                 tooltip::Position::Bottom,
             ));
         }

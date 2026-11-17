@@ -9,8 +9,9 @@ use termroost_core::Task;
 
 use crate::app::{App, DropTarget, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
 use crate::icons::Icon;
-use crate::sidebar::{icon_button, muted_text};
+use crate::sidebar::muted_text;
 use crate::theme::{self, BOLD};
+use crate::ui::icon_button;
 
 /// Width of the label that follows the pointer while a task is dragged.
 const DRAG_LABEL_WIDTH: f32 = 240.0;

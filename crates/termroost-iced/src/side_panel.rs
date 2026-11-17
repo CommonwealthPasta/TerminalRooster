@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::app::{App, Message};
 use crate::icons::Icon;
 use crate::keymap::Action;
-use crate::sidebar::icon_button;
 use crate::theme::{self, BOLD};
+use crate::ui::icon_button;
 
 /// Which tab the right panel shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,7 +69,7 @@ impl App {
             );
         }
         let hide = match current.action() {
-            Some(action) => self.keymap.hint("Hide panel", action),
+            Some(action) => self.keymap.tip("Hide panel", action),
             None => "Hide panel".to_owned(),
         };
         let header = row![tabs, space::horizontal(), icon_button(Icon::Close, Message::ClosePanel, hide)]

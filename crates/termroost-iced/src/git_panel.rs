@@ -14,8 +14,9 @@ use termroost_core::git::{Commit, Head, Repo, Tracking};
 use crate::app::{App, Message};
 use crate::icons::Icon;
 use crate::side_panel::SideTab;
-use crate::sidebar::{branch_label, icon_button, muted_text};
-use crate::theme;
+use crate::sidebar::{branch_label, muted_text};
+use crate::theme::{self, Tone};
+use crate::ui::{self, icon_button};
 
 /// How many commits the log shows.
 const LOG_LIMIT: usize = 200;
@@ -337,21 +338,17 @@ fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
     .spacing(6);
     let mut item = column![text(&c.subject).size(13), meta].spacing(2);
     if !c.refs.is_empty() || unpushed {
-        let badge = |label: &str, style: fn(&iced::Theme) -> container::Style| -> Element<'_, Message> {
-            container(text(label.to_owned()).size(10).wrapping(text::Wrapping::None))
-                .padding([1, 6])
-                .style(style)
-                .into()
-        };
         let head_branch = c.head.then(|| c.refs.first()).flatten();
         let mut badges: Vec<Element<'_, Message>> = Vec::new();
         if unpushed {
-            badges.push(badge("not pushed", theme::warning_badge));
+            badges.push(ui::badge("not pushed", Tone::Warning));
         }
         badges.extend(
-            c.refs.iter().map(|r| badge(r, if Some(r) == head_branch { theme::accent_badge } else { theme::badge })),
+            c.refs
+                .iter()
+                .map(|r| ui::badge(r.as_str(), if Some(r) == head_branch { Tone::Accent } else { Tone::Neutral })),
         );
-        item = item.push(row(badges).spacing(4).wrap());
+        item = item.push(row(badges).spacing(4).wrap().vertical_spacing(4));
     }
     item.into()
 }

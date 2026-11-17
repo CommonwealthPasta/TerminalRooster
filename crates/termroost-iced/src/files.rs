@@ -24,8 +24,9 @@ use crate::app::{App, Message};
 use crate::icons::{Icon, icon};
 use crate::reveal;
 use crate::side_panel::SideTab;
-use crate::sidebar::{icon_button, muted_text, short_dir};
+use crate::sidebar::{muted_text, short_dir};
 use crate::theme;
+use crate::ui::icon_button;
 
 /// Entries shown per folder; the rest are counted.
 const MAX_ENTRIES: usize = 1000;

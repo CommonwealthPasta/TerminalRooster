@@ -11,9 +11,10 @@ use crate::keymap::Action;
 use crate::leave_room::leave_room;
 use crate::notify::Category;
 use crate::side_panel::SideTab;
-use crate::sidebar::{ICON_BUTTON_WIDTH, branch_label, icon_button, muted_text, short_dir};
+use crate::sidebar::{branch_label, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
-use crate::theme::{self, BOLD};
+use crate::theme::{self, BOLD, Tone};
+use crate::ui::{ICON_BUTTON_WIDTH, icon_button, tip};
 use crate::worktree::WorktreeMsg;
 
 /// Space between the buttons of a terminal's title bar.
@@ -77,11 +78,9 @@ impl App {
                 .padding([3, 10])
                 .style(button::secondary)
                 .on_press(Message::Worktree(WorktreeMsg::Open));
-            header = header.push(tooltip(
+            header = header.push(tip(
                 worktrees,
-                container(text("Switch this session to another git worktree, or make a new one").size(12))
-                    .padding([4, 8])
-                    .style(container::rounded_box),
+                "Switch this session to another git worktree, or make a new one",
                 tooltip::Position::Bottom,
             ));
         }
@@ -161,18 +160,17 @@ impl App {
             };
             title_row = title_row.push(
                 container(text(label).size(11).wrapping(text::Wrapping::None))
-                    .padding([1, 6])
-                    .style(theme::notice_chip(n.category))
+                    .padding([1, 7])
+                    .style(theme::badge(theme::notice_tone(n.category)))
                     .clip(true),
             );
         }
         if let Some((kind, label)) = agent {
-            // Drawn on `theme::badge`, so one-color logos take its text color.
-            let icon = agent_icon(kind, 12.0, |t| t.extended_palette().secondary.base.text);
+            let icon = agent_icon(kind, 12.0, theme::ink);
             // The label is cut inside the badge's padding, so a short badge keeps its rounded end.
             let label = container(text(label).size(11).wrapping(text::Wrapping::None)).clip(true);
             let badge = row![icon, label].spacing(4).align_y(Alignment::Center);
-            title_row = title_row.push(container(badge).padding([1, 6]).style(theme::badge).clip(true));
+            title_row = title_row.push(container(badge).padding([1, 7]).style(theme::badge(Tone::Neutral)).clip(true));
         }
         title_row = title_row.push(container(text(title).size(12).wrapping(text::Wrapping::None)).clip(true));
 
@@ -186,21 +184,21 @@ impl App {
             icon_button(
                 Icon::SplitRight,
                 Message::Split(pane, Axis::Vertical),
-                k.hint("Split right", Action::SplitRight)
+                k.tip("Split right", Action::SplitRight)
             ),
             icon_button(
                 Icon::SplitDown,
                 Message::Split(pane, Axis::Horizontal),
-                k.hint("Split down", Action::SplitDown)
+                k.tip("Split down", Action::SplitDown)
             ),
-            icon_button(Icon::Close, Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
+            icon_button(Icon::Close, Message::ClosePane(pane), k.tip("Close terminal", Action::CloseTerminal)),
         ]
         .spacing(CONTROL_SPACING)
         .align_y(Alignment::Center);
         // Narrow panes get only the essentials. Keep `COMPACT_CONTROLS_WIDTH` in step.
         let compact = row![
             icon_button(Icon::Settings, Message::PaneSettings(pane), "Terminal settings, agents & resume command"),
-            icon_button(Icon::Close, Message::ClosePane(pane), k.hint("Close terminal", Action::CloseTerminal)),
+            icon_button(Icon::Close, Message::ClosePane(pane), k.tip("Close terminal", Action::CloseTerminal)),
         ]
         .spacing(CONTROL_SPACING)
         .align_y(Alignment::Center);

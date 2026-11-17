@@ -414,10 +414,18 @@ impl Keymap {
         taken
     }
 
-    /// `"label (first shortcut)"` for tooltips.
+    /// `"label (first shortcut)"`, such as for a field's placeholder.
     pub fn hint(&self, label: &str, action: Action) -> String {
         match self.combos(action).first() {
             Some(c) => format!("{label} ({c})"),
+            None => label.to_owned(),
+        }
+    }
+
+    /// A tooltip for `action`: `label`, then its first shortcut on a line of its own.
+    pub fn tip(&self, label: &str, action: Action) -> String {
+        match self.combos(action).first() {
+            Some(c) => format!("{label}\n{c}"),
             None => label.to_owned(),
         }
     }
