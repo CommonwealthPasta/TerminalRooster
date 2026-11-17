@@ -207,7 +207,7 @@ cargo xtask package                                  # or: cargo xtask package d
 
 The packages land in `dist/`. A binary only runs on systems whose glibc is at least as new as the one it was built against, so locally built packages suit your own machine. For packages to share, use the CI build.
 
-**On GitHub:** push a tag that matches the version, e.g. `git tag v0.1.0 && git push origin v0.1.0`. The *Release packages* workflow builds both packages on Ubuntu 22.04, so they also run on older distributions, and attaches them to the release. You can also run it from the Actions tab to get the packages as a download.
+**On GitHub:** push a tag that matches the version, e.g. `git tag v0.2.0 && git push origin v0.2.0`. The *Release packages* workflow builds both packages on Ubuntu 22.04, so they also run on older distributions, and attaches them to the release. You can also run it from the Actions tab to get the packages as a download.
 
 **New version:**
 1. Bump `version` in `Cargo.toml`.
