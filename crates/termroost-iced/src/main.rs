@@ -20,6 +20,7 @@ mod logging;
 mod notify;
 mod on_escape;
 mod panes;
+mod remotes;
 mod reorder;
 mod reveal;
 mod settings;

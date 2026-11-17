@@ -228,12 +228,7 @@ impl Repo {
     /// last fetch. `unpushed` covers the newest `limit` commits of HEAD, or
     /// of every branch when `all`.
     pub fn tracking(&self, all: bool, limit: usize) -> Result<Tracking, String> {
-        let remotes: Vec<String> = git(&self.worktree, &["remote"])?
-            .lines()
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(Into::into)
-            .collect();
+        let remotes = self.remotes()?;
         if remotes.is_empty() {
             return Ok(Tracking::default());
         }
@@ -243,18 +238,20 @@ impl Repo {
             let line = git(&self.worktree, &["for-each-ref", format, &format!("refs/heads/{branch}")])?;
             let mut parts = line.trim_end().split('\t');
             let (upstream, remote) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-            // An upstream whose remote branch was deleted fails to count, and counts as none.
+            // The remote the branch is set to use counts even while its branch
+            // there is missing: not pushed yet, or deleted.
+            t.remote = Some(remote.to_owned()).filter(|r| !r.is_empty());
+            // A missing remote branch fails to count, and counts as no upstream.
             if !upstream.is_empty()
                 && let Ok(counts) = git(&self.worktree, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
             {
                 let mut n = counts.split_whitespace().map(|n| n.parse().unwrap_or(0));
                 (t.ahead, t.behind) = (n.next().unwrap_or(0), n.next().unwrap_or(0));
                 t.upstream = Some(upstream.to_owned());
-                t.remote = Some(remote.to_owned()).filter(|r| !r.is_empty());
             }
         }
         if t.remote.is_none() {
-            t.remote = remotes.iter().find(|r| *r == "origin").or(remotes.first()).cloned();
+            t.remote = remotes.iter().find(|r| r.name == "origin").or(remotes.first()).map(|r| r.name.clone());
         }
         // A new repository has no HEAD commit to list from.
         if all || self.head_commit().is_some() {
@@ -263,7 +260,25 @@ impl Repo {
             let out = git(&self.worktree, &["rev-list", tips, "--not", "--remotes", &max])?;
             t.unpushed = out.lines().map(str::trim).filter(|l| !l.is_empty()).map(Into::into).collect();
         }
+        t.remotes = remotes;
         Ok(t)
+    }
+
+    /// The repository's remotes, in the order `git remote` lists them.
+    pub fn remotes(&self) -> Result<Vec<Remote>, String> {
+        let mut remotes: Vec<Remote> = git(&self.worktree, &["remote"])?
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| Remote { name: name.to_owned(), url: String::new(), push_url: None })
+            .collect();
+        if !remotes.is_empty() {
+            // Read from the config, so URLs show as they were set rather than
+            // rewritten by `insteadOf`. git fails when no URL is set at all.
+            let urls = git(&self.worktree, &["config", "-z", "--get-regexp", r"^remote\..*\.(url|pushurl)$"]);
+            fill_remote_urls(&mut remotes, &urls.unwrap_or_default());
+        }
+        Ok(remotes)
     }
 
     /// Pushes the checked-out branch. A branch without an upstream is pushed
@@ -314,6 +329,44 @@ impl Repo {
         })
     }
 
+    /// Makes the checked-out branch pull from and push to `remote`, tracking
+    /// the same branch it tracks now (or one of its own name) there. The
+    /// remote is fetched first, so how the branch stands against it is
+    /// current; when that fails, nothing changes. Returns what happened, in
+    /// a sentence.
+    pub fn use_remote(&self, remote: &str) -> Result<String, String> {
+        let Some(Head::Branch(branch)) = self.head() else {
+            return Err("Not on a branch: check one out to choose its remote.".into());
+        };
+        let merge_key = format!("branch.{branch}.merge");
+        // git fails when it is not set.
+        let merge = git(&self.worktree, &["config", "--get", &merge_key])
+            .map(|m| m.trim().to_owned())
+            .ok()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| format!("refs/heads/{branch}"));
+        git_remote(&self.worktree, &["fetch", "--", remote])
+            .map_err(|e| format!("Could not fetch {remote}, so {branch} was left as it was.\n{e}"))?;
+        git(&self.worktree, &["config", &format!("branch.{branch}.remote"), remote])?;
+        git(&self.worktree, &["config", &merge_key, &merge])?;
+        let name = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        Ok(match self.tracking(false, 1)?.upstream {
+            Some(upstream) => format!("{branch} now pulls from and pushes to {upstream}."),
+            None => format!("{branch} now uses {remote}, which has no {name} branch yet: Push makes it."),
+        })
+    }
+
+    /// Adds a remote called `name` at `url`. Nothing is fetched from it yet.
+    pub fn add_remote(&self, name: &str, url: &str) -> Result<(), String> {
+        git(&self.worktree, &["remote", "add", "--", name, url]).map(drop)
+    }
+
+    /// Points the remote `name` at `url`: fetches come from there, and so do
+    /// pushes unless the remote has a push URL of its own.
+    pub fn set_remote_url(&self, name: &str, url: &str) -> Result<(), String> {
+        git(&self.worktree, &["remote", "set-url", "--", name, url]).map(drop)
+    }
+
     /// The latest `limit` commits of this working tree's HEAD, or of every
     /// branch and tag when `all`, newest first.
     pub fn log(&self, all: bool, limit: usize) -> Result<Vec<Commit>, String> {
@@ -345,15 +398,17 @@ impl Repo {
         packed.lines().find_map(|l| l.strip_suffix(target)?.strip_suffix(' ').map(str::to_owned))
     }
 
-    /// A fingerprint of where HEAD and every branch and tag point. It changes
-    /// when a commit, checkout, reset, rebase or fetch moves a ref. It only
-    /// reads files, so it can be checked often to decide when to run `git log`.
+    /// A fingerprint of where HEAD and every branch and tag point, and of the
+    /// repository's config. It changes when a commit, checkout, reset, rebase
+    /// or fetch moves a ref, and when a remote or the branch a branch tracks
+    /// changes. It only reads files, so it can be checked often to decide
+    /// when to run `git log`.
     pub fn ref_stamp(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let read = |p: &Path| std::fs::read(p).ok();
         read(&self.git_dir.join("HEAD")).hash(&mut h);
-        for file in ["packed-refs", "reftable/tables.list"] {
+        for file in ["config", "packed-refs", "reftable/tables.list"] {
             read(&self.common_dir.join(file)).hash(&mut h);
         }
         let mut dirs = vec![self.common_dir.join("refs")];
@@ -381,8 +436,9 @@ impl Repo {
 /// last fetch (or pull, or push) saw of them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tracking {
-    /// Where a push goes: the upstream's remote, else `origin`, else the
-    /// first remote. `None` when the repository has no remote.
+    /// The remote the checked-out branch pulls from and pushes to: the one
+    /// it is set to track, else `origin`, else the first remote. `None` when
+    /// the repository has no remote.
     pub remote: Option<String>,
     /// The branch the checked-out branch tracks, such as `origin/main`.
     pub upstream: Option<String>,
@@ -392,6 +448,36 @@ pub struct Tracking {
     pub behind: usize,
     /// Commits that are on no remote branch at all.
     pub unpushed: HashSet<String>,
+    /// Every remote of the repository.
+    pub remotes: Vec<Remote>,
+}
+
+/// A remote of a repository: somewhere its branches are fetched from and
+/// pushed to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remote {
+    pub name: String,
+    /// Where it is fetched from, as set; empty when it has no URL.
+    pub url: String,
+    /// Where pushes go, when that is set apart from `url`.
+    pub push_url: Option<String>,
+}
+
+/// Fills in the URLs of `remotes` from `git config -z --get-regexp` output:
+/// `remote.<name>.url\n<url>\0` per entry. A remote's first URL counts, as
+/// for git.
+fn fill_remote_urls(remotes: &mut [Remote], out: &str) {
+    for entry in out.split('\0') {
+        let Some((key, value)) = entry.split_once('\n') else { continue };
+        // Remote names may contain dots; the variable is after the last one.
+        let Some((name, var)) = key.strip_prefix("remote.").and_then(|k| k.rsplit_once('.')) else { continue };
+        let Some(remote) = remotes.iter_mut().find(|r| r.name == name) else { continue };
+        match var {
+            "url" if remote.url.is_empty() => remote.url = value.to_owned(),
+            "pushurl" if remote.push_url.is_none() => remote.push_url = Some(value.to_owned()),
+            _ => {}
+        }
+    }
 }
 
 /// One commit, as `git log` lists it.
@@ -941,6 +1027,11 @@ mod tests {
         assert_eq!(repo.log(false, 50).unwrap()[0].subject, "second");
         assert_eq!(repo.log(false, 1).unwrap().len(), 1);
 
+        // A new remote changes it too, though no ref moved.
+        let stamp = repo.ref_stamp();
+        run(&["remote", "add", "fork", "../fork.git"]).unwrap();
+        assert_ne!(repo.ref_stamp(), stamp);
+
         // A commit on another branch shows only in the log of every branch.
         run(&["switch", "-q", "-c", "side"]).unwrap();
         commit("on side");
@@ -1114,5 +1205,146 @@ mod tests {
         assert!(lone.push().unwrap_err().contains("no remote"));
         git(&a.worktree, &["switch", "-q", "--detach"]).unwrap();
         assert!(a.push().unwrap_err().contains("Not on a branch"));
+    }
+
+    /// A bare repository in `dir` standing in for a remote; `None` without git.
+    fn bare(dir: &Path, name: &str) -> Option<PathBuf> {
+        let path = dir.join(name);
+        git(dir, &["init", "-q", "--bare", "-b", "main", &path.to_string_lossy()]).ok()?;
+        Some(path)
+    }
+
+    /// A clone of `remote` in `dir`, on `main`, with its own identity.
+    fn clone_repo(dir: &Path, remote: &Path, name: &str) -> Repo {
+        let path = dir.join(name);
+        git(dir, &["clone", "-q", &remote.to_string_lossy(), &path.to_string_lossy()]).unwrap();
+        for (key, value) in [("user.name", name), ("user.email", "t@t"), ("commit.gpgsign", "false")] {
+            git(&path, &["config", key, value]).unwrap();
+        }
+        git(&path, &["switch", "-q", "-C", "main"]).unwrap();
+        Repo::discover(&path).unwrap()
+    }
+
+    /// A branch set to use a remote that does not have it yet is pushed
+    /// there, not to origin. With git installed.
+    #[test]
+    fn pushes_to_the_remote_a_branch_is_set_to_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(origin) = bare(dir.path(), "origin.git") else {
+            eprintln!("git not available; skipping");
+            return;
+        };
+        let fork = bare(dir.path(), "fork.git").unwrap();
+        let a = clone_repo(dir.path(), &origin, "a");
+        git(&a.worktree, &["commit", "-q", "--allow-empty", "-m", "one"]).unwrap();
+        a.push().unwrap();
+        git(&a.worktree, &["remote", "add", "fork", &fork.to_string_lossy()]).unwrap();
+        git(&a.worktree, &["config", "branch.main.remote", "fork"]).unwrap();
+
+        let t = a.tracking(false, 50).unwrap();
+        assert_eq!((t.remote.as_deref(), t.upstream.as_deref()), (Some("fork"), None));
+        assert_eq!(a.push().unwrap(), "Pushed main to fork, which it now tracks.");
+        let t = a.tracking(false, 50).unwrap();
+        assert_eq!((t.remote.as_deref(), t.upstream.as_deref()), (Some("fork"), Some("fork/main")));
+    }
+
+    /// Moving a branch from one remote to another, with git installed.
+    #[test]
+    fn switches_remotes_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(origin) = bare(dir.path(), "origin.git") else {
+            eprintln!("git not available; skipping");
+            return;
+        };
+        let fork = bare(dir.path(), "fork.git").unwrap();
+        let a = clone_repo(dir.path(), &origin, "a");
+        let run = |args: &[&str]| git(&a.worktree, args).unwrap();
+        run(&["commit", "-q", "--allow-empty", "-m", "one"]);
+        a.push().unwrap();
+        run(&["remote", "add", "fork", &fork.to_string_lossy()]);
+        let standing = || {
+            let t = a.tracking(false, 50).unwrap();
+            (t.remote.unwrap(), t.upstream, t.ahead, t.behind)
+        };
+
+        // fork has no main yet; the first push makes it.
+        assert_eq!(a.use_remote("fork").unwrap(), "main now uses fork, which has no main branch yet: Push makes it.");
+        assert_eq!(standing(), ("fork".into(), None, 0, 0));
+        assert_eq!(a.push().unwrap(), "Pushed main to fork, which it now tracks.");
+
+        // Back on origin, a commit made meanwhile is counted at once.
+        run(&["commit", "-q", "--allow-empty", "-m", "two"]);
+        assert_eq!(a.use_remote("origin").unwrap(), "main now pulls from and pushes to origin/main.");
+        assert_eq!(standing(), ("origin".into(), Some("origin/main".into()), 1, 0));
+
+        // A remote that can't be fetched leaves the branch as it was.
+        run(&["remote", "add", "gone", &dir.path().join("gone.git").to_string_lossy()]);
+        let err = a.use_remote("gone").unwrap_err();
+        assert!(err.starts_with("Could not fetch gone, so main was left as it was.\n"), "{err}");
+        assert_eq!(standing().0, "origin");
+
+        // A branch tracking another name keeps tracking that name.
+        run(&["switch", "-q", "-c", "feature", "--track", "origin/main"]);
+        assert_eq!(a.use_remote("fork").unwrap(), "feature now pulls from and pushes to fork/main.");
+
+        run(&["switch", "-q", "--detach"]);
+        assert!(a.use_remote("origin").unwrap_err().contains("Not on a branch"));
+    }
+
+    #[test]
+    fn reads_remote_urls() {
+        let remote = |name: &str| Remote { name: name.into(), url: String::new(), push_url: None };
+        let mut remotes = vec![remote("origin"), remote("my.fork"), remote("bare")];
+        let out = "remote.origin.url\nhttps://example.com/a.git\0remote.my.fork.url\nD:/My Repos/b.git\0\
+                   remote.my.fork.pushurl\ngit@example.com:me/b.git\0remote.origin.url\nsecond\0\
+                   remote.gone.url\nx\0";
+        fill_remote_urls(&mut remotes, out);
+        assert_eq!(remotes[0].url, "https://example.com/a.git", "the first URL counts");
+        assert_eq!(remotes[0].push_url, None);
+        assert_eq!(remotes[1].url, "D:/My Repos/b.git");
+        assert_eq!(remotes[1].push_url.as_deref(), Some("git@example.com:me/b.git"));
+        assert_eq!(remotes[2], remote("bare"));
+    }
+
+    /// Remotes and their URLs, with git installed.
+    #[test]
+    fn lists_remotes_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(origin) = bare(dir.path(), "origin.git") else {
+            eprintln!("git not available; skipping");
+            return;
+        };
+        let a = clone_repo(dir.path(), &origin, "a");
+        let run = |args: &[&str]| git(&a.worktree, args).unwrap();
+        run(&["remote", "add", "fork", "../fork.git"]);
+        run(&["remote", "set-url", "--push", "fork", "git@example.com:me/fork.git"]);
+        // Shown as set, not as rewritten.
+        run(&["config", "url.https://example.com/.insteadOf", "ex:"]);
+        run(&["remote", "add", "ex", "ex:x.git"]);
+
+        let remotes = a.remotes().unwrap();
+        let names: Vec<&str> = remotes.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["ex", "fork", "origin"]);
+        assert_eq!(remotes[0].url, "ex:x.git");
+        assert_eq!(remotes[1].url, "../fork.git");
+        assert_eq!(remotes[1].push_url.as_deref(), Some("git@example.com:me/fork.git"));
+        assert!(remotes[2].url.ends_with("origin.git"), "{}", remotes[2].url);
+        assert_eq!(a.tracking(false, 50).unwrap().remotes, remotes);
+
+        // Adding and changing them.
+        a.add_remote("up", "https://example.com/up.git").unwrap();
+        assert!(a.add_remote("up", "x").unwrap_err().contains("already exists"));
+        assert!(a.add_remote("a b", "x").unwrap_err().contains("not a valid remote name"));
+        a.set_remote_url("fork", "https://example.com/fork.git").unwrap();
+        assert!(a.set_remote_url("nope", "x").unwrap_err().contains("No such remote"));
+        let remotes = a.remotes().unwrap();
+        let find = |name: &str| remotes.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(find("up").url, "https://example.com/up.git");
+        assert_eq!(find("fork").url, "https://example.com/fork.git");
+        assert_eq!(find("fork").push_url.as_deref(), Some("git@example.com:me/fork.git"), "kept");
+
+        let lone = dir.path().join("lone");
+        git(dir.path(), &["init", "-q", &lone.to_string_lossy()]).unwrap();
+        assert_eq!(Repo::discover(&lone).unwrap().remotes().unwrap(), Vec::new());
     }
 }

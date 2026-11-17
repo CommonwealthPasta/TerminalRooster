@@ -23,6 +23,7 @@ use crate::groups;
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
+use crate::remotes::{RemotesForm, RemotesMsg};
 use crate::side_panel::SideTab;
 use crate::terminal_view::{self, KeyboardFocus};
 use crate::theme;
@@ -190,6 +191,8 @@ pub enum Dialog {
     Worktree(Box<WorktreeForm>),
     /// Ask before removing a worktree, which closes its sessions.
     RemoveWorktree(Box<RemoveForm>),
+    /// Add remotes to the Git tab's repository, or change their URLs.
+    Remotes(Box<RemotesForm>),
     /// Quitting while terminals still run programs, or files have unsaved changes.
     ConfirmQuit {
         running: Vec<RunningTerminal>,
@@ -433,11 +436,12 @@ pub enum Message {
     RemoveWorktree(RemoveMsg),
     LogRead(LogRead),
     LogAllBranches(bool),
-    /// Pull or push the Git tab's repository.
+    /// Pull, push or change the remote of the Git tab's repository.
     GitSync(SyncOp),
     GitSynced(PathBuf, Result<String, String>),
     PullRebase(bool),
     DismissSync,
+    Remotes(RemotesMsg),
 
     DismissError,
     DismissNotice,
@@ -480,7 +484,7 @@ pub struct App {
     git_polling: bool,
     /// The log in the side panel's Git tab.
     pub(crate) git_log: Option<GitLog>,
-    /// The Git tab's last pull or push.
+    /// The Git tab's last pull, push or change of remote.
     pub(crate) git_sync: Option<GitSync>,
     /// The log is being read.
     pub(crate) log_reading: bool,
@@ -1011,6 +1015,12 @@ impl App {
                 if matches!(self.dialog, Some(Dialog::CodexTrust(_))) {
                     return Task::none();
                 }
+                // A remote's URL being changed: stop changing it, not the dialog.
+                if let Some(Dialog::Remotes(f)) = &self.dialog
+                    && f.editing.is_some()
+                {
+                    return self.update(Message::Remotes(RemotesMsg::CancelEdit));
+                }
                 if self.dialog.is_some() {
                     return self.update(Message::DialogCancel);
                 }
@@ -1479,6 +1489,7 @@ impl App {
                     // git is making the worktree; the result moves the session.
                     Some(Dialog::Worktree(f)) if f.creating => return Task::none(),
                     Some(Dialog::RemoveWorktree(f)) if f.removing => return Task::none(),
+                    Some(Dialog::Remotes(f)) if f.busy.is_some() => return Task::none(),
                     Some(Dialog::RemoveWorktree(_)) => {
                         self.cancel_remove();
                         return self.focus_active();
@@ -1735,6 +1746,7 @@ impl App {
                 self.mark_prefs();
             }
             Message::DismissSync => self.git_sync = None,
+            Message::Remotes(msg) => return self.update_remotes(msg),
             Message::LogAllBranches(all) => {
                 self.prefs.log_all_branches = all;
                 self.mark_prefs();
@@ -1811,6 +1823,10 @@ impl App {
             Dialog::RemoveWorktree(form) => {
                 self.dialog = Some(Dialog::RemoveWorktree(form));
                 return self.update_remove(RemoveMsg::Confirm);
+            }
+            Dialog::Remotes(form) => {
+                self.dialog = Some(Dialog::Remotes(form));
+                return self.update_remotes(RemotesMsg::Add);
             }
             Dialog::CloseFile { doc, editor: None, .. } => return self.save_doc(doc, true, false),
             Dialog::CloseFile { doc, editor: Some(_), .. } => {

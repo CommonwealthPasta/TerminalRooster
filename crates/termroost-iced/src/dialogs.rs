@@ -257,6 +257,7 @@ impl App {
             }
             Dialog::Worktree(form) => self.view_worktree(form),
             Dialog::RemoveWorktree(form) => self.view_remove(form),
+            Dialog::Remotes(form) => self.view_remotes(form),
             Dialog::CodexHook => DialogParts::new(
                 "Track Codex sessions?",
                 column![
@@ -349,8 +350,8 @@ impl App {
                 DialogParts::new("Terminal settings", body).confirm("Save", false)
             }
         };
-        // The worktree list needs room for a path and its buttons.
-        let width = if matches!(dialog, Dialog::Worktree(_)) { 620.0 } else { 500.0 };
+        // The worktree and remote lists need room for a path or URL and its buttons.
+        let width = if matches!(dialog, Dialog::Worktree(_) | Dialog::Remotes(_)) { 620.0 } else { 500.0 };
         modal(parts, width, true)
     }
 }

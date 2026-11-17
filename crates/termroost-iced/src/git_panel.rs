@@ -1,18 +1,19 @@
 //! The Git tab of the side panel: the log of the visible session's
 //! repository, between the Tasks and Files tabs. It follows new commits:
-//! every git poll compares the repository's refs, and reads the log again
-//! when they moved. Commits that are on no remote are marked, and the
-//! branch's distance to its upstream is shown, with Pull (rebasing by
-//! default) and Push.
+//! every git poll compares the repository's refs and config, and reads the
+//! log again when they changed. Commits that are on no remote are marked,
+//! and the branch's distance to its upstream is shown, with Pull (rebasing
+//! by default) and Push.
 
 use std::path::PathBuf;
 
-use iced::widget::{column, container, row, space, text};
+use iced::widget::{column, container, pick_list, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
 use crate::icons::Icon;
+use crate::remotes::RemotesMsg;
 use crate::side_panel::SideTab;
 use crate::sidebar::{branch_label, muted_text};
 use crate::theme::{self, Tone};
@@ -21,14 +22,16 @@ use crate::ui::{self, icon_button};
 /// How many commits the log shows.
 const LOG_LIMIT: usize = 200;
 
-/// What the Git tab's buttons do with the remote.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the Git tab does with the remote.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncOp {
     Pull,
     Push,
+    /// Make the checked-out branch pull from and push to this remote.
+    UseRemote(String),
 }
 
-/// A pull or push: running while `result` is `None`.
+/// A pull, push or change of remote: running while `result` is `None`.
 #[derive(Clone, Debug)]
 pub struct GitSync {
     pub worktree: PathBuf,
@@ -88,7 +91,7 @@ fn ago(time: i64, now: i64) -> String {
 
 impl App {
     /// The repository of the session on screen, when it is in one.
-    fn active_repo(&self) -> Option<&Repo> {
+    pub(crate) fn active_repo(&self) -> Option<&Repo> {
         let tab = self.core.state().active_tab()?;
         Some(&self.git_of(tab)?.repo)
     }
@@ -194,6 +197,9 @@ impl App {
 
         let tracking = self.git_log.as_ref().and_then(|l| l.tracking.as_ref());
         let mut title = title;
+        if let Some(t) = tracking {
+            title = title.push(self.remote_row(t, head));
+        }
         if let Some(status) = tracking.and_then(|t| remote_status(t, head)) {
             title = title.push(muted_text(status).size(12));
         }
@@ -220,13 +226,72 @@ impl App {
         column![title, body].spacing(10).into()
     }
 
+    /// The pull, push or change of remote that is running, if any.
+    fn running_sync(&self) -> Option<&SyncOp> {
+        self.git_sync.as_ref().filter(|s| s.result.is_none()).map(|s| &s.op)
+    }
+
+    /// The remote the branch pulls from and pushes to, and its URLs. With
+    /// more than one remote, a menu picks another for the branch; a button
+    /// opens the Remotes dialog.
+    fn remote_row<'a>(&'a self, t: &'a Tracking, head: Option<&Head>) -> Element<'a, Message> {
+        let open = Message::Remotes(RemotesMsg::Open);
+        let Some(current) = t.remote.as_deref() else {
+            let add = ui::small_with_icon(Icon::Plus, "Add remote", theme::button_secondary).on_press(open);
+            return row![muted_text("No remote yet").size(12), space::horizontal(), add]
+                .align_y(Alignment::Center)
+                .into();
+        };
+        let switching = match self.running_sync() {
+            Some(SyncOp::UseRemote(r)) => Some(r.as_str()),
+            _ => None,
+        };
+        let shown = switching.unwrap_or(current);
+        let can_pick = self.running_sync().is_none() && matches!(head, Some(Head::Branch(_))) && t.remotes.len() > 1;
+        let name: Element<'_, Message> = if can_pick {
+            let names: Vec<String> = t.remotes.iter().map(|r| r.name.clone()).collect();
+            let chosen = current.to_owned();
+            pick_list(names, Some(chosen.clone()), move |r: String| {
+                if r == chosen { Message::Noop } else { Message::GitSync(SyncOp::UseRemote(r)) }
+            })
+            .text_size(12)
+            .padding([2, 8])
+            .style(theme::dropdown)
+            .menu_style(theme::dropdown_menu)
+            .into()
+        } else {
+            text(shown).size(12).font(theme::SEMIBOLD).into()
+        };
+        let remote = t.remotes.iter().find(|r| r.name == shown);
+        // URLs have no spaces to break at.
+        let url = |s: String| muted_text(s).wrapping(text::Wrapping::WordOrGlyph);
+        let manage = icon_button(Icon::Edit, open, "Add or change remotes");
+        let mut col = column![
+            row![muted_text("Remote").size(12), name, space::horizontal(), manage]
+                .spacing(8)
+                .align_y(Alignment::Center)
+        ];
+        col = col.push(match remote.map(|r| r.url.as_str()).filter(|u| !u.is_empty()) {
+            Some(u) => url(u.to_owned()),
+            None => muted_text("No URL"),
+        });
+        if let Some(push) = remote.and_then(|r| r.push_url.as_deref()) {
+            col = col.push(url(format!("Pushes to {push}")));
+        }
+        if let Some(r) = switching {
+            col = col.push(muted_text(format!("Fetching {r}…")));
+        }
+        col.spacing(2).into()
+    }
+
     /// Pull (rebasing or not) and Push, for a repository with a remote.
     fn sync_buttons<'a>(&'a self, t: &Tracking, head: Option<&Head>) -> Element<'a, Message> {
-        let running = self.git_sync.as_ref().filter(|s| s.result.is_none()).map(|s| s.op);
+        let running = self.running_sync();
         let on_branch = matches!(head, Some(Head::Branch(_)));
         let idle = running.is_none() && on_branch;
         let action = |glyph: Icon, label: &'a str, busy: &'a str, op: SyncOp, enabled: bool| {
-            ui::small_with_icon(glyph, if running == Some(op) { busy } else { label }, theme::button_secondary)
+            let label = if running == Some(&op) { busy } else { label };
+            ui::small_with_icon(glyph, label, theme::button_secondary)
                 .on_press_maybe((idle && enabled).then_some(Message::GitSync(op)))
         };
         row![
@@ -241,7 +306,8 @@ impl App {
         .into()
     }
 
-    /// What the last pull or push of this repository did, until dismissed.
+    /// What the last pull, push or change of remote of this repository did,
+    /// until dismissed.
     fn sync_note(&self) -> Option<Element<'_, Message>> {
         let sync = self.git_sync.as_ref()?;
         let shown = self.git_log.as_ref().is_some_and(|l| l.worktree == sync.worktree);
@@ -257,20 +323,22 @@ impl App {
         Some(ui::note(tone, line))
     }
 
-    /// Pulls or pushes the Git tab's repository on a thread.
+    /// Pulls, pushes or changes the remote of the Git tab's repository on a
+    /// thread.
     pub(crate) fn start_sync(&mut self, op: SyncOp) -> Task<Message> {
-        if self.git_sync.as_ref().is_some_and(|s| s.result.is_none()) {
+        if self.running_sync().is_some() {
             return Task::none();
         }
         let Some(repo) = self.active_repo().cloned() else { return Task::none() };
         let rebase = self.prefs.pull_rebase;
-        self.git_sync = Some(GitSync { worktree: repo.worktree.clone(), op, result: None });
         tracing::info!(repo = %repo.worktree.display(), ?op, rebase, "git sync started");
+        self.git_sync = Some(GitSync { worktree: repo.worktree.clone(), op: op.clone(), result: None });
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let result = match op {
                 SyncOp::Pull => repo.pull(rebase),
                 SyncOp::Push => repo.push(),
+                SyncOp::UseRemote(remote) => repo.use_remote(&remote),
             };
             let _ = tx.send_blocking((repo.worktree, result));
         });
@@ -280,7 +348,8 @@ impl App {
         })
     }
 
-    /// Shows how a pull or push went, and reads the log again right away.
+    /// Shows how a pull, push or change of remote went, and reads the log
+    /// again right away.
     pub(crate) fn sync_done(&mut self, worktree: PathBuf, result: Result<String, String>) -> Task<Message> {
         match &result {
             Ok(done) => tracing::info!(repo = %worktree.display(), "{done}"),
@@ -360,7 +429,7 @@ mod tests {
             upstream: upstream.map(Into::into),
             ahead,
             behind,
-            unpushed: Default::default(),
+            ..Tracking::default()
         };
         let status = |t: Tracking| remote_status(&t, Some(&main));
         assert_eq!(status(t(Some("origin/main"), 0, 0)).unwrap(), "Up to date with origin/main");
