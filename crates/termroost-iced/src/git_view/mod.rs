@@ -84,13 +84,32 @@ pub enum GitViewMsg {
     DragLine(DocId, usize),
     /// Choose no lines.
     ClearChosen(DocId),
-    DismissChangesError(DocId),
+    /// Typing and moving about in the commit message.
+    MessageEdit(DocId, iced::widget::text_editor::Action),
+    /// Amend the last commit instead of making a new one.
+    Amend(DocId, bool),
+    /// The last commit's message, read to amend it.
+    LastMessage(DocId, Result<String, String>),
+    /// Commit what is staged with the message written.
+    Commit(DocId),
+    /// It was committed (what happened) or why not, and the changes read again.
+    Committed(DocId, u64, Result<String, String>, Box<Result<WorkingChanges, String>>),
+    /// Hide the note about the last stage, unstage or commit.
+    DismissNote(DocId),
 }
 
 impl GitViewMsg {
     /// Whether the message may be logged: some carry what is in files.
     pub fn loggable(&self) -> bool {
-        !matches!(self, GitViewMsg::CommitRead(..) | GitViewMsg::ChangesRead(..) | GitViewMsg::Moved(..))
+        !matches!(
+            self,
+            GitViewMsg::CommitRead(..)
+                | GitViewMsg::ChangesRead(..)
+                | GitViewMsg::Moved(..)
+                | GitViewMsg::MessageEdit(..)
+                | GitViewMsg::LastMessage(..)
+                | GitViewMsg::Committed(..)
+        )
     }
 }
 

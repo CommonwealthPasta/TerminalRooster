@@ -515,6 +515,24 @@ pub fn slider_track(t: &Theme, status: slider::Status) -> slider::Style {
     }
 }
 
+/// A box to write more than a line in, such as a commit message: framed
+/// like a field.
+pub fn text_box(t: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let edge_color = match status {
+        text_editor::Status::Active => edge(t),
+        text_editor::Status::Hovered => ink(t).scale_alpha(0.32),
+        text_editor::Status::Focused { .. } => accent(t),
+        text_editor::Status::Disabled => line(t),
+    };
+    text_editor::Style {
+        background: field(t).into(),
+        border: Border { width: 1.0, color: edge_color, radius: RADIUS.into() },
+        placeholder: faint(t),
+        value: ink(t),
+        selection: accent(t).scale_alpha(0.3),
+    }
+}
+
 /// The file editor: square, framed like a terminal, in the accent color while it has the keyboard.
 pub fn file_editor(t: &Theme, status: text_editor::Status) -> text_editor::Style {
     let focused = matches!(status, text_editor::Status::Focused { .. });

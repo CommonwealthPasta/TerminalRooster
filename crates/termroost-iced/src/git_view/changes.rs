@@ -3,6 +3,8 @@
 //! staged changes. Whole files, single hunks or all of a section are staged
 //! and unstaged from here, and so are lines chosen in a hunk: pressed one
 //! by one, dragged over, or with Shift for a range and Ctrl for one more.
+//! What is staged is then committed with a message written above it (or
+//! added to the last commit, amending it).
 //!
 //! While it is on screen, it is read again at every git poll, since agents
 //! change files all the time. Each read is numbered: a read that started
@@ -10,6 +12,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use iced::widget::text_editor;
 use iced::{Task, keyboard};
 use termroost_core::git::{FileDiff, FileStatus, Hunk, LineKind, Repo, WorkingChanges};
 
@@ -120,10 +123,21 @@ pub struct ChangesDoc {
     reading: bool,
     /// A stage or unstage is running.
     pub busy: bool,
-    /// Why the last stage or unstage failed, until the next one.
+    /// Why the last stage, unstage or commit failed, until the next one.
     pub error: Option<String>,
+    /// What the last commit did ("Committed 1a2b3c4."), until the next change.
+    pub done: Option<String>,
     /// Lines chosen in one hunk.
     pub chosen: Option<Chosen>,
+    /// The message of the next commit.
+    pub message: text_editor::Content,
+    /// The next commit replaces the last one.
+    pub amend: bool,
+    /// The last commit's message, put in the box when Amend was ticked: it
+    /// goes again when Amend is unticked, unless it was edited.
+    amend_text: Option<String>,
+    /// A commit is running.
+    pub committing: bool,
 }
 
 impl ChangesDoc {
@@ -137,8 +151,20 @@ impl ChangesDoc {
             reading: false,
             busy: false,
             error: None,
+            done: None,
             chosen: None,
+            message: text_editor::Content::new(),
+            amend: false,
+            amend_text: None,
+            committing: false,
         }
+    }
+
+    /// Whether Commit can be pressed: there is a message, and something
+    /// staged to commit (or a commit to amend).
+    pub fn can_commit(&self) -> bool {
+        let staged = matches!(&self.changes, Some(Ok(c)) if !c.staged.is_empty());
+        !self.busy && (staged || self.amend) && !self.message.text().trim().is_empty()
     }
 
     pub fn folded(&self, section: Section, file: &FileDiff, files_in_section: usize) -> bool {
@@ -321,6 +347,7 @@ impl App {
         c.chosen = None;
         c.busy = true;
         c.error = None;
+        c.done = None;
         c.reads += 1;
         let n = c.reads;
         let repo = c.repo.clone();
@@ -343,6 +370,64 @@ impl App {
                 rx.recv().await.unwrap_or_else(|_| (stopped(), Err("reading the changes stopped".into())))
             },
             move |(done, read)| Message::GitView(GitViewMsg::Moved(doc, n, done, Box::new(read))),
+        )
+    }
+
+    /// Ticks or unticks Amend. Ticked with no message written, the last
+    /// commit's message is read into the box, to be changed or kept.
+    fn set_amend(&mut self, doc: DocId, on: bool) -> Task<Message> {
+        let Some(c) = self.changes_doc_mut(doc).filter(|c| !c.committing) else { return Task::none() };
+        c.amend = on;
+        let text = c.message.text();
+        if !on {
+            // The last message, untouched: it was only there for amending.
+            if c.amend_text.take().is_some_and(|t| t.trim_end() == text.trim_end()) {
+                c.message = text_editor::Content::new();
+            }
+            return Task::none();
+        }
+        if !text.trim().is_empty() {
+            return Task::none();
+        }
+        let repo = c.repo.clone();
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(repo.last_message());
+        });
+        Task::perform(async move { rx.recv().await.unwrap_or_else(|_| Err("reading it stopped".into())) }, move |r| {
+            Message::GitView(GitViewMsg::LastMessage(doc, r))
+        })
+    }
+
+    /// Commits what is staged with the message written, on a thread, then
+    /// reads the changes again there.
+    fn commit(&mut self, doc: DocId) -> Task<Message> {
+        let Some(c) = self.changes_doc_mut(doc) else { return Task::none() };
+        if !c.can_commit() {
+            return Task::none();
+        }
+        let message = c.message.text();
+        let amend = c.amend;
+        c.busy = true;
+        c.committing = true;
+        c.error = None;
+        c.done = None;
+        c.chosen = None;
+        c.reads += 1;
+        let n = c.reads;
+        let repo = c.repo.clone();
+        tracing::info!(repo = %repo.worktree.display(), amend, "committing");
+        let (tx, rx) = async_channel::bounded(1);
+        std::thread::spawn(move || {
+            let done = repo.commit(&message, amend);
+            let _ = tx.send_blocking((done, repo.working_changes()));
+        });
+        Task::perform(
+            async move {
+                let stopped = || Err("committing stopped".to_owned());
+                rx.recv().await.unwrap_or_else(|_| (stopped(), Err("reading the changes stopped".into())))
+            },
+            move |(done, read)| Message::GitView(GitViewMsg::Committed(doc, n, done, Box::new(read))),
         )
     }
 
@@ -388,10 +473,51 @@ impl App {
                     c.chosen = None;
                 }
             }
-            GitViewMsg::DismissChangesError(doc) => {
+            GitViewMsg::DismissNote(doc) => {
                 if let Some(c) = self.changes_doc_mut(doc) {
                     c.error = None;
+                    c.done = None;
                 }
+            }
+            GitViewMsg::MessageEdit(doc, action) => {
+                if let Some(c) = self.changes_doc_mut(doc).filter(|c| !c.committing) {
+                    c.message.perform(action);
+                }
+            }
+            GitViewMsg::Amend(doc, on) => return self.set_amend(doc, on),
+            GitViewMsg::LastMessage(doc, read) => {
+                let Some(c) = self.changes_doc_mut(doc) else { return Task::none() };
+                match read {
+                    // Only into an empty box: what the user wrote meanwhile stays.
+                    Ok(text) if c.amend && c.message.text().trim().is_empty() => {
+                        c.message = text_editor::Content::with_text(&text);
+                        c.amend_text = Some(text);
+                    }
+                    Ok(_) => {}
+                    Err(e) => c.error = Some(format!("Could not read the last commit's message: {e}")),
+                }
+            }
+            GitViewMsg::Commit(doc) => return self.commit(doc),
+            GitViewMsg::Committed(doc, n, result, read) => {
+                let Some(c) = self.changes_doc_mut(doc) else { return Task::none() };
+                c.busy = false;
+                c.committing = false;
+                match result {
+                    Ok(done) => {
+                        tracing::info!(repo = %c.repo.worktree.display(), "{done}");
+                        c.done = Some(done);
+                        c.message = text_editor::Content::new();
+                        c.amend = false;
+                        c.amend_text = None;
+                    }
+                    Err(e) => {
+                        tracing::warn!(repo = %c.repo.worktree.display(), error = %e, "committing failed");
+                        c.error = Some(e);
+                    }
+                }
+                c.take(n, *read);
+                // The log shows the new commit.
+                return self.refresh_log();
             }
             _ => {}
         }
