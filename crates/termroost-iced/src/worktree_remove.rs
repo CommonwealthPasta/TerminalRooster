@@ -120,15 +120,9 @@ impl App {
                 f.removing = false;
                 match result {
                     Ok(()) => {
-                        tracing::info!(path = %path.display(), "worktree removed");
-                        let closed = f.closed;
-                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        // The dialog said what removing it does; closing is enough.
+                        tracing::info!(path = %path.display(), sessions_closed = f.closed, "worktree removed");
                         self.dialog = None;
-                        self.notice = Some(match closed {
-                            0 => format!("Removed the worktree {name}."),
-                            1 => format!("Removed the worktree {name} and closed its session."),
-                            n => format!("Removed the worktree {name} and closed its {n} sessions."),
-                        });
                         return Task::batch([self.read_git(), self.focus_active()]);
                     }
                     Err(e) => {
