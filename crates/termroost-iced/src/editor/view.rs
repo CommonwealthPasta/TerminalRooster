@@ -6,6 +6,7 @@ use iced::{Alignment, Element, Length};
 use super::text::char_column;
 use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, highlight, keys};
 use crate::app::{App, Message};
+use crate::file_icons::{self, Hues, Look};
 use crate::icons::Icon;
 use crate::sidebar::{display_dir, muted_text};
 use crate::terminal_view::TerminalView;
@@ -19,24 +20,27 @@ impl App {
         let Some(files) = self.session_files().filter(|f| !f.open.is_empty()) else {
             return space::vertical().height(0).into();
         };
-        let tab = |label: String, selected: bool, msg: Message| {
+        let hues = Hues::of(&self.active_theme());
+        // A file's tab leads with the icon its name has in the Files tab.
+        let tab = |label: String, look: Option<Look>, selected: bool, msg: Message| {
             let font = if selected { SEMIBOLD } else { theme::UI };
-            button(text(label).size(12).font(font).wrapping(text::Wrapping::None))
-                .padding([3, 10])
-                .style(theme::segment(selected))
-                .on_press(msg)
+            let icon = look.map(|look| file_icons::icon(look, hues, false, 13.0));
+            let label = row![icon, text(label).size(12).font(font).wrapping(text::Wrapping::None)]
+                .spacing(5)
+                .align_y(Alignment::Center);
+            button(label).padding([3, 10]).style(theme::segment(selected)).on_press(msg)
         };
-        let mut strip = row![tab("Terminals".into(), files.shown.is_none(), Message::Editor(EditorMsg::Show(None)))]
-            .spacing(4)
-            .align_y(Alignment::Center);
+        let terminals = tab("Terminals".into(), None, files.shown.is_none(), Message::Editor(EditorMsg::Show(None)));
+        let mut strip = row![terminals].spacing(4).align_y(Alignment::Center);
         for doc in &files.open {
-            let mut name =
-                doc.path.file_name().map_or_else(|| doc.path.display().to_string(), |n| n.to_string_lossy().into());
+            let file_name = doc.path.file_name().map(|n| n.to_string_lossy());
+            let look = file_icons::file(file_name.as_deref().unwrap_or_default());
+            let mut name = file_name.map_or_else(|| doc.path.display().to_string(), String::from);
             if doc.modified() {
                 name.push_str(" ●");
             }
             let item = row![
-                tab(name, files.shown == Some(doc.id), Message::Editor(EditorMsg::Show(Some(doc.id)))),
+                tab(name, Some(look), files.shown == Some(doc.id), Message::Editor(EditorMsg::Show(Some(doc.id)))),
                 icon_button(Icon::Close, Message::Editor(EditorMsg::Close(doc.id)), "Close"),
             ]
             .align_y(Alignment::Center);
