@@ -101,6 +101,10 @@ pub(crate) struct Shared {
     render_pending: AtomicBool,
     /// Content changed since the last scrollback save.
     pub(crate) save_dirty: AtomicBool,
+    /// The user typed into this terminal (keys, text or a paste) since it was
+    /// created. Until then its content is no more than what the shell printed
+    /// by itself, which isn't worth saving.
+    typed: AtomicBool,
     generation: AtomicU64,
     proc: Mutex<ProcState>,
     run_counter: AtomicU64,
@@ -324,6 +328,7 @@ impl TerminalHandle {
             sender: Mutex::new(None),
             render_pending: AtomicBool::new(false),
             save_dirty: AtomicBool::new(false),
+            typed: AtomicBool::new(false),
             generation: AtomicU64::new(1),
             proc: Mutex::new(ProcState::NotStarted),
             run_counter: AtomicU64::new(0),
@@ -437,6 +442,11 @@ impl TerminalHandle {
         }
     }
 
+    /// Whether the user typed into this terminal since it was created.
+    pub(crate) fn typed(&self) -> bool {
+        self.0.shared.typed.load(Ordering::Relaxed)
+    }
+
     /// Times Enter was pressed recently, oldest first.
     pub(crate) fn submits(&self) -> Vec<std::time::SystemTime> {
         self.0.shared.submits.lock().unwrap().iter().copied().collect()
@@ -520,6 +530,7 @@ impl TerminalHandle {
 
     /// User input: jump back to the live output and drop the selection.
     fn on_user_input(&self) {
+        self.0.shared.typed.store(true, Ordering::Relaxed);
         let mut term = self.0.term.lock();
         let mut changed = term.selection.take().is_some();
         let offset = term.grid().display_offset();

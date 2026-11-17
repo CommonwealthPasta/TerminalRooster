@@ -152,9 +152,42 @@ pub(crate) fn replay<T: alacritty_terminal::event::EventListener>(
     let mut parser: Processor = Processor::new();
     parser.advance(term, data);
     if let Some(banner) = banner {
-        let line = format!("\r\n\x1b[0;2m─── {banner} ───\x1b[0m\r\n");
+        let line = format!("\r\n\x1b[0;2m{BANNER_EDGE} {banner} {BANNER_EDGE}\x1b[0m\r\n");
         parser.advance(term, line.as_bytes());
     }
+}
+
+const BANNER_EDGE: &str = "───";
+
+/// Whether saved scrollback holds nothing but a shell prompt, so there's
+/// nothing worth bringing back: every non-blank line other than a restore
+/// banner reads the same. Older versions saved idle terminals too, as the
+/// same prompt again under each restore banner.
+pub(crate) fn just_a_prompt(data: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(data);
+    let mut lines = text.split("\r\n").map(strip_sgr).filter(|l| {
+        let l = l.trim();
+        !l.is_empty() && !(l.starts_with(BANNER_EDGE) && l.ends_with(BANNER_EDGE))
+    });
+    let Some(first) = lines.next() else { return true };
+    lines.all(|l| l.trim_end() == first.trim_end())
+}
+
+/// The text of a serialized line, without its color codes (`ESC [ … m`, the
+/// only sequences `serialize` writes).
+fn strip_sgr(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.next() == Some('[') {
+                chars.by_ref().find(|c| ('\x40'..='\x7e').contains(c));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -250,5 +283,33 @@ mod tests {
 
         feed(&mut a, "\x1b[?1049h");
         assert!(serialize(&a, 5).is_none());
+    }
+
+    #[test]
+    fn a_lone_prompt_is_not_worth_restoring() {
+        let prompt = "\x1b[1;32mme@host\x1b[0m:\x1b[1;34m~/my proj\x1b[0m$ ";
+        assert!(just_a_prompt(b""));
+        let mut a = term(40, 10);
+        feed(&mut a, prompt);
+        let idle = serialize(&a, 100).unwrap();
+        assert!(just_a_prompt(&idle));
+
+        // What older versions saved after restoring that: the prompt again
+        // under a banner, any number of times.
+        let mut b = term(40, 10);
+        replay(&mut b, &idle, Some("restored session from 2026-11-16 19:27"));
+        feed(&mut b, prompt);
+        let again = serialize(&b, 100).unwrap();
+        assert!(String::from_utf8_lossy(&again).contains("restored session"));
+        assert!(just_a_prompt(&again));
+
+        // A command that ran leaves lines of its own.
+        feed(&mut b, "ls\r\nCargo.toml\r\n");
+        feed(&mut b, prompt);
+        assert!(!just_a_prompt(&serialize(&b, 100).unwrap()));
+        let mut c = term(40, 10);
+        feed(&mut c, "first line of output\r\n");
+        feed(&mut c, prompt);
+        assert!(!just_a_prompt(&serialize(&c, 100).unwrap()));
     }
 }

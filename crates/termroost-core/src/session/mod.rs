@@ -12,6 +12,7 @@ mod snapshot;
 mod tap;
 mod terminal;
 
+pub(crate) use snapshot::just_a_prompt;
 pub(crate) use terminal::SpawnSpec;
 pub use terminal::{Activity, GridSize, SelectionKind, TerminalHandle};
 
@@ -52,6 +53,12 @@ impl Background {
         let max = self.saved_lines.load(Ordering::Relaxed);
         let mut ops = Vec::new();
         for h in handles {
+            // Nothing typed: there's only what the shell printed by itself (a
+            // prompt), not worth restoring. What an earlier session saved for
+            // this pane stays as it was.
+            if !h.typed() {
+                continue;
+            }
             let dirty = h.0.shared.save_dirty.swap(false, Ordering::AcqRel);
             if !(dirty || force) {
                 continue;

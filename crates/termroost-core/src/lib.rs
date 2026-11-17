@@ -1008,7 +1008,7 @@ impl Core {
         if restored
             && !had_agent
             && let Some((data, saved_at)) = self.store.load_scrollback(pane)
-            && !data.is_empty()
+            && !session::just_a_prompt(&data)
         {
             let when = chrono::DateTime::from_timestamp(saved_at, 0)
                 .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())

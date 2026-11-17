@@ -131,6 +131,9 @@ fn state_and_scrollback_survive_restart() {
         core.dispatch(Command::SetTaskDone { task, done: true }).unwrap();
         wait_for_text(&mut core, first, "marker-123");
         wait_for_text(&mut core, second, "marker-123");
+        // Only terminals someone typed in are saved; `second` stays untouched.
+        core.terminal(first).unwrap().text("typed-ok\r");
+        wait_for_text(&mut core, first, "typed-ok");
         // Clean shutdown saves scrollback.
         (project, tab, vec![first, second], task)
     };
@@ -149,8 +152,12 @@ fn state_and_scrollback_survive_restart() {
     // The visible tab is started again with its old scrollback and resume command.
     wait_for_text(&mut core, panes[0], "restored session");
     let text = screen_text(&core, panes[0]);
-    assert!(text.contains("marker-123"), "{text}");
+    assert!(text.contains("marker-123") && text.contains("typed-ok"), "{text}");
     wait_for_text(&mut core, panes[0], "resumed-ok");
+    // Nothing was typed in the other terminal, so it starts fresh.
+    wait_for_text(&mut core, panes[1], "marker-123");
+    let text = screen_text(&core, panes[1]);
+    assert!(!text.contains("restored session"), "{text}");
 }
 
 #[test]
@@ -376,6 +383,9 @@ fn crash_child(dir: &Path) -> ! {
     let pane = only_pane(&core);
     core.dispatch(Command::SplitPane { pane, axis: Axis::Horizontal }).unwrap();
     wait_for_text(&mut core, pane, "crash-marker");
+    // Only terminals someone typed in are saved.
+    core.terminal(pane).unwrap().text("typed-before-crash\r");
+    wait_for_text(&mut core, pane, "typed-before-crash");
     // Wait for the periodic autosave rather than forcing a save.
     std::thread::sleep(Duration::from_millis(800));
     core.dispatch(Command::RenameTab { tab, title: "after-save".into() }).unwrap();
@@ -409,7 +419,8 @@ fn state_survives_a_crash() {
     assert_eq!(s.open_task_count(tab.id), 1);
     let pane = tab.layout.first_pane();
     wait_for_text(&mut core, pane, "restored session");
-    assert!(screen_text(&core, pane).contains("crash-marker"));
+    let text = screen_text(&core, pane);
+    assert!(text.contains("crash-marker") && text.contains("typed-before-crash"), "{text}");
 }
 
 #[test]
