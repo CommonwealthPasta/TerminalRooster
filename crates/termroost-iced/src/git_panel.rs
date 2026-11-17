@@ -306,8 +306,8 @@ impl App {
         .into()
     }
 
-    /// What the last pull, push or change of remote of this repository did,
-    /// until dismissed.
+    /// What the last pull or push of this repository did, or why changing
+    /// its remote failed, until dismissed.
     fn sync_note(&self) -> Option<Element<'_, Message>> {
         let sync = self.git_sync.as_ref()?;
         let shown = self.git_log.as_ref().is_some_and(|l| l.worktree == sync.worktree);
@@ -348,8 +348,8 @@ impl App {
         })
     }
 
-    /// Shows how a pull, push or change of remote went, and reads the log
-    /// again right away.
+    /// Shows how a pull or push went, or why a change of remote failed, and
+    /// reads the log again right away.
     pub(crate) fn sync_done(&mut self, worktree: PathBuf, result: Result<String, String>) -> Task<Message> {
         match &result {
             Ok(done) => tracing::info!(repo = %worktree.display(), "{done}"),
@@ -357,6 +357,10 @@ impl App {
         }
         if let Some(sync) = self.git_sync.as_mut().filter(|s| s.worktree == worktree) {
             sync.result = Some(result);
+        }
+        // The remote line shows the new remote; only a failure needs a note.
+        if matches!(&self.git_sync, Some(GitSync { op: SyncOp::UseRemote(_), result: Some(Ok(_)), .. })) {
+            self.git_sync = None;
         }
         // A pull that brought nothing leaves the refs as they were; read anyway.
         if let Some(log) = self.git_log.as_mut().filter(|l| l.worktree == worktree) {
