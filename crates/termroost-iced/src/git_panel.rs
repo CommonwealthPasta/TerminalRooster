@@ -194,6 +194,9 @@ impl App {
 
         let tracking = self.git_log.as_ref().and_then(|l| l.tracking.as_ref());
         let mut title = title;
+        if let Some(t) = tracking {
+            title = title.push(remote_row(t));
+        }
         if let Some(status) = tracking.and_then(|t| remote_status(t, head)) {
             title = title.push(muted_text(status).size(12));
         }
@@ -297,6 +300,28 @@ impl App {
     }
 }
 
+/// The remote the branch pulls from and pushes to, and its URLs.
+fn remote_row(t: &Tracking) -> Element<'_, Message> {
+    let Some(current) = t.remote.as_deref() else {
+        return muted_text("No remote yet").size(12).into();
+    };
+    let remote = t.remotes.iter().find(|r| r.name == current);
+    let name = row![muted_text("Remote").size(12), text(current).size(12).font(theme::SEMIBOLD)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    // URLs have no spaces to break at.
+    let url = |s: String| muted_text(s).wrapping(text::Wrapping::WordOrGlyph);
+    let mut col = column![name].spacing(2);
+    col = col.push(match remote.map(|r| r.url.as_str()).filter(|u| !u.is_empty()) {
+        Some(u) => url(u.to_owned()),
+        None => muted_text("No URL"),
+    });
+    if let Some(push) = remote.and_then(|r| r.push_url.as_deref()) {
+        col = col.push(url(format!("Pushes to {push}")));
+    }
+    col.into()
+}
+
 /// Where the branch stands against its remote: "2 commits to push · 1 to
 /// pull (origin/main)". `None` without a remote.
 fn remote_status(t: &Tracking, head: Option<&Head>) -> Option<String> {
@@ -360,7 +385,7 @@ mod tests {
             upstream: upstream.map(Into::into),
             ahead,
             behind,
-            unpushed: Default::default(),
+            ..Tracking::default()
         };
         let status = |t: Tracking| remote_status(&t, Some(&main));
         assert_eq!(status(t(Some("origin/main"), 0, 0)).unwrap(), "Up to date with origin/main");

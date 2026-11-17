@@ -228,12 +228,7 @@ impl Repo {
     /// last fetch. `unpushed` covers the newest `limit` commits of HEAD, or
     /// of every branch when `all`.
     pub fn tracking(&self, all: bool, limit: usize) -> Result<Tracking, String> {
-        let remotes: Vec<String> = git(&self.worktree, &["remote"])?
-            .lines()
-            .map(str::trim)
-            .filter(|r| !r.is_empty())
-            .map(Into::into)
-            .collect();
+        let remotes = self.remotes()?;
         if remotes.is_empty() {
             return Ok(Tracking::default());
         }
@@ -256,7 +251,7 @@ impl Repo {
             }
         }
         if t.remote.is_none() {
-            t.remote = remotes.iter().find(|r| *r == "origin").or(remotes.first()).cloned();
+            t.remote = remotes.iter().find(|r| r.name == "origin").or(remotes.first()).map(|r| r.name.clone());
         }
         // A new repository has no HEAD commit to list from.
         if all || self.head_commit().is_some() {
@@ -265,7 +260,25 @@ impl Repo {
             let out = git(&self.worktree, &["rev-list", tips, "--not", "--remotes", &max])?;
             t.unpushed = out.lines().map(str::trim).filter(|l| !l.is_empty()).map(Into::into).collect();
         }
+        t.remotes = remotes;
         Ok(t)
+    }
+
+    /// The repository's remotes, in the order `git remote` lists them.
+    pub fn remotes(&self) -> Result<Vec<Remote>, String> {
+        let mut remotes: Vec<Remote> = git(&self.worktree, &["remote"])?
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(|name| Remote { name: name.to_owned(), url: String::new(), push_url: None })
+            .collect();
+        if !remotes.is_empty() {
+            // Read from the config, so URLs show as they were set rather than
+            // rewritten by `insteadOf`. git fails when no URL is set at all.
+            let urls = git(&self.worktree, &["config", "-z", "--get-regexp", r"^remote\..*\.(url|pushurl)$"]);
+            fill_remote_urls(&mut remotes, &urls.unwrap_or_default());
+        }
+        Ok(remotes)
     }
 
     /// Pushes the checked-out branch. A branch without an upstream is pushed
@@ -397,6 +410,36 @@ pub struct Tracking {
     pub behind: usize,
     /// Commits that are on no remote branch at all.
     pub unpushed: HashSet<String>,
+    /// Every remote of the repository.
+    pub remotes: Vec<Remote>,
+}
+
+/// A remote of a repository: somewhere its branches are fetched from and
+/// pushed to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remote {
+    pub name: String,
+    /// Where it is fetched from, as set; empty when it has no URL.
+    pub url: String,
+    /// Where pushes go, when that is set apart from `url`.
+    pub push_url: Option<String>,
+}
+
+/// Fills in the URLs of `remotes` from `git config -z --get-regexp` output:
+/// `remote.<name>.url\n<url>\0` per entry. A remote's first URL counts, as
+/// for git.
+fn fill_remote_urls(remotes: &mut [Remote], out: &str) {
+    for entry in out.split('\0') {
+        let Some((key, value)) = entry.split_once('\n') else { continue };
+        // Remote names may contain dots; the variable is after the last one.
+        let Some((name, var)) = key.strip_prefix("remote.").and_then(|k| k.rsplit_once('.')) else { continue };
+        let Some(remote) = remotes.iter_mut().find(|r| r.name == name) else { continue };
+        match var {
+            "url" if remote.url.is_empty() => remote.url = value.to_owned(),
+            "pushurl" if remote.push_url.is_none() => remote.push_url = Some(value.to_owned()),
+            _ => {}
+        }
+    }
 }
 
 /// One commit, as `git log` lists it.
@@ -1165,5 +1208,50 @@ mod tests {
         assert_eq!(a.push().unwrap(), "Pushed main to fork, which it now tracks.");
         let t = a.tracking(false, 50).unwrap();
         assert_eq!((t.remote.as_deref(), t.upstream.as_deref()), (Some("fork"), Some("fork/main")));
+    }
+
+    #[test]
+    fn reads_remote_urls() {
+        let remote = |name: &str| Remote { name: name.into(), url: String::new(), push_url: None };
+        let mut remotes = vec![remote("origin"), remote("my.fork"), remote("bare")];
+        let out = "remote.origin.url\nhttps://example.com/a.git\0remote.my.fork.url\nD:/My Repos/b.git\0\
+                   remote.my.fork.pushurl\ngit@example.com:me/b.git\0remote.origin.url\nsecond\0\
+                   remote.gone.url\nx\0";
+        fill_remote_urls(&mut remotes, out);
+        assert_eq!(remotes[0].url, "https://example.com/a.git", "the first URL counts");
+        assert_eq!(remotes[0].push_url, None);
+        assert_eq!(remotes[1].url, "D:/My Repos/b.git");
+        assert_eq!(remotes[1].push_url.as_deref(), Some("git@example.com:me/b.git"));
+        assert_eq!(remotes[2], remote("bare"));
+    }
+
+    /// Remotes and their URLs, with git installed.
+    #[test]
+    fn lists_remotes_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(origin) = bare(dir.path(), "origin.git") else {
+            eprintln!("git not available; skipping");
+            return;
+        };
+        let a = clone_repo(dir.path(), &origin, "a");
+        let run = |args: &[&str]| git(&a.worktree, args).unwrap();
+        run(&["remote", "add", "fork", "../fork.git"]);
+        run(&["remote", "set-url", "--push", "fork", "git@example.com:me/fork.git"]);
+        // Shown as set, not as rewritten.
+        run(&["config", "url.https://example.com/.insteadOf", "ex:"]);
+        run(&["remote", "add", "ex", "ex:x.git"]);
+
+        let remotes = a.remotes().unwrap();
+        let names: Vec<&str> = remotes.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["ex", "fork", "origin"]);
+        assert_eq!(remotes[0].url, "ex:x.git");
+        assert_eq!(remotes[1].url, "../fork.git");
+        assert_eq!(remotes[1].push_url.as_deref(), Some("git@example.com:me/fork.git"));
+        assert!(remotes[2].url.ends_with("origin.git"), "{}", remotes[2].url);
+        assert_eq!(a.tracking(false, 50).unwrap().remotes, remotes);
+
+        let lone = dir.path().join("lone");
+        git(dir.path(), &["init", "-q", &lone.to_string_lossy()]).unwrap();
+        assert_eq!(Repo::discover(&lone).unwrap().remotes().unwrap(), Vec::new());
     }
 }
