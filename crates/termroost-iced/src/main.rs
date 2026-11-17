@@ -45,6 +45,15 @@ pub const APP_ID: &str = "io.github.Davenport_Physics.TerminalRooster";
 /// Folders, ids and environment variables keep `TerminalRooster`.
 pub const DISPLAY_NAME: &str = "Terminal Rooster";
 
+/// The desktop id this build runs under. On Linux a build that wasn't
+/// installed from a package uses a separate id (see `desktop_entry`).
+#[cfg(target_os = "linux")]
+pub use desktop_entry::app_id;
+#[cfg(not(target_os = "linux"))]
+pub fn app_id() -> &'static str {
+    APP_ID
+}
+
 fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
     // Flushes the log file when main returns.
@@ -101,7 +110,7 @@ fn main() -> iced::Result {
         #[cfg(target_os = "linux")]
         platform_specific: window::settings::PlatformSpecific {
             // Matches the .desktop file name, so desktops show the right icon.
-            application_id: APP_ID.to_owned(),
+            application_id: app_id().to_owned(),
             ..Default::default()
         },
         ..window::Settings::default()

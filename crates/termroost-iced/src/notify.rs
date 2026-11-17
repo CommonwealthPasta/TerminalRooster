@@ -249,8 +249,8 @@ mod platform {
             .appname(crate::DISPLAY_NAME)
             .summary(title)
             .body(body)
-            .icon(crate::APP_ID)
-            .hint(Hint::DesktopEntry(crate::APP_ID.to_owned()))
+            .icon(crate::app_id())
+            .hint(Hint::DesktopEntry(crate::app_id().to_owned()))
             .action("default", "Show")
             .show()?;
         // Blocks this notification's thread until it is clicked or closed.

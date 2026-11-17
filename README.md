@@ -31,7 +31,7 @@ A project-based terminal manager for running coding agents (Claude Code, Codex, 
 cargo run --release -p termroost-iced
 ```
 
-Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show Terminal Rooster's icon for its window on Wayland. Once a package is installed, Terminal Rooster removes this entry again. Set `TERMINALROOSTER_NO_DESKTOP_ENTRY=1` to skip it.
+Running a build straight from `target/` (not from a package) writes a hidden desktop entry and the icons into `~/.local/share`. KDE and GNOME need that entry to show Terminal Rooster's icon for its window on Wayland. Such a build runs under its own id, `io.github.Davenport_Physics.TerminalRooster.Devel`, so its entry never hides an installed package's menu entry, and the two show up separately in the taskbar. Set `TERMINALROOSTER_NO_DESKTOP_ENTRY=1` to skip writing it.
 
 ### Windows (installer)
 
