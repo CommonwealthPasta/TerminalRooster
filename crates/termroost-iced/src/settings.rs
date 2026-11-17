@@ -3,6 +3,8 @@
 //! Each section is a heading over a card of rows: what a setting is on the
 //! left, its control on the right, with a hairline between rows.
 
+use std::path::PathBuf;
+
 use iced::widget::{Column, button, column, container, pick_list, row, slider, space, text, text_input, tooltip};
 use iced::{Alignment, Border, Color, Element, Length, Padding};
 use termroost_core::session::shell::{self, ShellOption};
@@ -144,12 +146,7 @@ impl App {
             self.notifications_section(),
             self.integrations_section(),
             self.shortcuts_section(st),
-            container(muted_text(format!(
-                "Everything is stored in {}. Logs are in {}.",
-                self.core.data_dir().join(termroost_core::paths::DB_FILE).display(),
-                crate::logging::log_dir(self.core.data_dir()).display()
-            )))
-            .padding(Padding { left: 4.0, ..Padding::ZERO }),
+            self.folder_buttons(st),
         ]
         .spacing(32)
         .max_width(MAX_WIDTH);
@@ -162,6 +159,27 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+    }
+
+    /// Buttons that open the folders Terminal Rooster keeps its files in,
+    /// each folder's path in its tooltip.
+    fn folder_buttons<'a>(&'a self, st: &'a SettingsState) -> Element<'a, Message> {
+        let data = self.core.data_dir().to_path_buf();
+        let logs = crate::logging::log_dir(&data);
+        let open = |label: &'a str, about: String, dir: PathBuf| {
+            let button =
+                ui::small_with_icon(Icon::Open, label, theme::button_secondary).on_press(Message::OpenFolder(dir));
+            tip(button, about, tooltip::Position::Top)
+        };
+        let data_about = format!("{}\n{} in it holds everything", data.display(), termroost_core::paths::DB_FILE);
+        let buttons =
+            row![open("Data folder", data_about, data), open("Logs folder", logs.display().to_string(), logs)]
+                .spacing(8);
+        let mut col = column![buttons].spacing(8);
+        if let Some(e) = &st.folder_error {
+            col = col.push(ui::note_text(Tone::Danger, e));
+        }
+        container(col).padding(Padding { left: 4.0, ..Padding::ZERO }).into()
     }
 
     fn appearance_section<'a>(&'a self, st: &'a SettingsState) -> Element<'a, Message> {

@@ -232,6 +232,8 @@ pub struct SettingsState {
     pub editor_found: Option<PathBuf>,
     /// The user's own Neovim, on PATH.
     pub nvim_on_path: Option<PathBuf>,
+    /// Why the file manager didn't open on the data or logs folder.
+    pub folder_error: Option<String>,
 }
 
 /// Choice in a task's "linked session" dropdown.
@@ -320,6 +322,9 @@ pub enum Message {
 
     OpenSettings,
     CloseSettings,
+    /// Open the file manager on one of Terminal Rooster's own folders (settings).
+    OpenFolder(PathBuf),
+    FolderOpened(Result<(), String>),
     AddCodexHook,
     RemoveCodexHook,
     /// Open the Codex window to trust the hook.
@@ -1254,6 +1259,17 @@ impl App {
                     self.settings = None;
                 }
                 return self.focus_active();
+            }
+            Message::OpenFolder(dir) => {
+                if let Some(st) = &mut self.settings {
+                    st.folder_error = None;
+                }
+                return crate::reveal::in_background(dir, true).map(Message::FolderOpened);
+            }
+            Message::FolderOpened(result) => {
+                if let (Some(st), Err(e)) = (&mut self.settings, result) {
+                    st.folder_error = Some(format!("Could not open the file manager: {e}"));
+                }
             }
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
