@@ -19,13 +19,14 @@ pub enum Icon {
     Open,
     ChevronDown,
     ChevronRight,
+    ChevronLeft,
     ArrowDown,
     ArrowUp,
     Search,
 }
 
 /// The files, in the order of [`Icon`].
-const SOURCES: [&[u8]; 14] = [
+const SOURCES: [&[u8]; 15] = [
     include_bytes!("../icons/ui/plus.svg"),
     include_bytes!("../icons/ui/close.svg"),
     include_bytes!("../icons/ui/edit.svg"),
@@ -37,6 +38,7 @@ const SOURCES: [&[u8]; 14] = [
     include_bytes!("../icons/ui/open.svg"),
     include_bytes!("../icons/ui/chevron_down.svg"),
     include_bytes!("../icons/ui/chevron_right.svg"),
+    include_bytes!("../icons/ui/chevron_left.svg"),
     include_bytes!("../icons/ui/arrow_down.svg"),
     include_bytes!("../icons/ui/arrow_up.svg"),
     include_bytes!("../icons/ui/search.svg"),

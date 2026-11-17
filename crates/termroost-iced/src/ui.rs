@@ -3,8 +3,8 @@
 
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    Button, Checkbox, Column, Scrollable, TextInput, button, checkbox, column, container, row, scrollable, space, text,
-    text_input, tooltip,
+    Button, Checkbox, Column, Scrollable, TextInput, Toggler, button, checkbox, column, container, row, scrollable,
+    space, text, text_input, toggler, tooltip,
 };
 use iced::{Alignment, Element, Length, Theme};
 
@@ -92,6 +92,11 @@ pub fn input<'a>(placeholder: &str, value: &str) -> TextInput<'a, Message> {
 /// A checkbox; give it a label with `.label(…)`.
 pub fn check<'a>(checked: bool) -> Checkbox<'a, Message> {
     checkbox(checked).size(15).text_size(TEXT).spacing(8).style(theme::check)
+}
+
+/// A switch for a setting that is on or off.
+pub fn switch<'a>(on: bool) -> Toggler<'a, Message> {
+    toggler(on).size(18).style(theme::switch)
 }
 
 /// A vertical scrollable with thin scrollbars over the content's edge.

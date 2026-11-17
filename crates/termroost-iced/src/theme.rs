@@ -8,15 +8,17 @@
 //! - The accent marks what is selected, focused or switched on. Filled
 //!   buttons are drawn in the text color, so they don't compete with it.
 //! - Corners are [`RADIUS_SM`] on small controls, [`RADIUS`] on buttons,
-//!   fields and list items, and [`RADIUS_LG`] on dialogs and pop-ups.
-//! - What is raised (cards, menus, dialogs, pop-ups, the selected list
-//!   item) is lighter than what it sits on, and casts a soft shadow.
+//!   fields and list items, and [`RADIUS_LG`] on cards and dialogs.
+//! - What is raised (cards, menus, dialogs, the selected list item) is
+//!   lighter than what it sits on, and casts a soft shadow.
 
 use std::sync::LazyLock;
 
 use iced::border;
 use iced::overlay::menu;
-use iced::widget::{button, checkbox, container, pane_grid, pick_list, scrollable, text_editor, text_input};
+use iced::widget::{
+    button, checkbox, container, pane_grid, pick_list, scrollable, slider, text_editor, text_input, toggler,
+};
 use iced::{Background, Border, Color, Font, Shadow, Theme, Vector, font};
 
 /// Bundled terminal font (JetBrains Mono, SIL Open Font License 1.1).
@@ -61,7 +63,7 @@ pub const UI: Font = if cfg!(windows) { Font::with_name("Segoe UI") } else { Fon
 pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..UI };
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..UI };
 
-/// Text sizes: a page's title, then a dialog's, body text and small print.
+/// Text sizes: the settings page's title, then a dialog's, body text and small print.
 pub const TEXT_PAGE: f32 = 22.0;
 pub const TEXT_TITLE: f32 = 16.0;
 pub const TEXT: f32 = 13.0;
@@ -412,6 +414,33 @@ pub fn check(t: &Theme, status: checkbox::Status) -> checkbox::Style {
     }
 }
 
+/// A switch for a setting that is on or off.
+pub fn switch(t: &Theme, status: toggler::Status) -> toggler::Style {
+    let (on, hovered, disabled) = match status {
+        toggler::Status::Active { is_toggled } => (is_toggled, false, false),
+        toggler::Status::Hovered { is_toggled } => (is_toggled, true, false),
+        toggler::Status::Disabled { is_toggled } => (is_toggled, false, true),
+    };
+    let track = match (on, hovered) {
+        _ if disabled => press_fill(t),
+        (true, false) => accent(t),
+        (true, true) => mix(accent(t), ink(t), 0.12),
+        (false, false) => ink(t).scale_alpha(by_tone(t, 0.18, 0.22)),
+        (false, true) => ink(t).scale_alpha(by_tone(t, 0.26, 0.3)),
+    };
+    toggler::Style {
+        background: track.into(),
+        background_border_width: 0.0,
+        background_border_color: Color::TRANSPARENT,
+        foreground: Color::WHITE.into(),
+        foreground_border_width: 0.0,
+        foreground_border_color: Color::TRANSPARENT,
+        text_color: None,
+        border_radius: None,
+        padding_ratio: 0.12,
+    }
+}
+
 /// Thin rounded scrollbars with no track, darker while used.
 pub fn scrollbars(t: &Theme, status: scrollable::Status) -> scrollable::Style {
     let (hovered, dragged) = match status {
@@ -444,6 +473,26 @@ pub fn scrollbars(t: &Theme, status: scrollable::Status) -> scrollable::Style {
     }
 }
 
+pub fn slider_track(t: &Theme, status: slider::Status) -> slider::Style {
+    let handle_edge = match status {
+        slider::Status::Active => edge(t),
+        slider::Status::Hovered | slider::Status::Dragged => accent(t),
+    };
+    slider::Style {
+        rail: slider::Rail {
+            backgrounds: (accent(t).into(), ink(t).scale_alpha(0.15).into()),
+            width: 4.0,
+            border: border::rounded(2),
+        },
+        handle: slider::Handle {
+            shape: slider::HandleShape::Circle { radius: 8.0 },
+            background: chosen(t).into(),
+            border_width: 1.0,
+            border_color: handle_edge,
+        },
+    }
+}
+
 /// The file editor: square, framed like a terminal, in the accent color while it has the keyboard.
 pub fn file_editor(t: &Theme, status: text_editor::Status) -> text_editor::Style {
     let focused = matches!(status, text_editor::Status::Focused { .. });
@@ -468,6 +517,17 @@ pub fn divider(t: &Theme) -> container::Style {
     container::Style { background: Some(line(t).into()), ..container::Style::default() }
 }
 
+/// A raised box holding related things, such as a section of the settings.
+pub fn card(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(raised(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.0, color: line(t), radius: RADIUS_LG.into() },
+        shadow: shadow_sm(t),
+        ..container::Style::default()
+    }
+}
+
 /// A task in the Tasks tab; one `linked` to the session on screen is outlined in the accent.
 pub fn task_card(linked: bool) -> impl Fn(&Theme) -> container::Style {
     move |t| container::Style {
@@ -479,6 +539,45 @@ pub fn task_card(linked: bool) -> impl Fn(&Theme) -> container::Style {
             radius: RADIUS.into(),
         },
         shadow: shadow_sm(t),
+        ..container::Style::default()
+    }
+}
+
+/// One of several things to choose from, framed; the chosen one in the accent.
+pub fn choice(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| container::Style {
+        background: Some(if selected { accent(t).scale_alpha(0.06) } else { Color::TRANSPARENT }.into()),
+        text_color: Some(ink(t)),
+        border: Border {
+            width: if selected { 1.5 } else { 1.0 },
+            color: if selected { accent(t) } else { line(t) },
+            radius: RADIUS.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A [`choice`] that is pressed to choose it.
+pub fn choice_button(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |t, status| {
+        let frame = choice(selected)(t);
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: if hovered && !selected { Some(hover_fill(t).into()) } else { frame.background },
+            text_color: ink(t),
+            border: frame.border,
+            ..button::Style::default()
+        }
+    }
+}
+
+/// A keyboard shortcut, drawn as a key.
+pub fn key_cap(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(raised(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.0, color: edge(t), radius: RADIUS_SM.into() },
+        shadow: Shadow { offset: Vector::new(0.0, 1.0), blur_radius: 0.0, color: line(t) },
         ..container::Style::default()
     }
 }
@@ -694,22 +793,5 @@ pub fn toast_mark(category: crate::notify::Category) -> impl Fn(&Theme) -> conta
         text_color: Some(notice_color(t, category)),
         border: border::rounded(PILL),
         ..container::Style::default()
-    }
-}
-
-/// Small borderless icon buttons.
-pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
-    let p = theme.extended_palette();
-    button::Style {
-        background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(Background::Color(p.background.strong.color)),
-            _ => None,
-        },
-        text_color: match status {
-            button::Status::Disabled => p.background.strong.color,
-            _ => p.background.base.text,
-        },
-        border: Border::default().rounded(4),
-        ..button::Style::default()
     }
 }
