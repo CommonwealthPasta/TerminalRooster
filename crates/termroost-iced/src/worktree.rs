@@ -7,15 +7,16 @@
 
 use std::path::PathBuf;
 
-use iced::widget::{button, checkbox, column, container, operation, row, scrollable, space, text, text_input};
+use iced::widget::{column, container, operation, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 use termroost_core::git::{self, Branches, Head, Plan, Repo};
 use termroost_core::{Command, Outcome, TabId};
 
 use crate::app::{App, DIALOG_FIRST_INPUT, Dialog, Message, expand_home};
-use crate::dialogs::field;
+use crate::dialogs::DialogParts;
 use crate::sidebar::{branch_label, display_dir, muted_text, short_dir};
-use crate::theme::BOLD;
+use crate::theme::{self, SEMIBOLD, Tone};
+use crate::ui::{self, field};
 use crate::worktree_remove::RemoveMsg;
 
 /// State of the Worktrees dialog.
@@ -111,7 +112,12 @@ fn msg(m: WorktreeMsg) -> Message {
 const REMOVE_WIDTH: f32 = 66.0;
 
 fn small_button(label: &str) -> iced::widget::Button<'_, Message> {
-    button(text(label).size(12)).padding([3, 10]).style(button::secondary)
+    ui::small(label, theme::button_secondary)
+}
+
+/// A heading over a part of the dialog.
+fn subheading(label: &str) -> text::Text<'_> {
+    text(label).size(13).font(SEMIBOLD)
 }
 
 impl App {
@@ -295,7 +301,7 @@ impl App {
     fn view_worktree_list<'a>(&'a self, f: &'a WorktreeForm) -> Element<'a, Message> {
         let (worktrees, main) = match &f.branches {
             None => return muted_text("Looking up worktrees…").size(12).into(),
-            Some(Err(e)) => return text(e).size(12).style(text::danger).into(),
+            Some(Err(e)) => return ui::note_text(Tone::Danger, e),
             // git lists the main working tree first.
             Some(Ok(b)) => (b.worktrees.iter().filter(|w| w.usable()), b.worktrees.first().map(|w| &w.path)),
         };
@@ -313,10 +319,8 @@ impl App {
             let remove: Element<'_, Message> = if main == Some(&w.path) {
                 space::horizontal().width(REMOVE_WIDTH).into()
             } else {
-                button(text("Remove").size(12).style(text::danger))
-                    .padding([3, 8])
+                ui::small("Remove", theme::button_link(Tone::Danger))
                     .width(REMOVE_WIDTH)
-                    .style(button::text)
                     .on_press_maybe(idle.then(|| Message::RemoveWorktree(RemoveMsg::Ask(w.path.clone()))))
                     .into()
             };
@@ -334,12 +338,20 @@ impl App {
             ]
             .spacing(8)
             .align_y(Alignment::Center)
-            .into()
+            .padding([8, 12])
         });
-        container(scrollable(column(rows).spacing(8).padding([0, 12])).height(Length::Shrink)).max_height(220).into()
+        // A hairline between each worktree and the next.
+        let mut list = column![];
+        for (i, r) in rows.enumerate() {
+            if i > 0 {
+                list = list.push(ui::divider());
+            }
+            list = list.push(r);
+        }
+        container(ui::scroll(list).height(Length::Shrink)).max_height(240).style(theme::list_box).into()
     }
 
-    pub(crate) fn view_worktree<'a>(&'a self, f: &'a WorktreeForm) -> Element<'a, Message> {
+    pub(crate) fn view_worktree<'a>(&'a self, f: &'a WorktreeForm) -> DialogParts<'a> {
         let s = self.core.state();
         let session = s.tab(f.tab).map(|t| t.title.as_str()).unwrap_or("This session");
         let on = f.head.as_ref().map(|h| h.to_string()).unwrap_or_else(|| "an unknown commit".into());
@@ -359,37 +371,39 @@ impl App {
             ),
             (_, Some(Plan::CheckedOut(_))) => (format!("{name} has a worktree already; switch to it above."), true),
         };
-        let hint: Element<'_, Message> =
-            if problem { text(hint).size(12).style(text::danger).into() } else { muted_text(hint).size(12).into() };
+        let hint: Element<'_, Message> = if problem {
+            text(hint)
+                .size(12)
+                .style(|t: &iced::Theme| text::Style { color: Some(t.extended_palette().danger.base.color) })
+                .into()
+        } else {
+            muted_text(hint).size(12).into()
+        };
 
         let mut col = column![
-            text("Worktrees").size(18).font(BOLD),
             text(format!("{session} is on {on} in {}.", display_dir(&f.repo.worktree))).size(13),
-            text("Existing worktrees").size(14).font(BOLD),
-            self.view_worktree_list(f),
-            text("New worktree").size(14).font(BOLD),
+            column![subheading("Existing worktrees"), self.view_worktree_list(f)].spacing(8),
+            subheading("New worktree"),
             column![
                 field(
                     "Branch",
-                    text_input("feature/my-change", &f.branch)
+                    ui::input("feature/my-change", &f.branch)
                         .id(DIALOG_FIRST_INPUT)
                         .on_input(|v| msg(WorktreeMsg::Branch(v)))
-                        .on_submit(msg(WorktreeMsg::Submit))
-                        .padding(6),
+                        .on_submit(msg(WorktreeMsg::Submit)),
                 ),
                 hint,
             ]
-            .spacing(4),
+            .spacing(6),
         ]
-        .spacing(12);
+        .spacing(16);
 
         if plan == Some(Plan::NewBranch) {
             col = col.push(field(
                 "Start from",
-                text_input(&f.base_label(), &f.base)
+                ui::input(&f.base_label(), &f.base)
                     .on_input(|v| msg(WorktreeMsg::Base(v)))
-                    .on_submit(msg(WorktreeMsg::Submit))
-                    .padding(6),
+                    .on_submit(msg(WorktreeMsg::Submit)),
             ));
         }
         if !matches!(plan, Some(Plan::CheckedOut(_))) {
@@ -398,51 +412,45 @@ impl App {
                 column![
                     field(
                         "Location",
-                        text_input(&format!("{beside}/…"), &f.path)
+                        ui::input(&format!("{beside}/…"), &f.path)
                             .on_input(|v| msg(WorktreeMsg::Path(v)))
-                            .on_submit(msg(WorktreeMsg::Submit))
-                            .padding(6),
+                            .on_submit(msg(WorktreeMsg::Submit)),
                     ),
                     muted_text("Beside the repository, so on the same drive. A relative path is taken from there.")
                         .size(12),
                 ]
-                .spacing(4),
+                .spacing(6),
             );
         }
         if !matches!(plan, Some(Plan::CheckedOut(_))) {
             col = col.push(
                 column![
-                    checkbox(f.move_session)
+                    ui::check(f.move_session)
                         .label(format!("Move “{session}” into it"))
-                        .on_toggle(|on| msg(WorktreeMsg::MoveSession(on)))
-                        .size(14)
-                        .text_size(13),
-                    muted_text("Otherwise it opens in a new session named after the branch.").size(12),
+                        .on_toggle(|on| msg(WorktreeMsg::MoveSession(on))),
+                    container(muted_text("Otherwise it opens in a new session named after the branch.").size(12))
+                        .padding(iced::Padding { left: 23.0, ..iced::Padding::ZERO }),
                 ]
                 .spacing(4),
             );
         }
-        col = col.push(muted_text(
-            "Moving a session restarts its idle terminals there (keeping their scrollback); terminals running a \
-             program or an agent are left as they are.",
-        ));
+        col = col.push(
+            muted_text(
+                "Moving a session restarts its idle terminals there (keeping their scrollback); terminals running a \
+                 program or an agent are left as they are.",
+            )
+            .size(12),
+        );
         if let Some(e) = &f.error {
-            col = col.push(text(e).size(13).style(text::danger));
+            col = col.push(ui::note_text(Tone::Danger, e));
         }
 
         let confirm = if f.creating { "Creating…" } else { "Create worktree" };
-        let cancel = button(text("Cancel")).padding([6, 14]).style(button::secondary);
-        col.push(
-            row![
-                space::horizontal(),
-                if f.creating { cancel } else { cancel.on_press(Message::DialogCancel) },
-                button(text(confirm))
-                    .padding([6, 14])
-                    .style(button::primary)
-                    .on_press_maybe(f.can_submit().then(|| msg(WorktreeMsg::Submit))),
-            ]
-            .spacing(8),
-        )
-        .into()
+        let cancel = ui::secondary("Cancel");
+        let mut parts = DialogParts::new("Worktrees", col)
+            .button(if f.creating { cancel } else { cancel.on_press(Message::DialogCancel) })
+            .button(ui::primary(confirm).on_press_maybe(f.can_submit().then(|| msg(WorktreeMsg::Submit))));
+        parts.closable = !f.creating;
+        parts
     }
 }

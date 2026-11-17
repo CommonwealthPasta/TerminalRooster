@@ -8,9 +8,9 @@
 //! - The accent marks what is selected, focused or switched on. Filled
 //!   buttons are drawn in the text color, so they don't compete with it.
 //! - Corners are [`RADIUS_SM`] on small controls, [`RADIUS`] on buttons,
-//!   fields and list items, and [`RADIUS_LG`] on pop-ups.
-//! - What is raised (cards, menus, pop-ups, the selected list item) is
-//!   lighter than what it sits on, and casts a soft shadow.
+//!   fields and list items, and [`RADIUS_LG`] on dialogs and pop-ups.
+//! - What is raised (cards, menus, dialogs, pop-ups, the selected list
+//!   item) is lighter than what it sits on, and casts a soft shadow.
 
 use std::sync::LazyLock;
 
@@ -61,8 +61,9 @@ pub const UI: Font = if cfg!(windows) { Font::with_name("Segoe UI") } else { Fon
 pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..UI };
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..UI };
 
-/// Text sizes: a page's title, body text and small print.
+/// Text sizes: a page's title, then a dialog's, body text and small print.
 pub const TEXT_PAGE: f32 = 22.0;
+pub const TEXT_TITLE: f32 = 16.0;
 pub const TEXT: f32 = 13.0;
 pub const TEXT_SM: f32 = 12.0;
 
@@ -238,6 +239,12 @@ fn filled(t: &Theme, status: button::Status, fill: Color, on: Color, toward: Col
 /// The main action of a dialog or form, filled with the text color.
 pub fn button_primary(t: &Theme, status: button::Status) -> button::Style {
     filled(t, status, ink(t), background(t), background(t))
+}
+
+/// An action that deletes or ends something.
+pub fn button_danger(t: &Theme, status: button::Status) -> button::Style {
+    let danger = t.extended_palette().danger.base;
+    filled(t, status, danger.color, danger.text, Color::BLACK)
 }
 
 /// Any other action: outlined, on a raised fill.
@@ -476,6 +483,16 @@ pub fn task_card(linked: bool) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// A framed list in a dialog, such as the worktrees of a repository.
+pub fn list_box(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(field(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.0, color: line(t), radius: RADIUS.into() },
+        ..container::Style::default()
+    }
+}
+
 /// A small menu, such as an entry's in the Files tab.
 pub fn menu(t: &Theme) -> container::Style {
     container::Style {
@@ -600,6 +617,32 @@ pub fn pane_grid_style(t: &Theme) -> pane_grid::Style {
 
 // Dialogs and pop-ups
 
+pub fn modal_backdrop(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color { a: by_tone(t, 0.35, 0.55), ..Color::BLACK }.into()),
+        ..container::Style::default()
+    }
+}
+
+pub fn modal_card(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(raised(t).into()),
+        text_color: Some(ink(t)),
+        border: Border { width: 1.0, color: line(t), radius: RADIUS_LG.into() },
+        shadow: shadow_lg(t),
+        ..container::Style::default()
+    }
+}
+
+/// The bottom of a dialog, where its buttons are: a shade darker than the rest.
+pub fn modal_footer(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(ink(t).scale_alpha(by_tone(t, 0.03, 0.04)).into()),
+        border: Border { radius: border::bottom(RADIUS_LG), ..Border::default() },
+        ..container::Style::default()
+    }
+}
+
 /// The terminals of the shown session while a task is held over them.
 pub fn drop_target(t: &Theme) -> container::Style {
     container::Style {
@@ -668,36 +711,5 @@ pub fn icon_button(theme: &Theme, status: button::Status) -> button::Style {
         },
         border: Border::default().rounded(4),
         ..button::Style::default()
-    }
-}
-
-pub fn pane(active: bool) -> impl Fn(&Theme) -> container::Style {
-    move |theme| {
-        let p = theme.extended_palette();
-        container::Style {
-            border: Border {
-                width: 1.0,
-                color: if active { p.primary.base.color } else { p.background.strong.color },
-                radius: 0.0.into(),
-            },
-            ..container::Style::default()
-        }
-    }
-}
-
-pub fn modal_backdrop(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color { a: 0.6, ..Color::BLACK })),
-        ..container::Style::default()
-    }
-}
-
-pub fn modal_card(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.background.weak.color)),
-        text_color: Some(p.background.weak.text),
-        border: Border { width: 1.0, color: p.background.strong.color, radius: 8.0.into() },
-        ..container::Style::default()
     }
 }

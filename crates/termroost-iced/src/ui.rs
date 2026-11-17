@@ -3,7 +3,7 @@
 
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    Button, Checkbox, Column, Scrollable, TextInput, button, checkbox, container, row, scrollable, space, text,
+    Button, Checkbox, Column, Scrollable, TextInput, button, checkbox, column, container, row, scrollable, space, text,
     text_input, tooltip,
 };
 use iced::{Alignment, Element, Length, Theme};
@@ -52,6 +52,16 @@ fn labeled<'a>(label: impl text::IntoFragment<'a>, size: f32) -> Button<'a, Mess
 /// The main action of a dialog or form.
 pub fn primary<'a>(label: impl text::IntoFragment<'a>) -> Button<'a, Message> {
     labeled(label, TEXT).padding([7, 14]).style(theme::button_primary)
+}
+
+/// Any other action of a dialog or form.
+pub fn secondary<'a>(label: impl text::IntoFragment<'a>) -> Button<'a, Message> {
+    labeled(label, TEXT).padding([7, 14]).style(theme::button_secondary)
+}
+
+/// An action of a dialog that deletes or ends something.
+pub fn danger<'a>(label: impl text::IntoFragment<'a>) -> Button<'a, Message> {
+    labeled(label, TEXT).padding([7, 14]).style(theme::button_danger)
 }
 
 /// A smaller button, for actions beside other content, in `style`.
@@ -114,6 +124,11 @@ pub fn note_text<'a>(tone: Tone, message: impl text::IntoFragment<'a>) -> Elemen
 /// A small rounded label.
 pub fn badge<'a>(label: impl text::IntoFragment<'a>, tone: Tone) -> Element<'a, Message> {
     container(text(label).size(11).wrapping(text::Wrapping::None)).padding([1, 7]).style(theme::badge(tone)).into()
+}
+
+/// A label over the field it names.
+pub fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    column![text(label).size(TEXT_SM).font(SEMIBOLD).style(muted), input.into()].spacing(6).into()
 }
 
 /// Text in the muted color, at its default size.

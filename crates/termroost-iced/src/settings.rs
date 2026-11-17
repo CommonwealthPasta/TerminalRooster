@@ -426,7 +426,7 @@ impl App {
                 ]
                 .spacing(16)
                 .align_y(Alignment::Center),
-                crate::dialogs::field(
+                crate::ui::field(
                     "Terminal editor command",
                     text_input(&placeholder, &self.prefs.editor_command).on_input(Message::EditorCommand).padding(6),
                 ),
