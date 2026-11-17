@@ -12,6 +12,8 @@
 //!
 //! What git leaves out (`.gitignore`, `.git/info/exclude`, the global
 //! excludes file) is dimmed, along with everything inside it.
+//!
+//! Each entry has an icon for its kind of file (see [`file_icons`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -21,6 +23,7 @@ use iced::widget::{button, column, container, mouse_area, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
+use crate::file_icons::{self, Hues};
 use crate::icons::{Icon, icon};
 use crate::reveal;
 use crate::side_panel::SideTab;
@@ -32,6 +35,12 @@ use crate::ui::{self, icon_button};
 const MAX_ENTRIES: usize = 1000;
 /// Indent per folder level, in pixels.
 const INDENT: f32 = 14.0;
+/// The width of a folder's chevron, and the space files leave for it.
+const CHEVRON: f32 = 12.0;
+/// The size of an entry's icon.
+const ICON: f32 = 14.0;
+/// The space between a chevron, an icon and a name.
+const GAP: f32 = 4.0;
 /// How often the folders shown are read again.
 pub const POLL: Duration = Duration::from_secs(3);
 
@@ -291,7 +300,8 @@ impl App {
     /// The Files tab of the right panel.
     pub(crate) fn view_files(&self) -> Element<'_, Message> {
         let Some(root) = self.files_root() else { return space::horizontal().width(0).into() };
-        let lines = rows(&root, &self.files).into_iter().map(file_row);
+        let hues = Hues::of(&self.active_theme());
+        let lines = rows(&root, &self.files).into_iter().map(|r| file_row(r, hues));
         let path = mouse_area(muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill))
             .on_right_press(Message::Files(FilesMsg::Menu(root.clone())));
         let top = row![path, icon_button(Icon::Refresh, Message::Files(FilesMsg::Refresh), "Read the folders again")]
@@ -305,21 +315,23 @@ impl App {
     }
 }
 
-fn file_row(r: Row<'_>) -> Element<'_, Message> {
+fn file_row(r: Row<'_>, hues: Hues) -> Element<'_, Message> {
     match r {
         Row::Entry { entry, depth, open, dim } => {
             let chevron: Element<'_, Message> = match (entry.is_dir, open) {
-                (true, true) => icon(Icon::ChevronDown, 12.0, theme::muted).into(),
-                (true, false) => icon(Icon::ChevronRight, 12.0, theme::muted).into(),
-                (false, _) => space::horizontal().width(12).into(),
+                (true, true) => icon(Icon::ChevronDown, CHEVRON, theme::muted).into(),
+                (true, false) => icon(Icon::ChevronRight, CHEVRON, theme::muted).into(),
+                (false, _) => space::horizontal().width(CHEVRON).into(),
             };
+            let look = if entry.is_dir { file_icons::folder(open) } else { file_icons::file(&entry.name) };
             let style = move |t: &iced::Theme| text::Style { color: dim.then(|| theme::muted(t)) };
             let label = row![
                 space::horizontal().width(depth as f32 * INDENT),
                 chevron,
+                file_icons::icon(look, hues, dim, ICON),
                 text(&entry.name).size(13).wrapping(text::Wrapping::None).style(style),
             ]
-            .spacing(4)
+            .spacing(GAP)
             .align_y(Alignment::Center);
             let press =
                 if entry.is_dir { FilesMsg::Toggle(entry.path.clone()) } else { FilesMsg::Open(entry.path.clone()) };
@@ -330,9 +342,14 @@ fn file_row(r: Row<'_>) -> Element<'_, Message> {
                 .on_press(Message::Files(press));
             mouse_area(line).on_right_press(Message::Files(FilesMsg::Menu(entry.path.clone()))).into()
         }
-        Row::Menu { entry, depth } => file_menu(entry.path.clone(), entry.is_dir, depth as f32 * INDENT + 16.0),
+        // Both line up with the icons of the entries around them.
+        Row::Menu { entry, depth } => {
+            file_menu(entry.path.clone(), entry.is_dir, depth as f32 * INDENT + CHEVRON + GAP)
+        }
         Row::Note { text: note, depth } => {
-            row![space::horizontal().width(depth as f32 * INDENT + 22.0), muted_text(note)].padding([3, 6]).into()
+            row![space::horizontal().width(depth as f32 * INDENT + CHEVRON + GAP), muted_text(note)]
+                .padding([3, 6])
+                .into()
         }
     }
 }

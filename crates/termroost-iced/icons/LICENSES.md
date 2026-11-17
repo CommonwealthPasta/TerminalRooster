@@ -1,7 +1,7 @@
 # Interface icons
 
-The line icons in `ui/` were drawn for Terminal Rooster and are under its
-own license (MIT).
+The line icons in `ui/` and `files/` were drawn for Terminal Rooster and are
+under its own license (MIT).
 
 # Agent logos
 

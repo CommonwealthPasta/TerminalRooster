@@ -10,6 +10,7 @@ mod desktop_entry;
 mod dialogs;
 mod diff_lines;
 mod editor;
+mod file_icons;
 mod files;
 mod git_panel;
 mod git_view;

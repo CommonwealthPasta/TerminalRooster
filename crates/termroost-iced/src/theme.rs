@@ -4,7 +4,8 @@
 //! like they belong together:
 //! - All colors come from the theme's six, so a custom theme gets the same
 //!   look. Lines, fills under the pointer and quiet surfaces are the text
-//!   color at a low opacity over what is behind them.
+//!   color at a low opacity over what is behind them. File icons, which
+//!   need more hues, take them from the theme's terminal colors.
 //! - The accent marks what is selected, focused or switched on. Filled
 //!   buttons are drawn in the text color, so they don't compete with it.
 //! - Corners are [`RADIUS_SM`] on small controls, [`RADIUS`] on buttons,
@@ -79,7 +80,7 @@ pub const RADIUS_LG: f32 = 12.0;
 const PILL: f32 = 999.0;
 
 /// `a` moved toward `b` by `t` (0 is `a`, 1 is `b`), as `b` laid over `a` at that opacity.
-fn mix(a: Color, b: Color, t: f32) -> Color {
+pub fn mix(a: Color, b: Color, t: f32) -> Color {
     Color { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
 }
 
