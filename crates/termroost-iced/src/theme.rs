@@ -5,16 +5,18 @@
 //! - All colors come from the theme's six, so a custom theme gets the same
 //!   look. Lines, fills under the pointer and quiet surfaces are the text
 //!   color at a low opacity over what is behind them.
-//! - The accent marks what is selected, focused or switched on.
-//! - Corners are [`RADIUS_SM`] on small controls, and [`RADIUS`] on fields
-//!   and list items.
-//! - What is raised (the selected list item) is lighter than what it sits
-//!   on, and casts a soft shadow.
+//! - The accent marks what is selected, focused or switched on. Filled
+//!   buttons are drawn in the text color, so they don't compete with it.
+//! - Corners are [`RADIUS_SM`] on small controls, and [`RADIUS`] on
+//!   buttons, fields and list items.
+//! - What is raised (menus, the selected list item) is lighter than what
+//!   it sits on, and casts a soft shadow.
 
 use std::sync::LazyLock;
 
 use iced::border;
-use iced::widget::{button, container, pane_grid, scrollable, text_editor, text_input};
+use iced::overlay::menu;
+use iced::widget::{button, container, pane_grid, pick_list, scrollable, text_editor, text_input};
 use iced::{Background, Border, Color, Font, Shadow, Theme, Vector, font};
 
 /// Bundled terminal font (JetBrains Mono, SIL Open Font License 1.1).
@@ -59,7 +61,8 @@ pub const UI: Font = if cfg!(windows) { Font::with_name("Segoe UI") } else { Fon
 pub const SEMIBOLD: Font = Font { weight: font::Weight::Semibold, ..UI };
 pub const BOLD: Font = Font { weight: font::Weight::Bold, ..UI };
 
-/// Text sizes: body text and small print.
+/// Text sizes: a page's title, body text and small print.
+pub const TEXT_PAGE: f32 = 22.0;
 pub const TEXT: f32 = 13.0;
 pub const TEXT_SM: f32 = 12.0;
 
@@ -128,6 +131,11 @@ fn press_fill(t: &Theme) -> Color {
     ink(t).scale_alpha(by_tone(t, 0.10, 0.13))
 }
 
+/// Cards, menus and dialogs.
+pub fn raised(t: &Theme) -> Color {
+    if is_dark(t) { mix(background(t), ink(t), 0.07) } else { mix(background(t), Color::WHITE, 0.85) }
+}
+
 /// The chosen one of several: a selected tab, or the selected item of a list.
 fn chosen(t: &Theme) -> Color {
     if is_dark(t) { mix(background(t), ink(t), 0.14) } else { Color::WHITE }
@@ -141,6 +149,11 @@ fn side(t: &Theme) -> Color {
 /// What text is typed on: set into dark themes, white in light ones.
 fn field(t: &Theme) -> Color {
     if is_dark(t) { mix(background(t), Color::BLACK, 0.12) } else { Color::WHITE }
+}
+
+/// The top of a terminal: its title and buttons.
+fn title_fill(t: &Theme) -> Color {
+    mix(background(t), ink(t), by_tone(t, 0.04, 0.05))
 }
 
 fn shadow(t: &Theme, light: f32, dark: f32, y: f32, blur: f32) -> Shadow {
@@ -199,6 +212,45 @@ fn button_style(background: Option<Color>, text_color: Color, radius: f32) -> bu
     }
 }
 
+/// A filled button, darker (or lighter) under the pointer. Disabled, it fades into the background.
+fn filled(t: &Theme, status: button::Status, fill: Color, on: Color, toward: Color) -> button::Style {
+    let (background, text_color) = match status {
+        button::Status::Active => (fill, on),
+        button::Status::Hovered => (mix(fill, toward, 0.14), on),
+        button::Status::Pressed => (mix(fill, toward, 0.24), on),
+        button::Status::Disabled => (press_fill(t), faint(t)),
+    };
+    let shadow = if status == button::Status::Active || status == button::Status::Hovered {
+        shadow_sm(t)
+    } else {
+        Shadow::default()
+    };
+    button::Style { shadow, ..button_style(Some(background), text_color, RADIUS) }
+}
+
+/// The main action of a dialog or form, filled with the text color.
+pub fn button_primary(t: &Theme, status: button::Status) -> button::Style {
+    filled(t, status, ink(t), background(t), background(t))
+}
+
+/// Any other action: outlined, on a raised fill.
+pub fn button_secondary(t: &Theme, status: button::Status) -> button::Style {
+    let fill = raised(t);
+    let (background, text_color, edge_color, shadow) = match status {
+        button::Status::Active => (fill, ink(t), edge(t), shadow_sm(t)),
+        button::Status::Hovered => (mix(fill, ink(t), 0.05), ink(t), edge(t), shadow_sm(t)),
+        button::Status::Pressed => (mix(fill, ink(t), 0.09), ink(t), edge(t), Shadow::default()),
+        button::Status::Disabled => (fill, faint(t), line(t), Shadow::default()),
+    };
+    button::Style {
+        background: Some(background.into()),
+        text_color,
+        border: Border { width: 1.0, color: edge_color, radius: RADIUS.into() },
+        shadow,
+        snap: true,
+    }
+}
+
 /// Icon buttons, and other buttons that show only a fill under the pointer.
 pub fn button_ghost(t: &Theme, status: button::Status) -> button::Style {
     match status {
@@ -206,6 +258,42 @@ pub fn button_ghost(t: &Theme, status: button::Status) -> button::Style {
         button::Status::Hovered => button_style(Some(hover_fill(t)), ink(t), RADIUS_SM),
         button::Status::Pressed => button_style(Some(press_fill(t)), ink(t), RADIUS_SM),
         button::Status::Disabled => button_style(None, faint(t), RADIUS_SM),
+    }
+}
+
+/// A toolbar button: a light fill of the text color, so a row of them stays quiet.
+pub fn button_tonal(t: &Theme, status: button::Status) -> button::Style {
+    let fill = |light, dark| Some(ink(t).scale_alpha(by_tone(t, light, dark)));
+    match status {
+        button::Status::Active => button_style(fill(0.06, 0.08), ink(t), RADIUS),
+        button::Status::Hovered => button_style(fill(0.10, 0.13), ink(t), RADIUS),
+        button::Status::Pressed => button_style(fill(0.14, 0.17), ink(t), RADIUS),
+        button::Status::Disabled => button_style(fill(0.04, 0.05), faint(t), RADIUS),
+    }
+}
+
+/// One of the choices of a segmented control, or a tab: the chosen one is
+/// raised out of the [`segment_tray`].
+pub fn segment(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |t, status| {
+        if selected {
+            return button::Style { shadow: shadow_sm(t), ..button_style(Some(chosen(t)), ink(t), RADIUS_SM) };
+        }
+        match status {
+            button::Status::Active => button_style(None, muted(t), RADIUS_SM),
+            button::Status::Hovered => button_style(Some(hover_fill(t)), ink(t), RADIUS_SM),
+            button::Status::Pressed => button_style(Some(press_fill(t)), ink(t), RADIUS_SM),
+            button::Status::Disabled => button_style(None, faint(t), RADIUS_SM),
+        }
+    }
+}
+
+/// The tray that holds a segmented control's choices together.
+pub fn segment_tray(t: &Theme) -> container::Style {
+    container::Style {
+        background: Some(ink(t).scale_alpha(by_tone(t, 0.06, 0.08)).into()),
+        border: border::rounded(RADIUS),
+        ..container::Style::default()
     }
 }
 
@@ -234,6 +322,34 @@ pub fn input(t: &Theme, status: text_input::Status) -> text_input::Style {
         placeholder: faint(t),
         value: ink(t),
         selection: accent(t).scale_alpha(0.35),
+    }
+}
+
+/// A dropdown's button, framed like a field.
+pub fn dropdown(t: &Theme, status: pick_list::Status) -> pick_list::Style {
+    let edge_color = match status {
+        pick_list::Status::Active => edge(t),
+        pick_list::Status::Hovered => ink(t).scale_alpha(0.32),
+        pick_list::Status::Opened { .. } => accent(t),
+    };
+    pick_list::Style {
+        text_color: ink(t),
+        placeholder_color: muted(t),
+        handle_color: muted(t),
+        background: field(t).into(),
+        border: Border { width: 1.0, color: edge_color, radius: RADIUS.into() },
+    }
+}
+
+/// A dropdown's list of choices.
+pub fn dropdown_menu(t: &Theme) -> menu::Style {
+    menu::Style {
+        background: raised(t).into(),
+        border: Border { width: 1.0, color: line(t), radius: RADIUS.into() },
+        text_color: ink(t),
+        selected_text_color: ink(t),
+        selected_background: hover_fill(t).into(),
+        shadow: shadow_md(t),
     }
 }
 
@@ -268,6 +384,20 @@ pub fn scrollbars(t: &Theme, status: scrollable::Status) -> scrollable::Style {
         auto_scroll: scrollable::default(t, status).auto_scroll,
     }
 }
+
+/// The file editor: square, framed like a terminal, in the accent color while it has the keyboard.
+pub fn file_editor(t: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let focused = matches!(status, text_editor::Status::Focused { .. });
+    text_editor::Style {
+        background: background(t).into(),
+        border: Border { width: 1.0, color: if focused { accent(t) } else { line(t) }, radius: 0.0.into() },
+        placeholder: faint(t),
+        value: ink(t),
+        selection: accent(t).scale_alpha(0.3),
+    }
+}
+
+// Surfaces
 
 /// The side columns: projects, sessions and the right panel.
 pub fn side_column(t: &Theme) -> container::Style {
@@ -325,6 +455,19 @@ pub fn selection_bar(selected: bool) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// A tinted box with a message, such as an error.
+pub fn note(tone: Tone) -> impl Fn(&Theme) -> container::Style {
+    move |t| {
+        let c = tone_color(t, tone);
+        container::Style {
+            background: Some(c.scale_alpha(by_tone(t, 0.08, 0.12)).into()),
+            text_color: Some(tone_text(t, tone)),
+            border: Border { width: 1.0, color: c.scale_alpha(0.3), radius: RADIUS.into() },
+            ..container::Style::default()
+        }
+    }
+}
+
 /// A small rounded label, such as a branch in the git log.
 pub fn badge(tone: Tone) -> impl Fn(&Theme) -> container::Style {
     move |t| {
@@ -342,6 +485,42 @@ pub fn badge(tone: Tone) -> impl Fn(&Theme) -> container::Style {
 }
 
 // Terminals
+
+/// The frame around a terminal and its title: the accent while it has the keyboard.
+pub fn pane_frame(active: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| container::Style {
+        background: Some(title_fill(t).into()),
+        border: Border { width: 1.0, color: if active { accent(t) } else { line(t) }, radius: 0.0.into() },
+        ..container::Style::default()
+    }
+}
+
+/// A terminal's title bar, on the frame's fill: plain text while the terminal has the keyboard, else muted.
+pub fn title_bar(active: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| container::Style {
+        text_color: Some(if active { ink(t) } else { muted(t) }),
+        ..container::Style::default()
+    }
+}
+
+/// A terminal shown on its own, such as Neovim editing a file: framed like a pane.
+pub fn terminal_frame(t: &Theme) -> container::Style {
+    container::Style {
+        border: Border { width: 1.0, color: line(t), radius: 0.0.into() },
+        ..container::Style::default()
+    }
+}
+
+pub fn pane_grid_style(t: &Theme) -> pane_grid::Style {
+    let mut style = pane_grid::default(t);
+    style.hovered_split.color = accent(t);
+    style.picked_split.color = accent(t);
+    style.hovered_region.background = accent(t).scale_alpha(0.15).into();
+    style.hovered_region.border = Border { width: 1.5, color: accent(t), radius: RADIUS.into() };
+    style
+}
+
+// Dialogs and pop-ups
 
 /// The color of an alert: danger for failures, success for agents.
 pub fn notice_color(t: &Theme, category: crate::notify::Category) -> Color {
@@ -428,38 +607,6 @@ pub fn menu(theme: &Theme) -> container::Style {
     }
 }
 
-/// The file editor: square, framed like a terminal, in the accent color while it has the keyboard.
-pub fn file_editor(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
-    let p = theme.extended_palette();
-    let focused = matches!(status, text_editor::Status::Focused { .. });
-    text_editor::Style {
-        background: Background::Color(p.background.base.color),
-        border: Border {
-            width: 1.0,
-            color: if focused { p.primary.base.color } else { p.background.strong.color },
-            radius: 0.0.into(),
-        },
-        placeholder: muted(theme),
-        value: p.background.base.text,
-        selection: p.primary.weak.color,
-    }
-}
-
-pub fn title_bar(active: bool) -> impl Fn(&Theme) -> container::Style {
-    move |theme| {
-        let p = theme.extended_palette();
-        container::Style {
-            background: Some(Background::Color(if active {
-                p.background.strong.color
-            } else {
-                p.background.weak.color
-            })),
-            text_color: Some(if active { p.background.base.text } else { muted(theme) }),
-            ..container::Style::default()
-        }
-    }
-}
-
 pub fn pane(active: bool) -> impl Fn(&Theme) -> container::Style {
     move |theme| {
         let p = theme.extended_palette();
@@ -472,13 +619,6 @@ pub fn pane(active: bool) -> impl Fn(&Theme) -> container::Style {
             ..container::Style::default()
         }
     }
-}
-
-pub fn pane_grid_style(theme: &Theme) -> pane_grid::Style {
-    let mut style = pane_grid::default(theme);
-    style.hovered_split.color = accent(theme);
-    style.picked_split.color = accent(theme);
-    style
 }
 
 pub fn modal_backdrop(_theme: &Theme) -> container::Style {
@@ -494,16 +634,6 @@ pub fn modal_card(theme: &Theme) -> container::Style {
         background: Some(Background::Color(p.background.weak.color)),
         text_color: Some(p.background.weak.text),
         border: Border { width: 1.0, color: p.background.strong.color, radius: 8.0.into() },
-        ..container::Style::default()
-    }
-}
-
-pub fn error_banner(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.danger.weak.color)),
-        text_color: Some(p.danger.weak.text),
-        border: Border::default().rounded(4),
         ..container::Style::default()
     }
 }
@@ -531,16 +661,6 @@ pub fn drag_label(theme: &Theme) -> container::Style {
             offset: iced::Vector::new(0.0, 2.0),
             blur_radius: 8.0,
         },
-        ..container::Style::default()
-    }
-}
-
-pub fn notice_banner(theme: &Theme) -> container::Style {
-    let p = theme.extended_palette();
-    container::Style {
-        background: Some(Background::Color(p.primary.weak.color)),
-        text_color: Some(p.primary.weak.text),
-        border: Border::default().rounded(4),
         ..container::Style::default()
     }
 }

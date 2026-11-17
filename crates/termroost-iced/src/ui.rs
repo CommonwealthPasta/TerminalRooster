@@ -2,7 +2,9 @@
 //! that a button, a field or a note looks the same wherever it is.
 
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Column, Scrollable, TextInput, button, container, scrollable, space, text, text_input, tooltip};
+use iced::widget::{
+    Button, Column, Scrollable, TextInput, button, container, row, scrollable, space, text, text_input, tooltip,
+};
 use iced::{Element, Length, Theme};
 
 use crate::app::Message;
@@ -42,6 +44,23 @@ pub fn icon_button<'a>(glyph: Icon, msg: Message, label: impl Into<String>) -> E
     )
 }
 
+fn labeled<'a>(label: impl text::IntoFragment<'a>, size: f32) -> Button<'a, Message> {
+    button(text(label).size(size).wrapping(text::Wrapping::None))
+}
+
+/// The main action of a dialog or form.
+pub fn primary<'a>(label: impl text::IntoFragment<'a>) -> Button<'a, Message> {
+    labeled(label, TEXT).padding([7, 14]).style(theme::button_primary)
+}
+
+/// A smaller button, for actions beside other content, in `style`.
+pub fn small<'a>(
+    label: impl text::IntoFragment<'a>,
+    style: impl Fn(&Theme, button::Status) -> button::Style + 'a,
+) -> Button<'a, Message> {
+    labeled(label, TEXT_SM).padding([4, 10]).style(style)
+}
+
 /// A text field.
 pub fn input<'a>(placeholder: &str, value: &str) -> TextInput<'a, Message> {
     text_input(placeholder, value).size(TEXT).padding([6, 10]).style(theme::input)
@@ -54,9 +73,19 @@ pub fn scroll<'a>(content: impl Into<Element<'a, Message>>) -> Scrollable<'a, Me
         .style(theme::scrollbars)
 }
 
+/// A hairline across the width it is given.
+pub fn divider<'a>() -> Element<'a, Message> {
+    container(space()).width(Length::Fill).height(1).style(theme::divider).into()
+}
+
 /// A hairline down the height it is given.
 pub fn vertical_divider<'a>() -> Element<'a, Message> {
     container(space()).width(1).height(Length::Fill).style(theme::divider).into()
+}
+
+/// A tinted box with a message.
+pub fn note<'a>(tone: Tone, content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content).padding([8, 12]).width(Length::Fill).style(theme::note(tone)).into()
 }
 
 /// A small rounded label.
@@ -72,4 +101,18 @@ pub fn muted(t: &Theme) -> text::Style {
 /// A small heading over a group of things, such as a column's list.
 pub fn heading<'a>(label: &'a str) -> text::Text<'a> {
     text(label).size(TEXT_SM).font(SEMIBOLD).style(muted)
+}
+
+/// Choices side by side in a tray, the chosen one raised; for picking one of
+/// a few, or for tabs.
+pub fn segmented<'a>(choices: impl IntoIterator<Item = (String, bool, Message)>) -> Element<'a, Message> {
+    let buttons = choices.into_iter().map(|(label, selected, msg)| {
+        let font = if selected { SEMIBOLD } else { theme::UI };
+        button(text(label).size(TEXT_SM).font(font).wrapping(text::Wrapping::None))
+            .padding([3, 10])
+            .style(theme::segment(selected))
+            .on_press(msg)
+            .into()
+    });
+    container(row(buttons).spacing(2)).padding(2).style(theme::segment_tray).into()
 }

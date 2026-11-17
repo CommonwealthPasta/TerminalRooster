@@ -1,10 +1,10 @@
 //! The terminal area: header plus the split pane grid of the visible tab.
 
-use iced::widget::{button, center, column, container, pane_grid, pick_list, row, space, text, tooltip};
+use iced::widget::{center, column, container, pane_grid, pick_list, row, space, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 use termroost_core::{AgentKind, Axis, PaneId, Tab};
 
-use crate::agent_icon::agent_icon;
+use crate::agent_icon::{agent_icon, terminal_icon};
 use crate::app::{App, Message};
 use crate::icons::Icon;
 use crate::keymap::Action;
@@ -13,8 +13,8 @@ use crate::notify::Category;
 use crate::side_panel::SideTab;
 use crate::sidebar::{branch_label, muted_text, short_dir};
 use crate::terminal_view::TerminalView;
-use crate::theme::{self, BOLD, Tone};
-use crate::ui::{ICON_BUTTON_WIDTH, icon_button, tip};
+use crate::theme::{self, SEMIBOLD, Tone};
+use crate::ui::{self, ICON_BUTTON_WIDTH, icon_button, tip};
 use crate::worktree::WorktreeMsg;
 
 /// Space between the buttons of a terminal's title bar.
@@ -23,32 +23,43 @@ const CONTROL_SPACING: f32 = 2.0;
 const COMPACT_CONTROLS_WIDTH: f32 = 2.0 * ICON_BUTTON_WIDTH + CONTROL_SPACING;
 /// Space between a terminal's title and its buttons.
 const TITLE_GAP: f32 = 8.0;
+/// Height of the bar over the terminals.
+const HEADER_HEIGHT: f32 = 40.0;
+
+/// A message in the middle of the terminal area, with what to do about it.
+fn empty_state<'a>(title: String, about: &'a str, action: &'a str, msg: Message) -> Element<'a, Message> {
+    center(
+        column![
+            terminal_icon(48.0),
+            column![text(title).size(theme::TEXT_PAGE).font(SEMIBOLD), text(about).size(theme::TEXT).style(ui::muted)]
+                .spacing(4)
+                .align_x(Alignment::Center),
+            ui::primary(action).on_press(msg),
+        ]
+        .spacing(18)
+        .align_x(Alignment::Center),
+    )
+    .into()
+}
 
 impl App {
     pub(crate) fn view_main(&self) -> Element<'_, Message> {
         let s = self.core.state();
         let Some(project) = s.selected_project.and_then(|p| s.project(p)) else {
-            return center(
-                column![
-                    text(crate::DISPLAY_NAME).size(30).font(BOLD),
-                    text("Projects keep their terminals, splits and tasks, even across restarts and crashes."),
-                    button(text("New project")).padding([6, 14]).on_press(Message::NewProject),
-                ]
-                .spacing(14)
-                .align_x(Alignment::Center),
-            )
-            .into();
+            return empty_state(
+                crate::DISPLAY_NAME.to_owned(),
+                "Projects keep their terminals, splits and tasks, even across restarts and crashes.",
+                "New project",
+                Message::NewProject,
+            );
         };
         let Some(tab) = s.active_tab() else {
-            return center(
-                column![
-                    text(format!("{} has no sessions", project.name)),
-                    button(text("New session")).padding([6, 14]).on_press(Message::NewTab),
-                ]
-                .spacing(12)
-                .align_x(Alignment::Center),
-            )
-            .into();
+            return empty_state(
+                format!("{} has no sessions", project.name),
+                "A session is a set of terminals, split side by side, that comes back after a restart.",
+                "New session",
+                Message::NewTab,
+            );
         };
 
         let open: usize = s.tasks_of(project.id).filter(|t| !t.done).count();
@@ -58,55 +69,49 @@ impl App {
         let panel_buttons: Element<'_, Message> = if self.prefs.panel_open {
             space::horizontal().width(0).into()
         } else {
-            let show = |label: String, tab: SideTab| {
-                button(text(label).size(12)).padding([3, 10]).style(button::secondary).on_press(Message::ShowPanel(tab))
-            };
-            let mut buttons = row![show(format!("Tasks ({open})"), SideTab::Tasks)].spacing(6);
+            let mut choices = vec![(format!("Tasks ({open})"), false, Message::ShowPanel(SideTab::Tasks))];
             if git.is_some() {
-                buttons = buttons.push(show("Git".into(), SideTab::Git));
+                choices.push(("Git".into(), false, Message::ShowPanel(SideTab::Git)));
             }
-            buttons.push(show("Files".into(), SideTab::Files)).into()
+            choices.push(("Files".into(), false, Message::ShowPanel(SideTab::Files)));
+            ui::segmented(choices)
         };
-        let mut header = row![text(&tab.title).size(14).font(BOLD)];
+        let mut header = row![text(&tab.title).size(14).font(SEMIBOLD)];
         if let Some(head) = git.and_then(|g| g.head.as_ref()) {
             header = header.push(branch_label(head, 12.0, 40));
         }
         header = header.push(muted_text(short_dir(&s.tab_working_dir(tab), 70)).wrapping(text::Wrapping::None));
         header = header.push(space::horizontal());
         if git.is_some() {
-            let worktrees = button(text("Worktrees").size(12))
-                .padding([3, 10])
-                .style(button::secondary)
-                .on_press(Message::Worktree(WorktreeMsg::Open));
             header = header.push(tip(
-                worktrees,
+                ui::small("Worktrees", theme::button_tonal).on_press(Message::Worktree(WorktreeMsg::Open)),
                 "Switch this session to another git worktree, or make a new one",
                 tooltip::Position::Bottom,
             ));
         }
-        let header = header.push(panel_buttons).spacing(10).align_y(Alignment::Center).padding([4, 10]);
+        let header = container(header.push(panel_buttons).spacing(10).align_y(Alignment::Center))
+            .padding([0, 12])
+            .height(HEADER_HEIGHT)
+            .center_y(HEADER_HEIGHT);
 
-        let mut banners = column![];
-        let messages = [
-            (&self.error, Message::DismissError, theme::error_banner as fn(&iced::Theme) -> container::Style),
-            (&self.notice, Message::DismissNotice, theme::notice_banner),
-        ];
-        for (message, dismiss, style) in messages {
+        let mut banners = column![].spacing(6).padding(Padding { top: 8.0, right: 8.0, bottom: 0.0, left: 8.0 });
+        let messages =
+            [(&self.error, Message::DismissError, Tone::Danger), (&self.notice, Message::DismissNotice, Tone::Accent)];
+        for (message, dismiss, tone) in messages {
             if let Some(message) = message {
-                banners = banners.push(
-                    container(
-                        row![text(message).size(13).width(Length::Fill), icon_button(Icon::Close, dismiss, "Dismiss")]
-                            .align_y(Alignment::Center),
-                    )
-                    .padding([4, 10])
-                    .style(style),
-                );
+                let line = row![
+                    text(message).size(theme::TEXT).width(Length::Fill),
+                    icon_button(Icon::Close, dismiss, "Dismiss")
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center);
+                banners = banners.push(ui::note(tone, line));
             }
         }
         let body: Element<'_, Message> = match (self.shown_doc(), self.grids.get(&tab.id)) {
             (Some(doc), _) => self.view_doc(doc),
             (None, Some(grid)) => pane_grid(grid, move |_, pane, _| self.pane_content(*pane, tab))
-                .spacing(3)
+                .spacing(4)
                 .on_click(Message::PaneClicked)
                 .on_drag(Message::PaneDragged)
                 .on_resize(8, Message::PaneResized)
@@ -117,7 +122,8 @@ impl App {
         // Each part keeps its place in the column whether it shows anything or
         // not: widgets are matched to their state by position, so a banner
         // coming and going would otherwise reset the editor and the terminals.
-        column![header, self.view_file_strip(), banners, container(body).padding(3).height(Length::Fill)].into()
+        column![header, ui::divider(), self.view_file_strip(), banners, container(body).padding(6).height(Length::Fill)]
+            .into()
     }
 
     fn pane_content<'a>(&'a self, pane: PaneId, tab: &'a Tab) -> pane_grid::Content<'a, Message> {
@@ -136,7 +142,7 @@ impl App {
                 Message::RestartPane(pane),
             )
             .into(),
-            None => center(text("starting…")).into(),
+            None => center(text("Starting…").style(ui::muted)).into(),
         };
 
         let title = handle.as_ref().and_then(|h| h.title()).unwrap_or_else(|| "Terminal".to_owned());
@@ -179,7 +185,9 @@ impl App {
             pick_list(&AgentKind::ALL[..], None::<AgentKind>, move |k| Message::StartAgent(pane, k))
                 .placeholder("Start agent")
                 .text_size(12)
-                .padding([2, 6]),
+                .padding([2, 8])
+                .style(theme::dropdown)
+                .menu_style(theme::dropdown_menu),
             icon_button(Icon::Settings, Message::PaneSettings(pane), "Terminal settings & resume command"),
             icon_button(
                 Icon::SplitRight,
@@ -206,10 +214,14 @@ impl App {
         let title_bar = pane_grid::TitleBar::new(leave_room(title_row, COMPACT_CONTROLS_WIDTH))
             .controls(pane_grid::Controls::dynamic(full, compact))
             .always_show_controls()
-            .padding([2, 6])
+            .padding(Padding { top: 3.0, right: 4.0, bottom: 3.0, left: 10.0 })
             .style(theme::title_bar(active));
 
-        pane_grid::Content::new(container(body).width(Length::Fill).height(Length::Fill).style(theme::pane(active)))
-            .title_bar(title_bar)
+        // The frame's fill shows behind the title bar; the terminal sits inside its edges.
+        let body = container(body)
+            .padding(Padding { top: 0.0, right: 1.0, bottom: 1.0, left: 1.0 })
+            .width(Length::Fill)
+            .height(Length::Fill);
+        pane_grid::Content::new(body).title_bar(title_bar).style(theme::pane_frame(active))
     }
 }

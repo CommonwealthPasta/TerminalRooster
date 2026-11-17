@@ -9,8 +9,8 @@ use crate::app::{App, Message};
 use crate::icons::Icon;
 use crate::sidebar::{display_dir, muted_text};
 use crate::terminal_view::TerminalView;
-use crate::theme::{self, MONO};
-use crate::ui::{icon_button, tip};
+use crate::theme::{self, MONO, SEMIBOLD, Tone};
+use crate::ui::{self, icon_button, tip};
 
 impl App {
     /// "Terminals", then each file the visible session has open. Nothing
@@ -20,9 +20,10 @@ impl App {
             return space::vertical().height(0).into();
         };
         let tab = |label: String, selected: bool, msg: Message| {
-            button(text(label).size(12).wrapping(text::Wrapping::None))
+            let font = if selected { SEMIBOLD } else { theme::UI };
+            button(text(label).size(12).font(font).wrapping(text::Wrapping::None))
                 .padding([3, 10])
-                .style(theme::panel_tab(selected))
+                .style(theme::segment(selected))
                 .on_press(msg)
         };
         let mut strip = row![tab("Terminals".into(), files.shown.is_none(), Message::Editor(EditorMsg::Show(None)))]
@@ -41,7 +42,7 @@ impl App {
             .align_y(Alignment::Center);
             strip = strip.push(tip(item, display_dir(&doc.path), tooltip::Position::Bottom));
         }
-        container(strip.wrap()).padding([2, 8]).into()
+        container(column![container(strip.wrap()).padding([5, 8]), ui::divider()]).into()
     }
 
     /// A file shown in place of the terminals.
@@ -59,9 +60,10 @@ impl App {
                 Message::Noop,
                 Message::Noop,
             ))
+            .padding(1)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::pane(true))
+            .style(theme::terminal_frame)
             .into(),
             DocKind::Text(t) => {
                 let id = doc.id;
@@ -97,26 +99,23 @@ impl App {
 /// Under the text when the file went its own way on disk: what happened,
 /// and what to do about it.
 fn conflict_banner<'a>(id: DocId, conflict: Option<Conflict>) -> Element<'a, Message> {
-    let small = |label: &'a str, msg: EditorMsg| {
-        button(text(label).size(12)).padding([3, 10]).style(button::secondary).on_press(Message::Editor(msg))
-    };
-    let (message, buttons, style): (&str, _, fn(&iced::Theme) -> container::Style) = match conflict {
+    let small =
+        |label: &'a str, msg: EditorMsg| ui::small(label, theme::button_secondary).on_press(Message::Editor(msg));
+    let (message, buttons, tone) = match conflict {
         None => return space::vertical().height(0).into(),
         Some(Conflict::Changed(_)) => (
             "This file changed on disk, and you have unsaved changes here.",
             row![small("Reload", EditorMsg::Reload(id)), small("Keep mine", EditorMsg::KeepMine(id))],
-            theme::notice_banner,
+            Tone::Accent,
         ),
         Some(Conflict::Deleted) => (
             "This file was deleted from disk.",
             row![small("Save it again", EditorMsg::SaveAnyway(id)), small("Close", EditorMsg::Close(id))],
-            theme::error_banner,
+            Tone::Danger,
         ),
     };
-    container(row![text(message).size(13).width(Length::Fill), buttons.spacing(6)].align_y(Alignment::Center))
-        .padding([4, 10])
-        .style(style)
-        .into()
+    let line = row![text(message).size(13).width(Length::Fill), buttons.spacing(6)].align_y(Alignment::Center);
+    container(ui::note(tone, line)).padding([6, 0]).into()
 }
 
 impl App {
