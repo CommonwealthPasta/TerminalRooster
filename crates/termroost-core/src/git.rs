@@ -347,15 +347,17 @@ impl Repo {
         packed.lines().find_map(|l| l.strip_suffix(target)?.strip_suffix(' ').map(str::to_owned))
     }
 
-    /// A fingerprint of where HEAD and every branch and tag point. It changes
-    /// when a commit, checkout, reset, rebase or fetch moves a ref. It only
-    /// reads files, so it can be checked often to decide when to run `git log`.
+    /// A fingerprint of where HEAD and every branch and tag point, and of the
+    /// repository's config. It changes when a commit, checkout, reset, rebase
+    /// or fetch moves a ref, and when a remote or the branch a branch tracks
+    /// changes. It only reads files, so it can be checked often to decide
+    /// when to run `git log`.
     pub fn ref_stamp(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         let read = |p: &Path| std::fs::read(p).ok();
         read(&self.git_dir.join("HEAD")).hash(&mut h);
-        for file in ["packed-refs", "reftable/tables.list"] {
+        for file in ["config", "packed-refs", "reftable/tables.list"] {
             read(&self.common_dir.join(file)).hash(&mut h);
         }
         let mut dirs = vec![self.common_dir.join("refs")];
@@ -943,6 +945,11 @@ mod tests {
         assert_ne!(repo.ref_stamp(), stamp);
         assert_eq!(repo.log(false, 50).unwrap()[0].subject, "second");
         assert_eq!(repo.log(false, 1).unwrap().len(), 1);
+
+        // A new remote changes it too, though no ref moved.
+        let stamp = repo.ref_stamp();
+        run(&["remote", "add", "fork", "../fork.git"]).unwrap();
+        assert_ne!(repo.ref_stamp(), stamp);
 
         // A commit on another branch shows only in the log of every branch.
         run(&["switch", "-q", "-c", "side"]).unwrap();

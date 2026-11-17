@@ -1,9 +1,9 @@
 //! The Git tab of the side panel: the log of the visible session's
 //! repository, between the Tasks and Files tabs. It follows new commits:
-//! every git poll compares the repository's refs, and reads the log again
-//! when they moved. Commits that are on no remote are marked, and the
-//! branch's distance to its upstream is shown, with Pull (rebasing by
-//! default) and Push.
+//! every git poll compares the repository's refs and config, and reads the
+//! log again when they changed. Commits that are on no remote are marked,
+//! and the branch's distance to its upstream is shown, with Pull (rebasing
+//! by default) and Push.
 
 use std::path::PathBuf;
 
