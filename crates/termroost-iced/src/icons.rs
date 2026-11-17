@@ -23,10 +23,11 @@ pub enum Icon {
     ArrowDown,
     ArrowUp,
     Search,
+    Copy,
 }
 
 /// The files, in the order of [`Icon`].
-const SOURCES: [&[u8]; 15] = [
+const SOURCES: [&[u8]; 16] = [
     include_bytes!("../icons/ui/plus.svg"),
     include_bytes!("../icons/ui/close.svg"),
     include_bytes!("../icons/ui/edit.svg"),
@@ -42,6 +43,7 @@ const SOURCES: [&[u8]; 15] = [
     include_bytes!("../icons/ui/arrow_down.svg"),
     include_bytes!("../icons/ui/arrow_up.svg"),
     include_bytes!("../icons/ui/search.svg"),
+    include_bytes!("../icons/ui/copy.svg"),
 ];
 
 // Built once so every view hands iced the same handles, and their rasterized

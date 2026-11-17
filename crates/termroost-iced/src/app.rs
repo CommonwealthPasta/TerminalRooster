@@ -443,6 +443,8 @@ pub enum Message {
     DismissSync,
     Remotes(RemotesMsg),
 
+    /// Puts text on the clipboard.
+    CopyText(String),
     DismissError,
     DismissNotice,
 }
@@ -1752,6 +1754,7 @@ impl App {
                 self.mark_prefs();
                 return self.refresh_log();
             }
+            Message::CopyText(text) => return iced::clipboard::write(text),
             Message::DismissError => self.error = None,
             Message::DismissNotice => self.notice = None,
         }
