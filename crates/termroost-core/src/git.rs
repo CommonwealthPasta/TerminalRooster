@@ -1,15 +1,20 @@
 //! Git awareness for sessions: the branch a directory is on, and working
-//! trees made beside a repository.
+//! trees made beside a repository. The `diff` module reads what changed, in
+//! commits and in the working tree, and stages and commits changes.
 //!
 //! [`Repo::discover`] and [`Repo::head`] only read files under `.git`, so a
 //! front end can poll them for every visible session. Everything else runs
 //! the `git` program.
+
+mod diff;
 
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+pub use diff::{CommitDetails, DiffLine, FileDiff, FileStatus, Hunk, LineKind, Signature, WorkingChanges};
 
 /// The working tree a directory belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]

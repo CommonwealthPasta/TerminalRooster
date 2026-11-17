@@ -19,6 +19,7 @@ use crate::color_picker::{ColorPicker, Hsl};
 use crate::editor::{DocId, EditorMsg, FileEditor, SessionFiles};
 use crate::files::{FilesMsg, FilesState};
 use crate::git_panel::{GitLog, GitSync, LogRead, SyncOp};
+use crate::git_view::GitViewMsg;
 use crate::groups;
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
@@ -447,6 +448,8 @@ pub enum Message {
     PullRebase(bool),
     DismissSync,
     Remotes(RemotesMsg),
+    /// Commits shown in place of the terminals.
+    GitView(GitViewMsg),
 
     /// Puts text on the clipboard.
     CopyText(String),
@@ -913,6 +916,7 @@ impl App {
         let quiet = match &message {
             Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
             Message::Editor(msg) => !msg.loggable(),
+            Message::GitView(msg) => !msg.loggable(),
             _ => false,
         };
         if !quiet {
@@ -956,7 +960,8 @@ impl App {
                 self.window_id = Some(id);
                 self.window_focused = focused;
                 if focused {
-                    return self.update(Message::Editor(EditorMsg::DiskPoll));
+                    let changes = self.poll_changes();
+                    return Task::batch([self.update(Message::Editor(EditorMsg::DiskPoll)), changes]);
                 }
             }
             Message::WindowFound(id) => self.window_id = self.window_id.or(id),
@@ -1746,10 +1751,13 @@ impl App {
             }
             Message::TaskDragEnd => self.task_drag = None,
             Message::GitPoll => {
+                // The changes on screen follow what agents do to the files.
+                let changes = if self.window_focused { self.poll_changes() } else { Task::none() };
                 if !self.git_polling {
                     self.git_polling = true;
-                    return self.read_git();
+                    return Task::batch([self.read_git(), changes]);
                 }
+                return changes;
             }
             Message::GitStatus { statuses, gone } => {
                 self.git_polling = false;
@@ -1771,6 +1779,7 @@ impl App {
             }
             Message::DismissSync => self.git_sync = None,
             Message::Remotes(msg) => return self.update_remotes(msg),
+            Message::GitView(msg) => return self.update_git_view(msg),
             Message::LogAllBranches(all) => {
                 self.prefs.log_all_branches = all;
                 self.mark_prefs();

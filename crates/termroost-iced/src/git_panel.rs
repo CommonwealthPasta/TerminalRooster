@@ -3,15 +3,17 @@
 //! every git poll compares the repository's refs and config, and reads the
 //! log again when they changed. Commits that are on no remote are marked,
 //! and the branch's distance to its upstream is shown, with Pull (rebasing
-//! by default) and Push.
+//! by default) and Push. A commit clicked shows what it changed in place of
+//! the terminals (see `git_view`).
 
 use std::path::PathBuf;
 
-use iced::widget::{column, container, pick_list, row, space, text};
+use iced::widget::{button, column, container, pick_list, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
+use crate::git_view::GitViewMsg;
 use crate::icons::Icon;
 use crate::remotes::RemotesMsg;
 use crate::side_panel::SideTab;
@@ -53,6 +55,9 @@ pub struct GitLog {
     /// How the commits stand against the remotes; `None` until read, or
     /// when git could not tell.
     pub tracking: Option<Tracking>,
+    /// How many files (or new folders) changed since the last commit;
+    /// `None` until read.
+    pub changes: Option<usize>,
 }
 
 /// A log read in the background.
@@ -64,6 +69,7 @@ pub struct LogRead {
     /// `None` when the refs have not moved since the log on screen was read.
     pub commits: Option<Result<Vec<Commit>, String>>,
     pub tracking: Option<Tracking>,
+    pub changes: Option<usize>,
 }
 
 /// `s` cut to `max` characters, ending in "…" when cut.
@@ -76,7 +82,7 @@ fn shorten(s: &str, max: usize) -> String {
 }
 
 /// "5m ago", or the date for anything older than a week.
-fn ago(time: i64, now: i64) -> String {
+pub(crate) fn ago(time: i64, now: i64) -> String {
     let secs = (now - time).max(0);
     match secs {
         0..60 => "just now".to_owned(),
@@ -121,8 +127,14 @@ impl App {
             _ => {
                 // A read still running is for the old log: dropped when it
                 // arrives, which starts this one.
-                self.git_log =
-                    Some(GitLog { worktree: repo.worktree.clone(), all, commits: None, stamp: None, tracking: None });
+                self.git_log = Some(GitLog {
+                    worktree: repo.worktree.clone(),
+                    all,
+                    commits: None,
+                    stamp: None,
+                    tracking: None,
+                    changes: None,
+                });
                 None
             }
         };
@@ -139,7 +151,9 @@ impl App {
             let tracking = changed
                 .then(|| repo.tracking(all, LOG_LIMIT))
                 .and_then(|t| t.map_err(|e| tracing::warn!(error = %e, "reading the git remotes failed")).ok());
-            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, all, stamp, commits, tracking });
+            // Files change without refs moving: counted every time.
+            let changes = Repo::changes(&repo.worktree).ok();
+            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, all, stamp, commits, tracking, changes });
         });
         Task::perform(async move { rx.recv().await.ok() }, |read| match read {
             Some(read) => Message::LogRead(read),
@@ -153,6 +167,7 @@ impl App {
         self.log_reading = false;
         match &mut self.git_log {
             Some(log) if log.worktree == read.worktree && log.all == read.all => {
+                log.changes = read.changes;
                 match read.commits {
                     None => {}
                     Some(Ok(commits)) => {
@@ -210,14 +225,19 @@ impl App {
             title = title.push(note);
         }
 
+        let changes = changes_item(self.git_log.as_ref().and_then(|l| l.changes), self.changes_shown());
         let body: Element<'_, Message> = match self.git_log.as_ref().and_then(|l| l.commits.as_ref()) {
             None => muted_text("Reading the log…").size(12).into(),
             Some(Err(e)) => ui::note_text(Tone::Danger, e),
-            Some(Ok(commits)) if commits.is_empty() => muted_text("No commits yet.").size(12).into(),
+            Some(Ok(commits)) if commits.is_empty() => {
+                column![changes, container(muted_text("No commits yet.").size(12)).padding([0, 8])].spacing(8).into()
+            }
             Some(Ok(commits)) => {
                 let now = chrono::Utc::now().timestamp();
                 let unpushed = |c: &Commit| tracking.is_some_and(|t| t.unpushed.contains(&c.id));
-                let list = column(commits.iter().map(|c| commit_item(c, unpushed(c), now)))
+                let shown = self.shown_commit();
+                let items = commits.iter().map(|c| commit_item(c, unpushed(c), shown == Some(&c.id), now));
+                let list = column(std::iter::once(changes).chain(items))
                     .spacing(4)
                     .padding(iced::Padding { right: 10.0, ..iced::Padding::ZERO });
                 ui::scroll(list).height(Length::Fill).into()
@@ -392,9 +412,29 @@ fn remote_status(t: &Tracking, head: Option<&Head>) -> Option<String> {
     })
 }
 
+/// The first item of the log: what is not committed yet, and how much.
+/// Pressed, it shows the changes, to stage and commit them.
+fn changes_item<'a>(count: Option<usize>, shown: bool) -> Element<'a, Message> {
+    let mut item = column![text("Uncommitted changes").size(13)].spacing(3);
+    if let Some(n) = count {
+        item = item.push(muted_text(match n {
+            0 => "Nothing to commit".to_owned(),
+            1 => "1 change".to_owned(),
+            n => format!("{n} changes"),
+        }));
+    }
+    button(item)
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(theme::list_button(shown))
+        .on_press(Message::GitView(GitViewMsg::OpenChanges))
+        .into()
+}
+
 /// One commit: subject, then id, author and age, then branches and tags,
-/// and whether it is on no remote yet.
-fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
+/// and whether it is on no remote yet. Pressed, it shows what it changed;
+/// the one `shown` is raised.
+fn commit_item(c: &Commit, unpushed: bool, shown: bool, now: i64) -> Element<'_, Message> {
     let meta = row![
         text(&c.short)
             .font(theme::MONO)
@@ -418,7 +458,12 @@ fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
         );
         item = item.push(row(badges).spacing(4).wrap().vertical_spacing(4));
     }
-    container(item).padding([6, 8]).width(Length::Fill).into()
+    button(item)
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(theme::list_button(shown))
+        .on_press(Message::GitView(GitViewMsg::OpenCommit(c.id.clone())))
+        .into()
 }
 
 #[cfg(test)]

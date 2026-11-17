@@ -8,9 +8,11 @@ mod color_picker;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod dialogs;
+mod diff_lines;
 mod editor;
 mod files;
 mod git_panel;
+mod git_view;
 mod gone_folders;
 mod groups;
 mod icons;
