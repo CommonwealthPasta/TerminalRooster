@@ -420,7 +420,9 @@ impl App {
         let name = text(&tab.title).size(NAME_SIZE).width(Length::Fill).wrapping(text::Wrapping::WordOrGlyph);
         let busy = on_first_line(busy_mark(self.busy_in(panes.iter().copied()), theme::accent));
         let mut label = column![row![on_first_line(marks), name, busy, on_first_line(badge)].spacing(6)].spacing(2);
-        if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
+        if let Some(badge) = self.gone_badge(tab) {
+            label = label.push(badge);
+        } else if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
             label = label.push(branch_label(head, 11.0, 24));
         }
         let label = label.push(muted_text(subtitle));

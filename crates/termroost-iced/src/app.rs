@@ -430,8 +430,13 @@ pub enum Message {
 
     /// Time to read the visible sessions' branches again.
     GitPoll,
-    /// Where each session directory stands in git (`None`: not in a repository).
-    GitStatus(Vec<(PathBuf, Option<git::Status>)>),
+    GitStatus {
+        /// Where each session directory of the selected project stands in
+        /// git (`None`: not in a repository).
+        statuses: Vec<(PathBuf, Option<git::Status>)>,
+        /// The directories of all sessions that no longer exist.
+        gone: Vec<PathBuf>,
+    },
     Worktree(WorktreeMsg),
     RemoveWorktree(RemoveMsg),
     LogRead(LogRead),
@@ -484,6 +489,8 @@ pub struct App {
     pub(crate) git: HashMap<PathBuf, Option<git::Status>>,
     /// A periodic git read is running.
     git_polling: bool,
+    /// Session folders deleted outside the app (see `gone_folders`).
+    pub(crate) gone: HashSet<PathBuf>,
     /// The log in the side panel's Git tab.
     pub(crate) git_log: Option<GitLog>,
     /// The Git tab's last pull, push or change of remote.
@@ -594,6 +601,7 @@ impl App {
             notice: None,
             git: HashMap::new(),
             git_polling: false,
+            gone: HashSet::new(),
             git_log: None,
             git_sync: None,
             log_reading: false,
@@ -799,13 +807,20 @@ impl App {
     }
 
     /// Reads the git status of the selected project's sessions on a thread
-    /// (directories may be on a slow network drive).
+    /// (directories may be on a slow network drive), and looks whether the
+    /// folders of all sessions still exist.
     pub(crate) fn read_git(&self) -> Task<Message> {
         let s = self.core.state();
-        let Some(project) = s.selected_project else { return Task::none() };
-        let mut dirs: Vec<PathBuf> = s.tabs_of(project).map(|t| s.tab_working_dir(t)).collect();
-        dirs.sort();
-        dirs.dedup();
+        let sorted = |mut dirs: Vec<PathBuf>| {
+            dirs.sort();
+            dirs.dedup();
+            dirs
+        };
+        let dirs = sorted(match s.selected_project {
+            Some(project) => s.tabs_of(project).map(|t| s.tab_working_dir(t)).collect(),
+            None => Vec::new(),
+        });
+        let all = sorted(s.tabs.iter().map(|t| s.tab_working_dir(t)).collect());
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let statuses = dirs
@@ -815,9 +830,13 @@ impl App {
                     (d, status)
                 })
                 .collect();
-            let _ = tx.send_blocking(statuses);
+            let gone = all.into_iter().filter(|d| !d.is_dir()).collect();
+            let _ = tx.send_blocking((statuses, gone));
         });
-        Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::GitStatus)
+        Task::perform(async move { rx.recv().await.unwrap_or_default() }, |(statuses, gone)| Message::GitStatus {
+            statuses,
+            gone,
+        })
     }
 
     /// Moves keyboard focus to the focused terminal of the visible tab, or to
@@ -1732,8 +1751,11 @@ impl App {
                     return self.read_git();
                 }
             }
-            Message::GitStatus(statuses) => {
+            Message::GitStatus { statuses, gone } => {
                 self.git_polling = false;
+                // Before the statuses: a worktree is told apart from a plain
+                // folder by what git said before it went.
+                self.folders_gone(gone);
                 self.git.extend(statuses);
                 // The session on screen may be in another repository now.
                 return self.refresh_log();

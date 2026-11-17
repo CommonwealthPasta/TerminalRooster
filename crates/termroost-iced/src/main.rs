@@ -11,6 +11,7 @@ mod dialogs;
 mod editor;
 mod files;
 mod git_panel;
+mod gone_folders;
 mod groups;
 mod icons;
 mod keymap;

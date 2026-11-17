@@ -81,14 +81,16 @@ impl App {
             header = header.push(branch_label(head, 12.0, 40));
         }
         let dir = s.tab_working_dir(tab);
-        header = header.push(
-            row![
-                muted_text(short_dir(&dir, 70)).wrapping(text::Wrapping::None),
-                icon_button(Icon::Copy, Message::CopyText(dir.display().to_string()), "Copy path"),
-            ]
-            .spacing(2)
-            .align_y(Alignment::Center),
-        );
+        let mut place = row![
+            muted_text(short_dir(&dir, 70)).wrapping(text::Wrapping::None),
+            icon_button(Icon::Copy, Message::CopyText(dir.display().to_string()), "Copy path"),
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center);
+        if let Some(badge) = self.gone_badge(tab) {
+            place = place.push(badge);
+        }
+        header = header.push(place);
         header = header.push(space::horizontal());
         if git.is_some() {
             header = header.push(tip(
