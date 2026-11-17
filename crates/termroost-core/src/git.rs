@@ -243,14 +243,16 @@ impl Repo {
             let line = git(&self.worktree, &["for-each-ref", format, &format!("refs/heads/{branch}")])?;
             let mut parts = line.trim_end().split('\t');
             let (upstream, remote) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-            // An upstream whose remote branch was deleted fails to count, and counts as none.
+            // The remote the branch is set to use counts even while its branch
+            // there is missing: not pushed yet, or deleted.
+            t.remote = Some(remote.to_owned()).filter(|r| !r.is_empty());
+            // A missing remote branch fails to count, and counts as no upstream.
             if !upstream.is_empty()
                 && let Ok(counts) = git(&self.worktree, &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
             {
                 let mut n = counts.split_whitespace().map(|n| n.parse().unwrap_or(0));
                 (t.ahead, t.behind) = (n.next().unwrap_or(0), n.next().unwrap_or(0));
                 t.upstream = Some(upstream.to_owned());
-                t.remote = Some(remote.to_owned()).filter(|r| !r.is_empty());
             }
         }
         if t.remote.is_none() {
@@ -381,8 +383,9 @@ impl Repo {
 /// last fetch (or pull, or push) saw of them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tracking {
-    /// Where a push goes: the upstream's remote, else `origin`, else the
-    /// first remote. `None` when the repository has no remote.
+    /// The remote the checked-out branch pulls from and pushes to: the one
+    /// it is set to track, else `origin`, else the first remote. `None` when
+    /// the repository has no remote.
     pub remote: Option<String>,
     /// The branch the checked-out branch tracks, such as `origin/main`.
     pub upstream: Option<String>,
@@ -1114,5 +1117,46 @@ mod tests {
         assert!(lone.push().unwrap_err().contains("no remote"));
         git(&a.worktree, &["switch", "-q", "--detach"]).unwrap();
         assert!(a.push().unwrap_err().contains("Not on a branch"));
+    }
+
+    /// A bare repository in `dir` standing in for a remote; `None` without git.
+    fn bare(dir: &Path, name: &str) -> Option<PathBuf> {
+        let path = dir.join(name);
+        git(dir, &["init", "-q", "--bare", "-b", "main", &path.to_string_lossy()]).ok()?;
+        Some(path)
+    }
+
+    /// A clone of `remote` in `dir`, on `main`, with its own identity.
+    fn clone_repo(dir: &Path, remote: &Path, name: &str) -> Repo {
+        let path = dir.join(name);
+        git(dir, &["clone", "-q", &remote.to_string_lossy(), &path.to_string_lossy()]).unwrap();
+        for (key, value) in [("user.name", name), ("user.email", "t@t"), ("commit.gpgsign", "false")] {
+            git(&path, &["config", key, value]).unwrap();
+        }
+        git(&path, &["switch", "-q", "-C", "main"]).unwrap();
+        Repo::discover(&path).unwrap()
+    }
+
+    /// A branch set to use a remote that does not have it yet is pushed
+    /// there, not to origin. With git installed.
+    #[test]
+    fn pushes_to_the_remote_a_branch_is_set_to_with_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(origin) = bare(dir.path(), "origin.git") else {
+            eprintln!("git not available; skipping");
+            return;
+        };
+        let fork = bare(dir.path(), "fork.git").unwrap();
+        let a = clone_repo(dir.path(), &origin, "a");
+        git(&a.worktree, &["commit", "-q", "--allow-empty", "-m", "one"]).unwrap();
+        a.push().unwrap();
+        git(&a.worktree, &["remote", "add", "fork", &fork.to_string_lossy()]).unwrap();
+        git(&a.worktree, &["config", "branch.main.remote", "fork"]).unwrap();
+
+        let t = a.tracking(false, 50).unwrap();
+        assert_eq!((t.remote.as_deref(), t.upstream.as_deref()), (Some("fork"), None));
+        assert_eq!(a.push().unwrap(), "Pushed main to fork, which it now tracks.");
+        let t = a.tracking(false, 50).unwrap();
+        assert_eq!((t.remote.as_deref(), t.upstream.as_deref()), (Some("fork"), Some("fork/main")));
     }
 }
