@@ -13,6 +13,7 @@ use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
 use crate::icons::Icon;
+use crate::remotes::RemotesMsg;
 use crate::side_panel::SideTab;
 use crate::sidebar::{branch_label, muted_text};
 use crate::theme::{self, Tone};
@@ -90,7 +91,7 @@ fn ago(time: i64, now: i64) -> String {
 
 impl App {
     /// The repository of the session on screen, when it is in one.
-    fn active_repo(&self) -> Option<&Repo> {
+    pub(crate) fn active_repo(&self) -> Option<&Repo> {
         let tab = self.core.state().active_tab()?;
         Some(&self.git_of(tab)?.repo)
     }
@@ -231,10 +232,15 @@ impl App {
     }
 
     /// The remote the branch pulls from and pushes to, and its URLs. With
-    /// more than one remote, a menu picks another for the branch.
+    /// more than one remote, a menu picks another for the branch; a button
+    /// opens the Remotes dialog.
     fn remote_row<'a>(&'a self, t: &'a Tracking, head: Option<&Head>) -> Element<'a, Message> {
+        let open = Message::Remotes(RemotesMsg::Open);
         let Some(current) = t.remote.as_deref() else {
-            return muted_text("No remote yet").size(12).into();
+            let add = ui::small_with_icon(Icon::Plus, "Add remote", theme::button_secondary).on_press(open);
+            return row![muted_text("No remote yet").size(12), space::horizontal(), add]
+                .align_y(Alignment::Center)
+                .into();
         };
         let switching = match self.running_sync() {
             Some(SyncOp::UseRemote(r)) => Some(r.as_str()),
@@ -259,7 +265,12 @@ impl App {
         let remote = t.remotes.iter().find(|r| r.name == shown);
         // URLs have no spaces to break at.
         let url = |s: String| muted_text(s).wrapping(text::Wrapping::WordOrGlyph);
-        let mut col = column![row![muted_text("Remote").size(12), name].spacing(8).align_y(Alignment::Center)];
+        let manage = icon_button(Icon::Edit, open, "Add or change remotes");
+        let mut col = column![
+            row![muted_text("Remote").size(12), name, space::horizontal(), manage]
+                .spacing(8)
+                .align_y(Alignment::Center)
+        ];
         col = col.push(match remote.map(|r| r.url.as_str()).filter(|u| !u.is_empty()) {
             Some(u) => url(u.to_owned()),
             None => muted_text("No URL"),

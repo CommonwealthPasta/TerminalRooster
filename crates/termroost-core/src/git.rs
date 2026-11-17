@@ -356,6 +356,17 @@ impl Repo {
         })
     }
 
+    /// Adds a remote called `name` at `url`. Nothing is fetched from it yet.
+    pub fn add_remote(&self, name: &str, url: &str) -> Result<(), String> {
+        git(&self.worktree, &["remote", "add", "--", name, url]).map(drop)
+    }
+
+    /// Points the remote `name` at `url`: fetches come from there, and so do
+    /// pushes unless the remote has a push URL of its own.
+    pub fn set_remote_url(&self, name: &str, url: &str) -> Result<(), String> {
+        git(&self.worktree, &["remote", "set-url", "--", name, url]).map(drop)
+    }
+
     /// The latest `limit` commits of this working tree's HEAD, or of every
     /// branch and tag when `all`, newest first.
     pub fn log(&self, all: bool, limit: usize) -> Result<Vec<Commit>, String> {
@@ -1319,6 +1330,18 @@ mod tests {
         assert_eq!(remotes[1].push_url.as_deref(), Some("git@example.com:me/fork.git"));
         assert!(remotes[2].url.ends_with("origin.git"), "{}", remotes[2].url);
         assert_eq!(a.tracking(false, 50).unwrap().remotes, remotes);
+
+        // Adding and changing them.
+        a.add_remote("up", "https://example.com/up.git").unwrap();
+        assert!(a.add_remote("up", "x").unwrap_err().contains("already exists"));
+        assert!(a.add_remote("a b", "x").unwrap_err().contains("not a valid remote name"));
+        a.set_remote_url("fork", "https://example.com/fork.git").unwrap();
+        assert!(a.set_remote_url("nope", "x").unwrap_err().contains("No such remote"));
+        let remotes = a.remotes().unwrap();
+        let find = |name: &str| remotes.iter().find(|r| r.name == name).unwrap();
+        assert_eq!(find("up").url, "https://example.com/up.git");
+        assert_eq!(find("fork").url, "https://example.com/fork.git");
+        assert_eq!(find("fork").push_url.as_deref(), Some("git@example.com:me/fork.git"), "kept");
 
         let lone = dir.path().join("lone");
         git(dir.path(), &["init", "-q", &lone.to_string_lossy()]).unwrap();
