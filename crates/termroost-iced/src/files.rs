@@ -277,13 +277,7 @@ impl App {
             }
             FilesMsg::Reveal { path, is_dir } => {
                 self.files.menu = None;
-                let (tx, rx) = async_channel::bounded(1);
-                std::thread::spawn(move || {
-                    let _ = tx.send_blocking(reveal::reveal(&path, is_dir));
-                });
-                let revealed = Task::perform(async move { rx.recv().await.unwrap_or(Ok(())) }, |r| {
-                    Message::Files(FilesMsg::Revealed(r))
-                });
+                let revealed = reveal::in_background(path, is_dir).map(|r| Message::Files(FilesMsg::Revealed(r)));
                 Task::batch([revealed, self.focus_active()])
             }
             FilesMsg::Revealed(Ok(())) => Task::none(),
