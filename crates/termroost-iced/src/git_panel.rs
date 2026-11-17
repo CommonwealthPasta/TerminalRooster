@@ -1,32 +1,39 @@
 //! The Git tab of the side panel: the log of the visible session's
 //! repository, between the Tasks and Files tabs. It follows new commits:
-//! every git poll compares the repository's refs, and reads the log again
-//! when they moved. Commits that are on no remote are marked, and the
-//! branch's distance to its upstream is shown, with Pull (rebasing by
-//! default) and Push.
+//! every git poll compares the repository's refs and config, and reads the
+//! log again when they changed. Commits that are on no remote are marked,
+//! and the branch's distance to its upstream is shown, with Pull (rebasing
+//! by default) and Push. A commit clicked shows what it changed in place of
+//! the terminals (see `git_view`).
 
 use std::path::PathBuf;
 
-use iced::widget::{button, checkbox, column, container, row, scrollable, space, text};
+use iced::widget::{button, column, container, pick_list, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 use termroost_core::git::{Commit, Head, Repo, Tracking};
 
 use crate::app::{App, Message};
+use crate::git_view::GitViewMsg;
+use crate::icons::Icon;
+use crate::remotes::RemotesMsg;
 use crate::side_panel::SideTab;
-use crate::sidebar::{branch_label, icon_button, muted_text};
-use crate::theme;
+use crate::sidebar::{branch_label, muted_text};
+use crate::theme::{self, Tone};
+use crate::ui::{self, icon_button};
 
 /// How many commits the log shows.
 const LOG_LIMIT: usize = 200;
 
-/// What the Git tab's buttons do with the remote.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the Git tab does with the remote.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncOp {
     Pull,
     Push,
+    /// Make the checked-out branch pull from and push to this remote.
+    UseRemote(String),
 }
 
-/// A pull or push: running while `result` is `None`.
+/// A pull, push or change of remote: running while `result` is `None`.
 #[derive(Clone, Debug)]
 pub struct GitSync {
     pub worktree: PathBuf,
@@ -48,6 +55,9 @@ pub struct GitLog {
     /// How the commits stand against the remotes; `None` until read, or
     /// when git could not tell.
     pub tracking: Option<Tracking>,
+    /// How many files (or new folders) changed since the last commit;
+    /// `None` until read.
+    pub changes: Option<usize>,
 }
 
 /// A log read in the background.
@@ -59,6 +69,7 @@ pub struct LogRead {
     /// `None` when the refs have not moved since the log on screen was read.
     pub commits: Option<Result<Vec<Commit>, String>>,
     pub tracking: Option<Tracking>,
+    pub changes: Option<usize>,
 }
 
 /// `s` cut to `max` characters, ending in "…" when cut.
@@ -71,7 +82,7 @@ fn shorten(s: &str, max: usize) -> String {
 }
 
 /// "5m ago", or the date for anything older than a week.
-fn ago(time: i64, now: i64) -> String {
+pub(crate) fn ago(time: i64, now: i64) -> String {
     let secs = (now - time).max(0);
     match secs {
         0..60 => "just now".to_owned(),
@@ -86,7 +97,7 @@ fn ago(time: i64, now: i64) -> String {
 
 impl App {
     /// The repository of the session on screen, when it is in one.
-    fn active_repo(&self) -> Option<&Repo> {
+    pub(crate) fn active_repo(&self) -> Option<&Repo> {
         let tab = self.core.state().active_tab()?;
         Some(&self.git_of(tab)?.repo)
     }
@@ -116,8 +127,14 @@ impl App {
             _ => {
                 // A read still running is for the old log: dropped when it
                 // arrives, which starts this one.
-                self.git_log =
-                    Some(GitLog { worktree: repo.worktree.clone(), all, commits: None, stamp: None, tracking: None });
+                self.git_log = Some(GitLog {
+                    worktree: repo.worktree.clone(),
+                    all,
+                    commits: None,
+                    stamp: None,
+                    tracking: None,
+                    changes: None,
+                });
                 None
             }
         };
@@ -134,7 +151,9 @@ impl App {
             let tracking = changed
                 .then(|| repo.tracking(all, LOG_LIMIT))
                 .and_then(|t| t.map_err(|e| tracing::warn!(error = %e, "reading the git remotes failed")).ok());
-            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, all, stamp, commits, tracking });
+            // Files change without refs moving: counted every time.
+            let changes = Repo::changes(&repo.worktree).ok();
+            let _ = tx.send_blocking(LogRead { worktree: repo.worktree, all, stamp, commits, tracking, changes });
         });
         Task::perform(async move { rx.recv().await.ok() }, |read| match read {
             Some(read) => Message::LogRead(read),
@@ -148,6 +167,7 @@ impl App {
         self.log_reading = false;
         match &mut self.git_log {
             Some(log) if log.worktree == read.worktree && log.all == read.all => {
+                log.changes = read.changes;
                 match read.commits {
                     None => {}
                     Some(Ok(commits)) => {
@@ -183,16 +203,18 @@ impl App {
         }
         let title = title.push(
             options.push(space::horizontal()).push(
-                checkbox(self.prefs.log_all_branches)
+                ui::check(self.prefs.log_all_branches)
                     .label("All branches")
                     .on_toggle(Message::LogAllBranches)
-                    .size(14)
                     .text_size(12),
             ),
         );
 
         let tracking = self.git_log.as_ref().and_then(|l| l.tracking.as_ref());
         let mut title = title;
+        if let Some(t) = tracking {
+            title = title.push(self.remote_row(t, head));
+        }
         if let Some(status) = tracking.and_then(|t| remote_status(t, head)) {
             title = title.push(muted_text(status).size(12));
         }
@@ -203,77 +225,140 @@ impl App {
             title = title.push(note);
         }
 
+        let changes = changes_item(self.git_log.as_ref().and_then(|l| l.changes), self.changes_shown());
         let body: Element<'_, Message> = match self.git_log.as_ref().and_then(|l| l.commits.as_ref()) {
             None => muted_text("Reading the log…").size(12).into(),
-            Some(Err(e)) => text(e).size(12).style(text::danger).into(),
-            Some(Ok(commits)) if commits.is_empty() => muted_text("No commits yet.").size(12).into(),
+            Some(Err(e)) => ui::note_text(Tone::Danger, e),
+            Some(Ok(commits)) if commits.is_empty() => {
+                column![changes, container(muted_text("No commits yet.").size(12)).padding([0, 8])].spacing(8).into()
+            }
             Some(Ok(commits)) => {
                 let now = chrono::Utc::now().timestamp();
                 let unpushed = |c: &Commit| tracking.is_some_and(|t| t.unpushed.contains(&c.id));
-                scrollable(
-                    column(commits.iter().map(|c| commit_item(c, unpushed(c), now))).spacing(12).padding([0, 10]),
-                )
-                .height(Length::Fill)
-                .into()
+                let shown = self.shown_commit();
+                let items = commits.iter().map(|c| commit_item(c, unpushed(c), shown == Some(&c.id), now));
+                let list = column(std::iter::once(changes).chain(items))
+                    .spacing(4)
+                    .padding(iced::Padding { right: 10.0, ..iced::Padding::ZERO });
+                ui::scroll(list).height(Length::Fill).into()
             }
         };
         column![title, body].spacing(10).into()
     }
 
+    /// The pull, push or change of remote that is running, if any.
+    fn running_sync(&self) -> Option<&SyncOp> {
+        self.git_sync.as_ref().filter(|s| s.result.is_none()).map(|s| &s.op)
+    }
+
+    /// The remote the branch pulls from and pushes to, and its URLs. With
+    /// more than one remote, a menu picks another for the branch; a button
+    /// opens the Remotes dialog.
+    fn remote_row<'a>(&'a self, t: &'a Tracking, head: Option<&Head>) -> Element<'a, Message> {
+        let open = Message::Remotes(RemotesMsg::Open);
+        let Some(current) = t.remote.as_deref() else {
+            let add = ui::small_with_icon(Icon::Plus, "Add remote", theme::button_secondary).on_press(open);
+            return row![muted_text("No remote yet").size(12), space::horizontal(), add]
+                .align_y(Alignment::Center)
+                .into();
+        };
+        let switching = match self.running_sync() {
+            Some(SyncOp::UseRemote(r)) => Some(r.as_str()),
+            _ => None,
+        };
+        let shown = switching.unwrap_or(current);
+        let can_pick = self.running_sync().is_none() && matches!(head, Some(Head::Branch(_))) && t.remotes.len() > 1;
+        let name: Element<'_, Message> = if can_pick {
+            let names: Vec<String> = t.remotes.iter().map(|r| r.name.clone()).collect();
+            let chosen = current.to_owned();
+            pick_list(names, Some(chosen.clone()), move |r: String| {
+                if r == chosen { Message::Noop } else { Message::GitSync(SyncOp::UseRemote(r)) }
+            })
+            .text_size(12)
+            .padding([2, 8])
+            .style(theme::dropdown)
+            .menu_style(theme::dropdown_menu)
+            .into()
+        } else {
+            text(shown).size(12).font(theme::SEMIBOLD).into()
+        };
+        let remote = t.remotes.iter().find(|r| r.name == shown);
+        // URLs have no spaces to break at.
+        let url = |s: String| muted_text(s).wrapping(text::Wrapping::WordOrGlyph);
+        let manage = icon_button(Icon::Edit, open, "Add or change remotes");
+        let mut col = column![
+            row![muted_text("Remote").size(12), name, space::horizontal(), manage]
+                .spacing(8)
+                .align_y(Alignment::Center)
+        ];
+        col = col.push(match remote.map(|r| r.url.as_str()).filter(|u| !u.is_empty()) {
+            Some(u) => url(u.to_owned()),
+            None => muted_text("No URL"),
+        });
+        if let Some(push) = remote.and_then(|r| r.push_url.as_deref()) {
+            col = col.push(url(format!("Pushes to {push}")));
+        }
+        if let Some(r) = switching {
+            col = col.push(muted_text(format!("Fetching {r}…")));
+        }
+        col.spacing(2).into()
+    }
+
     /// Pull (rebasing or not) and Push, for a repository with a remote.
     fn sync_buttons<'a>(&'a self, t: &Tracking, head: Option<&Head>) -> Element<'a, Message> {
-        let running = self.git_sync.as_ref().filter(|s| s.result.is_none()).map(|s| s.op);
+        let running = self.running_sync();
         let on_branch = matches!(head, Some(Head::Branch(_)));
         let idle = running.is_none() && on_branch;
-        let action = |label: &'a str, busy: &'a str, op: SyncOp, enabled: bool| {
-            button(text(if running == Some(op) { busy } else { label }).size(12))
-                .padding([3, 10])
-                .style(button::secondary)
+        let action = |glyph: Icon, label: &'a str, busy: &'a str, op: SyncOp, enabled: bool| {
+            let label = if running == Some(&op) { busy } else { label };
+            ui::small_with_icon(glyph, label, theme::button_secondary)
                 .on_press_maybe((idle && enabled).then_some(Message::GitSync(op)))
         };
         row![
             // Pulling needs a remote branch to pull from.
-            action("↓ Pull", "Pulling…", SyncOp::Pull, t.upstream.is_some()),
-            checkbox(self.prefs.pull_rebase).label("Rebase").on_toggle(Message::PullRebase).size(14).text_size(12),
+            action(Icon::ArrowDown, "Pull", "Pulling…", SyncOp::Pull, t.upstream.is_some()),
+            ui::check(self.prefs.pull_rebase).label("Rebase").on_toggle(Message::PullRebase).text_size(12),
             space::horizontal(),
-            action("↑ Push", "Pushing…", SyncOp::Push, true),
+            action(Icon::ArrowUp, "Push", "Pushing…", SyncOp::Push, true),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
         .into()
     }
 
-    /// What the last pull or push of this repository did, until dismissed.
+    /// What the last pull or push of this repository did, or why changing
+    /// its remote failed, until dismissed.
     fn sync_note(&self) -> Option<Element<'_, Message>> {
         let sync = self.git_sync.as_ref()?;
         let shown = self.git_log.as_ref().is_some_and(|l| l.worktree == sync.worktree);
         let result = sync.result.as_ref().filter(|_| shown)?;
-        let message: Element<'_, Message> = match result {
-            Ok(done) => muted_text(done).size(12).into(),
-            Err(e) => text(e).size(12).style(text::danger).into(),
+        let (message, tone) = match result {
+            Ok(done) => (done, Tone::Neutral),
+            Err(e) => (e, Tone::Danger),
         };
-        Some(
-            row![container(message).width(Length::Fill), icon_button("✕", Message::DismissSync, "Dismiss")]
+        let line =
+            row![text(message).size(12).width(Length::Fill), icon_button(Icon::Close, Message::DismissSync, "Dismiss")]
                 .spacing(4)
-                .align_y(Alignment::Start)
-                .into(),
-        )
+                .align_y(Alignment::Start);
+        Some(ui::note(tone, line))
     }
 
-    /// Pulls or pushes the Git tab's repository on a thread.
+    /// Pulls, pushes or changes the remote of the Git tab's repository on a
+    /// thread.
     pub(crate) fn start_sync(&mut self, op: SyncOp) -> Task<Message> {
-        if self.git_sync.as_ref().is_some_and(|s| s.result.is_none()) {
+        if self.running_sync().is_some() {
             return Task::none();
         }
         let Some(repo) = self.active_repo().cloned() else { return Task::none() };
         let rebase = self.prefs.pull_rebase;
-        self.git_sync = Some(GitSync { worktree: repo.worktree.clone(), op, result: None });
         tracing::info!(repo = %repo.worktree.display(), ?op, rebase, "git sync started");
+        self.git_sync = Some(GitSync { worktree: repo.worktree.clone(), op: op.clone(), result: None });
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let result = match op {
                 SyncOp::Pull => repo.pull(rebase),
                 SyncOp::Push => repo.push(),
+                SyncOp::UseRemote(remote) => repo.use_remote(&remote),
             };
             let _ = tx.send_blocking((repo.worktree, result));
         });
@@ -283,7 +368,8 @@ impl App {
         })
     }
 
-    /// Shows how a pull or push went, and reads the log again right away.
+    /// Shows how a pull or push went, or why a change of remote failed, and
+    /// reads the log again right away.
     pub(crate) fn sync_done(&mut self, worktree: PathBuf, result: Result<String, String>) -> Task<Message> {
         match &result {
             Ok(done) => tracing::info!(repo = %worktree.display(), "{done}"),
@@ -291,6 +377,10 @@ impl App {
         }
         if let Some(sync) = self.git_sync.as_mut().filter(|s| s.worktree == worktree) {
             sync.result = Some(result);
+        }
+        // The remote line shows the new remote; only a failure needs a note.
+        if matches!(&self.git_sync, Some(GitSync { op: SyncOp::UseRemote(_), result: Some(Ok(_)), .. })) {
+            self.git_sync = None;
         }
         // A pull that brought nothing leaves the refs as they were; read anyway.
         if let Some(log) = self.git_log.as_mut().filter(|l| l.worktree == worktree) {
@@ -322,9 +412,29 @@ fn remote_status(t: &Tracking, head: Option<&Head>) -> Option<String> {
     })
 }
 
+/// The first item of the log: what is not committed yet, and how much.
+/// Pressed, it shows the changes, to stage and commit them.
+fn changes_item<'a>(count: Option<usize>, shown: bool) -> Element<'a, Message> {
+    let mut item = column![text("Uncommitted changes").size(13)].spacing(3);
+    if let Some(n) = count {
+        item = item.push(muted_text(match n {
+            0 => "Nothing to commit".to_owned(),
+            1 => "1 change".to_owned(),
+            n => format!("{n} changes"),
+        }));
+    }
+    button(item)
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(theme::list_button(shown))
+        .on_press(Message::GitView(GitViewMsg::OpenChanges))
+        .into()
+}
+
 /// One commit: subject, then id, author and age, then branches and tags,
-/// and whether it is on no remote yet.
-fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
+/// and whether it is on no remote yet. Pressed, it shows what it changed;
+/// the one `shown` is raised.
+fn commit_item(c: &Commit, unpushed: bool, shown: bool, now: i64) -> Element<'_, Message> {
     let meta = row![
         text(&c.short)
             .font(theme::MONO)
@@ -334,25 +444,26 @@ fn commit_item(c: &Commit, unpushed: bool, now: i64) -> Element<'_, Message> {
         muted_text(ago(c.time, now)).wrapping(text::Wrapping::None),
     ]
     .spacing(6);
-    let mut item = column![text(&c.subject).size(13), meta].spacing(2);
+    let mut item = column![text(&c.subject).size(13), meta].spacing(3);
     if !c.refs.is_empty() || unpushed {
-        let badge = |label: &str, style: fn(&iced::Theme) -> container::Style| -> Element<'_, Message> {
-            container(text(label.to_owned()).size(10).wrapping(text::Wrapping::None))
-                .padding([1, 6])
-                .style(style)
-                .into()
-        };
         let head_branch = c.head.then(|| c.refs.first()).flatten();
         let mut badges: Vec<Element<'_, Message>> = Vec::new();
         if unpushed {
-            badges.push(badge("not pushed", theme::warning_badge));
+            badges.push(ui::badge("not pushed", Tone::Warning));
         }
         badges.extend(
-            c.refs.iter().map(|r| badge(r, if Some(r) == head_branch { theme::accent_badge } else { theme::badge })),
+            c.refs
+                .iter()
+                .map(|r| ui::badge(r.as_str(), if Some(r) == head_branch { Tone::Accent } else { Tone::Neutral })),
         );
-        item = item.push(row(badges).spacing(4).wrap());
+        item = item.push(row(badges).spacing(4).wrap().vertical_spacing(4));
     }
-    item.into()
+    button(item)
+        .padding([6, 8])
+        .width(Length::Fill)
+        .style(theme::list_button(shown))
+        .on_press(Message::GitView(GitViewMsg::OpenCommit(c.id.clone())))
+        .into()
 }
 
 #[cfg(test)]
@@ -367,7 +478,7 @@ mod tests {
             upstream: upstream.map(Into::into),
             ahead,
             behind,
-            unpushed: Default::default(),
+            ..Tracking::default()
         };
         let status = |t: Tracking| remote_status(&t, Some(&main));
         assert_eq!(status(t(Some("origin/main"), 0, 0)).unwrap(), "Up to date with origin/main");

@@ -11,7 +11,7 @@ use iced::advanced::widget::{Tree, Widget};
 use iced::advanced::{Clipboard, Shell, renderer, svg};
 use iced::time::Instant;
 use iced::widget::{container, space, svg as svg_widget, text, tooltip};
-use iced::{Color, Element, Event, Length, Radians, Rectangle, Size, Theme, mouse, window};
+use iced::{Color, Element, Event, Length, Rectangle, Size, Theme, mouse, window};
 use termroost_core::PaneId;
 
 use crate::app::{App, Message};
@@ -81,7 +81,7 @@ pub fn busy_mark<'a>(busy: Busy, ink: impl Fn(&Theme) -> Color + 'a) -> Element<
     }
     tooltip(
         mark,
-        container(text(tip.join("\n")).size(12)).padding([4, 8]).style(container::rounded_box),
+        container(text(tip.join("\n")).size(12)).padding([5, 9]).style(crate::theme::tooltip),
         tooltip::Position::Bottom,
     )
     .into()
@@ -95,13 +95,30 @@ static PULSE: LazyLock<svg::Handle> = LazyLock::new(|| {
     )
 });
 
-/// A faint ring with a quarter of it drawn solid; it turns.
-static SPINNER: LazyLock<svg::Handle> = LazyLock::new(|| {
+/// The spinner's frames: a faint ring with a quarter of it drawn solid, the
+/// quarter a step further round in each. Each frame is a picture of its own
+/// rather than one picture turned: iced draws an SVG as a bitmap the size of
+/// the mark, and turns that bitmap with nearest-neighbour sampling, which
+/// showed its pixels.
+static SPINNER: LazyLock<Vec<svg::Handle>> = LazyLock::new(|| (0..FRAMES).map(spinner_frame).collect());
+
+/// Frame `frame` of the spinner (see [`SPINNER`]).
+fn spinner_frame(frame: u32) -> svg::Handle {
+    // Clockwise from twelve o'clock, on a ring of radius 6 around (8, 8).
+    let point = |turn: f32| {
+        let (sin, cos) = (turn * std::f32::consts::TAU).sin_cos();
+        (8.0 + 6.0 * sin, 8.0 - 6.0 * cos)
+    };
+    let start = frame as f32 / FRAMES as f32;
+    let (x0, y0) = point(start);
+    let (x1, y1) = point(start + 0.25);
     svg::Handle::from_memory(
-        br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="#000" stroke-width="2.5" opacity="0.3"/><path d="M8 2a6 6 0 0 1 6 6" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round"/></svg>"##
-            .as_slice(),
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="#000" stroke-width="2.5" opacity="0.3"/><path d="M{x0:.3} {y0:.3}A6 6 0 0 1 {x1:.3} {y1:.3}" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round"/></svg>"##
+        )
+        .into_bytes(),
     )
-});
+}
 
 /// How long a frame of the spinner shows, and how many frames make a turn.
 /// Few, as each one redraws the window.
@@ -158,10 +175,8 @@ impl<M> Widget<M, Theme, iced::Renderer> for Spinner<'_> {
         _cursor: mouse::Cursor,
         _viewport: &Rectangle,
     ) {
-        let turn = (frame_at(Instant::now()) % FRAMES) as f32 / FRAMES as f32;
-        let spinner = svg::Svg::new(LazyLock::force(&SPINNER).clone())
-            .color((self.ink)(theme))
-            .rotation(Radians(turn * std::f32::consts::TAU));
+        let frame = &SPINNER[(frame_at(Instant::now()) % FRAMES) as usize];
+        let spinner = svg::Svg::new(frame.clone()).color((self.ink)(theme));
         svg::Renderer::draw_svg(renderer, spinner, layout.bounds(), layout.bounds());
     }
 }

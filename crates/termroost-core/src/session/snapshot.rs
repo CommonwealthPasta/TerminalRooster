@@ -143,21 +143,29 @@ pub(crate) fn serialize<T>(term: &Term<T>, max_lines: usize) -> Option<Vec<u8>> 
     Some(out.into_bytes())
 }
 
-/// Feeds saved bytes (and an optional dim banner) into a fresh terminal.
-pub(crate) fn replay<T: alacritty_terminal::event::EventListener>(
-    term: &mut Term<T>,
-    data: &[u8],
-    banner: Option<&str>,
-) {
+/// Feeds saved bytes into a terminal.
+pub(crate) fn replay<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>, data: &[u8]) {
     let mut parser: Processor = Processor::new();
     parser.advance(term, data);
-    if let Some(banner) = banner {
-        let line = format!("\r\n\x1b[0;2m{BANNER_EDGE} {banner} {BANNER_EDGE}\x1b[0m\r\n");
-        parser.advance(term, line.as_bytes());
-    }
 }
 
 const BANNER_EDGE: &str = "───";
+
+/// Saved scrollback without the `─── restored session from … ───` lines
+/// older versions printed under each restored terminal's output, which were
+/// saved along with it.
+pub(crate) fn without_restore_banners(data: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(data);
+    let kept: Vec<&str> = text
+        .split("\r\n")
+        .filter(|l| {
+            let l = strip_sgr(l);
+            let l = l.trim();
+            !(l.starts_with(&format!("{BANNER_EDGE} restored session from ")) && l.ends_with(BANNER_EDGE))
+        })
+        .collect();
+    kept.join("\r\n").into_bytes()
+}
 
 /// Whether saved scrollback holds nothing but a shell prompt, so there's
 /// nothing worth bringing back: every non-blank line other than a restore
@@ -235,7 +243,7 @@ mod tests {
 
         let data = serialize(&a, 1000).unwrap();
         let mut b = term(20, 5);
-        replay(&mut b, &data, None);
+        replay(&mut b, &data);
         assert_eq!(visible_text(&a), visible_text(&b));
 
         // Attributes survive.
@@ -264,11 +272,25 @@ mod tests {
         feed(&mut a, "0123456789abcdefghij\r\nnext");
         let data = serialize(&a, 1000).unwrap();
         let mut b = term(40, 3);
-        replay(&mut b, &data, Some("restored"));
-        let text = visible_text(&b);
-        assert_eq!(text[0], "0123456789abcdefghij");
-        assert_eq!(text[1], "next");
-        assert!(text[2].contains("restored"));
+        replay(&mut b, &data);
+        assert_eq!(visible_text(&b), ["0123456789abcdefghij", "next"]);
+    }
+
+    /// What older versions printed under a restored terminal's output.
+    fn old_banner(t: &mut Term<VoidListener>) {
+        feed(t, "\r\n\x1b[0;2m─── restored session from 2026-11-16 19:27 ───\x1b[0m\r\n");
+    }
+
+    #[test]
+    fn old_restore_banners_are_dropped() {
+        let mut a = term(40, 10);
+        feed(&mut a, "before\r\n─── restarted ───");
+        old_banner(&mut a);
+        feed(&mut a, "after");
+        let data = without_restore_banners(&serialize(&a, 100).unwrap());
+        let mut b = term(40, 10);
+        replay(&mut b, &data);
+        assert_eq!(visible_text(&b), ["before", "─── restarted ───", "after"]);
     }
 
     #[test]
@@ -297,7 +319,8 @@ mod tests {
         // What older versions saved after restoring that: the prompt again
         // under a banner, any number of times.
         let mut b = term(40, 10);
-        replay(&mut b, &idle, Some("restored session from 2026-11-16 19:27"));
+        replay(&mut b, &idle);
+        old_banner(&mut b);
         feed(&mut b, prompt);
         let again = serialize(&b, 100).unwrap();
         assert!(String::from_utf8_lossy(&again).contains("restored session"));

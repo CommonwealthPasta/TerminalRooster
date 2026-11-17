@@ -12,24 +12,35 @@
 //!
 //! What git leaves out (`.gitignore`, `.git/info/exclude`, the global
 //! excludes file) is dimmed, along with everything inside it.
+//!
+//! Each entry has an icon for its kind of file (see [`file_icons`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, text};
+use iced::widget::{button, column, container, mouse_area, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
+use crate::file_icons::{self, Hues};
+use crate::icons::{Icon, icon};
 use crate::reveal;
 use crate::side_panel::SideTab;
-use crate::sidebar::{icon_button, muted_text, short_dir};
+use crate::sidebar::{muted_text, short_dir};
 use crate::theme;
+use crate::ui::{self, icon_button};
 
 /// Entries shown per folder; the rest are counted.
 const MAX_ENTRIES: usize = 1000;
 /// Indent per folder level, in pixels.
 const INDENT: f32 = 14.0;
+/// The width of a folder's chevron, and the space files leave for it.
+const CHEVRON: f32 = 12.0;
+/// The size of an entry's icon.
+const ICON: f32 = 14.0;
+/// The space between a chevron, an icon and a name.
+const GAP: f32 = 4.0;
 /// How often the folders shown are read again.
 pub const POLL: Duration = Duration::from_secs(3);
 
@@ -275,13 +286,7 @@ impl App {
             }
             FilesMsg::Reveal { path, is_dir } => {
                 self.files.menu = None;
-                let (tx, rx) = async_channel::bounded(1);
-                std::thread::spawn(move || {
-                    let _ = tx.send_blocking(reveal::reveal(&path, is_dir));
-                });
-                let revealed = Task::perform(async move { rx.recv().await.unwrap_or(Ok(())) }, |r| {
-                    Message::Files(FilesMsg::Revealed(r))
-                });
+                let revealed = reveal::in_background(path, is_dir).map(|r| Message::Files(FilesMsg::Revealed(r)));
                 Task::batch([revealed, self.focus_active()])
             }
             FilesMsg::Revealed(Ok(())) => Task::none(),
@@ -295,48 +300,56 @@ impl App {
     /// The Files tab of the right panel.
     pub(crate) fn view_files(&self) -> Element<'_, Message> {
         let Some(root) = self.files_root() else { return space::horizontal().width(0).into() };
-        let lines = rows(&root, &self.files).into_iter().map(file_row);
+        let hues = Hues::of(&self.active_theme());
+        let lines = rows(&root, &self.files).into_iter().map(|r| file_row(r, hues));
         let path = mouse_area(muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill))
             .on_right_press(Message::Files(FilesMsg::Menu(root.clone())));
-        let top = row![path, icon_button("↻", Message::Files(FilesMsg::Refresh), "Read the folders again")]
+        let top = row![path, icon_button(Icon::Refresh, Message::Files(FilesMsg::Refresh), "Read the folders again")]
             .align_y(Alignment::Center);
         // The folder's own menu, under its name; always there, so the tree keeps its place.
         let root_menu: Element<'_, Message> = match &self.files.menu {
             Some(m) if *m == root => file_menu(root.clone(), true, 0.0),
             _ => space::vertical().height(0).into(),
         };
-        column![top, root_menu, scrollable(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
+        column![top, root_menu, ui::scroll(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
     }
 }
 
-fn file_row(r: Row<'_>) -> Element<'_, Message> {
+fn file_row(r: Row<'_>, hues: Hues) -> Element<'_, Message> {
     match r {
         Row::Entry { entry, depth, open, dim } => {
-            let arrow = match (entry.is_dir, open) {
-                (true, true) => "▾",
-                (true, false) => "▸",
-                (false, _) => "",
+            let chevron: Element<'_, Message> = match (entry.is_dir, open) {
+                (true, true) => icon(Icon::ChevronDown, CHEVRON, theme::muted).into(),
+                (true, false) => icon(Icon::ChevronRight, CHEVRON, theme::muted).into(),
+                (false, _) => space::horizontal().width(CHEVRON).into(),
             };
+            let look = if entry.is_dir { file_icons::folder(open) } else { file_icons::file(&entry.name) };
             let style = move |t: &iced::Theme| text::Style { color: dim.then(|| theme::muted(t)) };
             let label = row![
                 space::horizontal().width(depth as f32 * INDENT),
-                text(arrow).size(11).width(12).style(style),
+                chevron,
+                file_icons::icon(look, hues, dim, ICON),
                 text(&entry.name).size(13).wrapping(text::Wrapping::None).style(style),
             ]
-            .spacing(2)
+            .spacing(GAP)
             .align_y(Alignment::Center);
             let press =
                 if entry.is_dir { FilesMsg::Toggle(entry.path.clone()) } else { FilesMsg::Open(entry.path.clone()) };
             let line = button(label)
                 .width(Length::Fill)
-                .padding([2, 4])
-                .style(theme::tree_row)
+                .padding([3, 6])
+                .style(theme::row_button)
                 .on_press(Message::Files(press));
             mouse_area(line).on_right_press(Message::Files(FilesMsg::Menu(entry.path.clone()))).into()
         }
-        Row::Menu { entry, depth } => file_menu(entry.path.clone(), entry.is_dir, depth as f32 * INDENT + 16.0),
+        // Both line up with the icons of the entries around them.
+        Row::Menu { entry, depth } => {
+            file_menu(entry.path.clone(), entry.is_dir, depth as f32 * INDENT + CHEVRON + GAP)
+        }
         Row::Note { text: note, depth } => {
-            row![space::horizontal().width(depth as f32 * INDENT + 18.0), muted_text(note)].padding([2, 4]).into()
+            row![space::horizontal().width(depth as f32 * INDENT + CHEVRON + GAP), muted_text(note)]
+                .padding([3, 6])
+                .into()
         }
     }
 }
@@ -345,11 +358,11 @@ fn file_row(r: Row<'_>) -> Element<'_, Message> {
 fn file_menu<'a>(path: PathBuf, is_dir: bool, indent: f32) -> Element<'a, Message> {
     let reveal = button(text(reveal::label(is_dir)).size(13))
         .width(Length::Fill)
-        .padding([4, 10])
-        .style(theme::tree_row)
+        .padding([5, 10])
+        .style(theme::row_button)
         .on_press(Message::Files(FilesMsg::Reveal { path, is_dir }));
-    row![space::horizontal().width(indent), container(reveal).padding(3).width(220).style(theme::menu)]
-        .padding([0, 4])
+    row![space::horizontal().width(indent), container(reveal).padding(4).width(220).style(theme::menu)]
+        .padding([2, 6])
         .into()
 }
 

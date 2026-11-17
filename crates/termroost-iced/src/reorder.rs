@@ -353,7 +353,7 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Reorder<'_, Message> {
         let drag = self.moving(tree);
         let moved = drag.map(|d| self.moved(&d)).unwrap_or_default();
         let item_cursor = if drag.is_some() { mouse::Cursor::Unavailable } else { cursor };
-        let rounded = Border::default().rounded(4);
+        let rounded = Border::default().rounded(theme::RADIUS);
         let items: Vec<Rectangle> = layout.children().map(|l| l.bounds()).collect();
 
         for (i, ((child, state), layout)) in self.items.iter().zip(&tree.children).zip(layout.children()).enumerate() {

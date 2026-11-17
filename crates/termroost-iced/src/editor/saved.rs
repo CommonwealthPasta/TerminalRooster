@@ -36,18 +36,22 @@ struct SavedFile {
 }
 
 impl Saved {
+    /// The files open in each session; commits shown among them are left out.
     pub fn of<'a>(editors: impl IntoIterator<Item = (&'a TabId, &'a SessionFiles)>) -> Saved {
-        let sessions = editors.into_iter().filter(|(_, f)| !f.open.is_empty()).map(|(tab, files)| {
-            let saved = files
-                .open
+        let sessions = editors.into_iter().filter_map(|(tab, files)| {
+            let kept: Vec<&OpenFile> = files.open.iter().filter(|d| d.is_file()).collect();
+            if kept.is_empty() {
+                return None;
+            }
+            let saved = kept
                 .iter()
                 .map(|d| SavedFile {
                     path: d.path.clone(),
                     terminal: matches!(d.kind, DocKind::Terminal { .. } | DocKind::Restored { terminal: true }),
                 })
                 .collect();
-            let shown = files.shown.and_then(|id| files.open.iter().position(|d| d.id == id));
-            (tab.0, SavedSession { files: saved, shown })
+            let shown = files.shown.and_then(|id| kept.iter().position(|d| d.id == id));
+            Some((tab.0, SavedSession { files: saved, shown }))
         });
         Saved(sessions.collect())
     }
@@ -126,5 +130,35 @@ mod tests {
     fn unreadable_records_are_nothing() {
         assert!(serde_json::from_str::<Saved>("{\"1\":{\"files\":[{\"path\":\"/a\"}]}}").is_ok(), "old fields default");
         assert!(serde_json::from_str::<Saved>("[1,2]").is_err());
+    }
+
+    #[test]
+    fn commits_are_left_out() {
+        let commit = |id: u64| {
+            let repo = termroost_core::git::Repo {
+                worktree: "/w".into(),
+                git_dir: "/w/.git".into(),
+                common_dir: "/w/.git".into(),
+            };
+            let doc = crate::git_view::CommitDoc { repo, id: "abc".into(), details: None, toggled: Default::default() };
+            OpenFile { id: DocId(id), path: "/w".into(), kind: DocKind::Commit(Box::new(doc)) }
+        };
+        let mut with_files = files(&[("/w/a.rs", false), ("/w/b.rs", false)], Some(1));
+        with_files.open.insert(0, commit(9));
+        let only_a_commit = SessionFiles { open: vec![commit(10)], shown: Some(DocId(10)) };
+        let editors = BTreeMap::from([(TabId(1), with_files), (TabId(2), only_a_commit)]);
+        let mut n = 100;
+        let restored = Saved::of(editors.iter()).restore(
+            |_| true,
+            || {
+                n += 1;
+                DocId(n)
+            },
+        );
+        assert_eq!(restored.len(), 1, "a session with only a commit open has nothing to keep");
+        let (_, files) = &restored[0];
+        assert_eq!(files.open.len(), 2);
+        assert_eq!(files.open[1].path, PathBuf::from("/w/b.rs"));
+        assert_eq!(files.shown, Some(files.open[1].id), "still the file that was shown");
     }
 }

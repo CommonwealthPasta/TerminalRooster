@@ -8,10 +8,15 @@ mod color_picker;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod dialogs;
+mod diff_lines;
 mod editor;
+mod file_icons;
 mod files;
 mod git_panel;
+mod git_view;
+mod gone_folders;
 mod groups;
+mod icons;
 mod keymap;
 mod layout_conv;
 mod leave_room;
@@ -19,6 +24,7 @@ mod logging;
 mod notify;
 mod on_escape;
 mod panes;
+mod remotes;
 mod reorder;
 mod reveal;
 mod settings;
@@ -29,6 +35,7 @@ mod terminal_view;
 mod theme;
 mod themes;
 mod toasts;
+mod ui;
 mod worktree;
 mod worktree_remove;
 
@@ -127,6 +134,8 @@ fn main() -> iced::Result {
     .subscription(App::subscription)
     .theme(App::theme)
     .window(window)
+    .settings(iced::Settings { default_text_size: theme::TEXT.into(), ..iced::Settings::default() })
+    .default_font(theme::UI)
     .antialiasing(true);
     for font in theme::FONTS {
         application = application.font(font);

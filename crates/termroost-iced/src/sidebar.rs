@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use iced::widget::{button, column, container, mouse_area, row, scrollable, space, stack, text, text_input, tooltip};
-use iced::{Alignment, Element, Font, Length, Padding, font};
+use iced::widget::{MouseArea, button, column, container, mouse_area, row, space, stack, text, tooltip};
+use iced::{Alignment, Element, Length, Padding};
 use termroost_core::git::Head;
 use termroost_core::{AgentKind, PaneId, Project, ProjectGroup, Tab, TabId};
 
@@ -12,20 +12,25 @@ use crate::agent_icon::{agent_icon, terminal_icon};
 use crate::app::{App, DropTarget, Message, PROJECT_SEARCH, RENAME_INPUT, RenameTarget};
 use crate::busy::busy_mark;
 use crate::groups::{self, Row};
+use crate::icons::{Icon, icon};
 use crate::keymap::Action;
 use crate::notify::{Category, Notice};
 use crate::on_escape::on_escape;
 use crate::reorder::reorder;
-use crate::theme;
+use crate::theme::{self, BOLD, SEMIBOLD, Tone};
+use crate::ui::{self, icon_button, tip};
+use crate::worktree::WorktreeMsg;
 
-/// Width of the edit/delete button column next to the selected list item.
+/// Width of the edit/delete buttons in the selected list item.
 const ACTIONS_WIDTH: f32 = 26.0;
 /// Space between the items of the project and session lists.
 const LIST_SPACING: f32 = 2.0;
 /// How far right a group's projects are.
 const GROUP_INDENT: f32 = 12.0;
-
-pub const BOLD: Font = Font { weight: font::Weight::Bold, ..Font::DEFAULT };
+/// Space between a column's edges and its list.
+const COLUMN_PADDING: f32 = 8.0;
+/// The padding of a column's header, which lines its text up with the list's.
+const HEADER_PADDING: Padding = Padding { top: 10.0, right: COLUMN_PADDING, bottom: 6.0, left: 16.0 };
 
 /// Powerline's branch symbol, which the bundled JetBrains Mono has.
 const BRANCH_SYMBOL: &str = "\u{E0A0}";
@@ -50,30 +55,8 @@ pub fn branch_label<'a>(head: &Head, size: f32, max: usize) -> Element<'a, Messa
     .into()
 }
 
-/// Width of the glyph in an [`icon_button`], and the padding on either side of it.
-const ICON_GLYPH_WIDTH: f32 = 18.0;
-const ICON_PADDING: f32 = 4.0;
-/// Width of an [`icon_button`].
-pub const ICON_BUTTON_WIDTH: f32 = ICON_GLYPH_WIDTH + 2.0 * ICON_PADDING;
-
-pub fn icon_button<'a>(label: &'a str, msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
-    tooltip(
-        button(text(label).size(14).align_x(Alignment::Center).width(ICON_GLYPH_WIDTH))
-            .padding([2.0, ICON_PADDING])
-            .style(theme::icon_button)
-            .on_press(msg),
-        container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),
-        tooltip::Position::Bottom,
-    )
-    .into()
-}
-
-pub fn section_title(label: &str) -> iced::widget::Text<'_> {
-    text(label).size(11).font(BOLD).style(|t: &iced::Theme| text::Style { color: Some(theme::muted(t)) })
-}
-
 pub fn muted_text<'a>(s: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
-    text(s).size(11).style(|t: &iced::Theme| text::Style { color: Some(theme::muted(t)) })
+    text(s).size(11).style(ui::muted)
 }
 
 /// Shows a path with the home directory abbreviated to `~`.
@@ -129,53 +112,46 @@ fn on_first_line<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Me
     container(content).height(line).align_y(Alignment::Center).into()
 }
 
-/// The text color of a list item.
-fn item_text(t: &iced::Theme, selected: bool) -> iced::Color {
-    let p = t.extended_palette();
-    if selected { p.primary.weak.text } else { p.background.base.text }
+/// A list item: the bar that marks the selected one, `body` (which takes the
+/// clicks) and `actions`. The widgets are the same whether it's selected or
+/// not, so the mouse area keeps its click state and a double click on an
+/// unselected item still registers. `drop_target` outlines it while a task is
+/// held over it.
+fn list_item<'a>(
+    body: MouseArea<'a, Message>,
+    actions: Element<'a, Message>,
+    selected: bool,
+    drop_target: bool,
+) -> Element<'a, Message> {
+    let bar = container(space()).width(3).height(Length::Fill).style(theme::selection_bar(selected));
+    let bar = container(bar).padding([9, 0]).height(Length::Fill);
+    // As tall as the body, which the bar then fills. Without the explicit
+    // height the bar would make the whole item fill, and a project in a group
+    // (beside the group's rail, which fills too) would have no height at all.
+    let line = row![bar, body, container(actions).width(ACTIONS_WIDTH)].height(Length::Shrink);
+    container(line.align_y(Alignment::Center)).width(Length::Fill).style(theme::list_item(selected, drop_target)).into()
 }
 
-/// A list item; `drop_target` outlines it while a task is held over it.
-fn item_style(selected: bool, drop_target: bool) -> impl Fn(&iced::Theme) -> container::Style {
-    move |t| {
-        let p = t.extended_palette();
-        let border = iced::Border::default().rounded(4);
-        container::Style {
-            background: selected.then_some(iced::Background::Color(p.primary.weak.color)),
-            text_color: Some(item_text(t, selected)),
-            border: if drop_target { border.width(2.0).color(p.primary.base.color) } else { border },
-            ..container::Style::default()
-        }
+/// The edit and delete buttons of the selected item; room for them on the others.
+fn item_actions<'a>(selected: bool, edit: (Message, &'a str), delete: (Message, &'a str)) -> Element<'a, Message> {
+    if selected {
+        column![icon_button(Icon::Edit, edit.0, edit.1), icon_button(Icon::Trash, delete.0, delete.1)].into()
+    } else {
+        space::horizontal().width(ACTIONS_WIDTH).into()
     }
 }
 
 /// The line down the left of a group's projects, as wide as they are indented.
 fn group_rail<'a>() -> Element<'a, Message> {
-    let line = container(space::horizontal()).width(2).height(Length::Fill).style(|t: &iced::Theme| container::Style {
-        background: Some(iced::Background::Color(iced::Color { a: 0.5, ..theme::muted(t) })),
-        ..container::Style::default()
-    });
-    container(line).padding(Padding { left: 5.0, ..Padding::ZERO }).width(GROUP_INDENT).height(Length::Fill).into()
+    let line = container(space::horizontal()).width(1).height(Length::Fill).style(theme::divider);
+    container(line).padding(Padding { left: 6.0, ..Padding::ZERO }).width(GROUP_INDENT).height(Length::Fill).into()
 }
 
-/// A "+" under the last item of a list, as wide as the list.
-fn add_item<'a>(msg: Message, tip: impl text::IntoFragment<'a>) -> Element<'a, Message> {
-    tooltip(
-        button(text("+").size(18).width(Length::Fill).align_x(Alignment::Center))
-            .width(Length::Fill)
-            .padding([2, 8])
-            .style(theme::add_item_button)
-            .on_press(msg),
-        container(text(tip).size(12)).padding([4, 8]).style(container::rounded_box),
-        tooltip::Position::Bottom,
-    )
-    .into()
-}
-
-/// The color of a list item's busy mark: the accent, or the item's text
-/// color where the accent would not stand out (a selected item).
-fn mark_ink(selected: bool) -> impl Fn(&iced::Theme) -> iced::Color {
-    move |t| if selected { item_text(t, true) } else { theme::accent(t) }
+/// "+ New …" under the last item of a list, as wide as the list.
+fn add_item<'a>(msg: Message, label: &'a str) -> Element<'a, Message> {
+    let content =
+        row![icon(Icon::Plus, 13.0, theme::muted), text(label).size(theme::TEXT)].spacing(8).align_y(Alignment::Center);
+    button(content).width(Length::Fill).padding([6, 11]).style(theme::add_item_button).on_press(msg).into()
 }
 
 fn activity_dot<'a>(on: bool) -> Element<'a, Message> {
@@ -191,15 +167,14 @@ fn activity_dot<'a>(on: bool) -> Element<'a, Message> {
 fn marker<'a>(notice: Option<&Notice>, activity: bool) -> Element<'a, Message> {
     let Some(n) = notice else { return activity_dot(activity) };
     let category = n.category;
-    tooltip(
+    tip(
         text(n.glyph())
             .size(13)
             .font(BOLD)
             .style(move |t: &iced::Theme| text::Style { color: Some(theme::notice_color(t, category)) }),
-        container(text(n.headline.clone()).size(12)).padding([4, 8]).style(container::rounded_box),
+        n.headline.clone(),
         tooltip::Position::Bottom,
     )
-    .into()
 }
 
 impl App {
@@ -216,12 +191,10 @@ impl App {
     fn rename_input(&self, target: RenameTarget) -> Option<Element<'_, Message>> {
         let r = self.rename.as_ref().filter(|r| r.target == target)?;
         Some(
-            text_input("Name", &r.value)
+            ui::input("Name", &r.value)
                 .id(RENAME_INPUT)
                 .on_input(Message::RenameInput)
                 .on_submit(Message::RenameCommit)
-                .size(13)
-                .padding(5)
                 .into(),
         )
     }
@@ -229,13 +202,14 @@ impl App {
     pub(crate) fn view_projects(&self) -> Element<'_, Message> {
         let s = self.core.state();
         let header = row![
-            section_title("PROJECTS"),
+            ui::heading("Projects"),
             space::horizontal(),
-            icon_button("⚙", Message::OpenSettings, "Settings"),
-            icon_button("+", Message::NewProject, self.keymap.hint("New project", Action::NewProject)),
+            icon_button(Icon::Settings, Message::OpenSettings, "Settings"),
+            icon_button(Icon::Plus, Message::NewProject, self.keymap.tip("New project", Action::NewProject)),
         ]
+        .spacing(2)
         .align_y(Alignment::Center)
-        .padding([8, 10]);
+        .padding(HEADER_PADDING);
 
         let shown: Vec<&Project> = self.listed_projects().collect();
         // While searching, groups show the projects found in them.
@@ -258,15 +232,15 @@ impl App {
             .on_drop_if(self.rename.is_none(), move |from, target| {
                 groups::drop_command(&all, &rows, from, target).map(Message::ArrangeProjects)
             });
-        let mut items = column![list].spacing(LIST_SPACING).padding([0, 6]);
+        let mut items = column![list].spacing(LIST_SPACING).padding([0.0, COLUMN_PADDING]);
         if shown.is_empty() && !s.projects.is_empty() {
-            items = items.push(container(muted_text("No projects match")).padding([6, 8]));
+            items = items.push(container(muted_text("No projects match")).padding([6, 10]));
         }
-        let items = items.push(add_item(Message::NewProject, self.keymap.hint("New project", Action::NewProject)));
-        container(column![header, self.project_search_box(), scrollable(items).height(Length::Fill)])
+        let items = items.push(add_item(Message::NewProject, "New project"));
+        container(column![header, self.project_search_box(), ui::scroll(items).height(Length::Fill)])
             .width(190)
             .height(Length::Fill)
-            .style(theme::sidebar_deep)
+            .style(theme::side_column)
             .into()
     }
 
@@ -286,20 +260,24 @@ impl App {
 
     /// The box that filters the projects list, with a ✕ to empty it.
     fn project_search_box(&self) -> Element<'_, Message> {
-        // Room on the right for the ✕, so the text doesn't run under it.
-        let input = text_input(&self.keymap.hint("Search", Action::SearchProjects), &self.project_search)
+        // Room on the left for the magnifier, and on the right for the ✕ while
+        // there is one, so the text doesn't run under them.
+        let right = if self.project_search.is_empty() { 8.0 } else { 28.0 };
+        let input = ui::input(&self.keymap.hint("Search", Action::SearchProjects), &self.project_search)
             .id(PROJECT_SEARCH)
             .on_input(Message::ProjectSearch)
             .on_submit(Message::ProjectSearchSubmit)
-            .size(13)
-            .padding(Padding { right: 28.0, ..Padding::new(5.0) });
+            .padding(Padding { top: 5.0, right, bottom: 5.0, left: 29.0 });
+        let magnifier = container(icon(Icon::Search, 13.0, theme::faint))
+            .padding(Padding { left: 11.0, ..Padding::ZERO })
+            .center_y(Length::Fill);
         // The input stays the first layer, so it keeps its focus when the ✕ comes and goes.
-        let mut field = stack![on_escape(input, Message::ProjectSearchEscape)];
+        let mut field = stack![on_escape(input, Message::ProjectSearchEscape), magnifier];
         if !self.project_search.is_empty() {
-            let clear = icon_button("✕", Message::ProjectSearchClear, "Clear search");
-            field = field.push(container(clear).padding([0, 2]).align_right(Length::Fill).center_y(Length::Fill));
+            let clear = icon_button(Icon::Close, Message::ProjectSearchClear, "Clear search");
+            field = field.push(container(clear).padding([0, 3]).align_right(Length::Fill).center_y(Length::Fill));
         }
-        container(field).padding(Padding { top: 0.0, right: 6.0, bottom: 6.0, left: 6.0 }).into()
+        container(field).padding(Padding { top: 0.0, right: COLUMN_PADDING, bottom: 8.0, left: COLUMN_PADDING }).into()
     }
 
     /// A group's row: a click shows or hides its projects.
@@ -310,9 +288,9 @@ impl App {
         let s = self.core.state();
         let projects: Vec<&Project> = s.projects_in(group.id).collect();
         let open = searching || !group.collapsed;
-        let arrow = text(if open { "▼" } else { "▶" }).font(theme::MONO).size(9).width(12);
-        let mut label = row![arrow, text(&group.name).size(13).font(BOLD).width(Length::Fill)]
-            .spacing(4)
+        let chevron = icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 12.0, theme::muted);
+        let mut label = row![chevron, text(&group.name).size(13).font(SEMIBOLD).width(Length::Fill)]
+            .spacing(6)
             .align_y(Alignment::Center);
         let mut selected = false;
         if !open {
@@ -320,19 +298,18 @@ impl App {
             selected = projects.iter().any(|p| s.selected_project == Some(p.id));
             let tabs = || projects.iter().flat_map(|p| s.tabs_of(p.id));
             let notice = self.notice_of(tabs().flat_map(|t| t.layout.panes()));
-            label = label.push(busy_mark(self.busy_in(tabs().flat_map(|t| t.layout.panes())), mark_ink(selected)));
+            label = label.push(busy_mark(self.busy_in(tabs().flat_map(|t| t.layout.panes())), theme::accent));
             label = label.push(marker(notice, tabs().any(|t| self.activity.contains(&t.id))));
         }
-        let label = label.push(muted_text(projects.len().to_string()));
-        let mut body =
-            mouse_area(container(label).padding([5, 8]).width(Length::Fill).style(item_style(selected, false)))
-                .on_double_click(Message::GroupDoubleClicked(group.id));
+        let label = label.push(ui::badge(projects.len().to_string(), Tone::Neutral));
+        let mut body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
+            .on_double_click(Message::GroupDoubleClicked(group.id));
         if !searching {
             // On release, so pressing it to drag it doesn't open or close it.
             body = body.on_release(Message::ToggleGroup(group.id));
         }
-        let rename = icon_button("✎", Message::StartRename(RenameTarget::Group(group.id)), "Rename group");
-        row![body, container(rename).width(ACTIONS_WIDTH)].align_y(Alignment::Center).into()
+        let rename = icon_button(Icon::Edit, Message::StartRename(RenameTarget::Group(group.id)), "Rename group");
+        list_item(body, rename, selected, false)
     }
 
     /// A project's row; `nested` in a group, it is drawn further right.
@@ -352,8 +329,8 @@ impl App {
         let busy = self.busy_in(s.tabs_of(p.id).flat_map(|t| t.layout.panes()));
         let label = column![
             row![
-                text(&p.name).size(14).width(Length::Fill),
-                busy_mark(busy, mark_ink(selected)),
+                text(&p.name).size(NAME_SIZE).width(Length::Fill),
+                busy_mark(busy, theme::accent),
                 marker(notice, new_output)
             ]
             .spacing(4)
@@ -361,57 +338,55 @@ impl App {
             muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None),
         ]
         .spacing(1);
-        let body = mouse_area(container(label).padding([6, 8]).width(Length::Fill).style(item_style(selected, false)))
+        let body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
             .on_press(Message::SelectProject(p.id))
             .on_double_click(Message::StartRename(RenameTarget::Project(p.id)));
-        // Same widget structure whether selected or not, so the mouse area keeps
-        // its click state and a double click on an unselected item still registers.
-        let actions: Element<'_, Message> = if selected {
-            column![
-                icon_button("✎", Message::EditProject(p.id), "Edit project"),
-                icon_button("✕", Message::AskDeleteProject(p.id), "Delete project"),
-            ]
-            .into()
-        } else {
-            space::horizontal().width(ACTIONS_WIDTH).into()
-        };
-        row![body, actions].align_y(Alignment::Center).into()
+        let actions = item_actions(
+            selected,
+            (Message::EditProject(p.id), "Edit project"),
+            (Message::AskDeleteProject(p.id), "Delete project"),
+        );
+        list_item(body, actions, selected, false)
     }
 
     pub(crate) fn view_tabs(&self) -> Element<'_, Message> {
         let s = self.core.state();
         let Some(project) = s.selected_project.and_then(|p| s.project(p)) else {
-            return container(space::horizontal()).width(210).height(Length::Fill).style(theme::sidebar).into();
+            return container(space::horizontal()).width(210).height(Length::Fill).style(theme::side_column).into();
         };
         let header = row![
             column![
-                text(&project.name).size(15).font(BOLD),
+                text(&project.name).size(15).font(SEMIBOLD),
                 muted_text(short_dir(&project.working_dir, 26)).wrapping(text::Wrapping::None)
             ]
+            .spacing(1)
             .width(Length::Fill),
-            icon_button("+", Message::NewTab, self.keymap.hint("New session", Action::NewSession)),
+            icon_button(Icon::Plus, Message::NewTab, self.keymap.tip("New session", Action::NewSession)),
         ]
         .align_y(Alignment::Center)
-        .padding([8, 10]);
+        .padding(HEADER_PADDING);
         let ids: Vec<TabId> = s.tabs_of(project.id).map(|t| t.id).collect();
         let list = reorder(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
             .spacing(LIST_SPACING)
             .on_move_if(self.rename.is_none(), move |from, to| Message::MoveTab(ids[from], to));
-        let items = column![list, add_item(Message::NewTab, self.keymap.hint("New session", Action::NewSession))]
-            .spacing(LIST_SPACING)
-            .padding([0, 6]);
-        container(
-            column![
-                header,
-                section_title("SESSIONS").width(Length::Fill).center(),
-                scrollable(items).height(Length::Fill)
-            ]
-            .spacing(4),
-        )
-        .width(210)
-        .height(Length::Fill)
-        .style(theme::sidebar)
-        .into()
+        let mut items = column![list, add_item(Message::NewTab, "New session")];
+        // In a repository, the Worktrees dialog too: a new worktree gets a
+        // session of its own.
+        if self.in_repo() {
+            items = items.push(tip(
+                add_item(Message::Worktree(WorktreeMsg::Open), "New worktree"),
+                "Make a git worktree, in a new session\nOr open an existing one",
+                tooltip::Position::Bottom,
+            ));
+        }
+        let items = items.spacing(LIST_SPACING).padding([0.0, COLUMN_PADDING]);
+        let heading =
+            container(ui::heading("Sessions")).padding(Padding { left: HEADER_PADDING.left, ..Padding::ZERO });
+        container(column![header, heading, ui::scroll(items).height(Length::Fill)].spacing(6))
+            .width(210)
+            .height(Length::Fill)
+            .style(theme::side_column)
+            .into()
     }
 
     fn tab_item<'a>(&'a self, project: &'a Project, tab: &'a Tab) -> Element<'a, Message> {
@@ -430,7 +405,7 @@ impl App {
         }
         let open = s.open_task_count(tab.id);
         let badge: Element<'_, Message> = if open > 0 {
-            container(text(open.to_string()).size(11)).padding([1, 6]).style(theme::badge).into()
+            tip(ui::badge(open.to_string(), Tone::Neutral), "Open tasks", tooltip::Position::Bottom)
         } else {
             space::horizontal().width(0).into()
         };
@@ -445,43 +420,32 @@ impl App {
         }
         // A session without an agent is plain terminals: TerminalRooster's own icon.
         if kinds.is_empty() {
-            marks = marks.push(tooltip(
-                terminal_icon(NAME_SIZE),
-                container(text("Terminal").size(12)).padding([4, 8]).style(container::rounded_box),
-                tooltip::Position::Bottom,
-            ));
+            marks = marks.push(tip(terminal_icon(NAME_SIZE), "Terminal", tooltip::Position::Bottom));
         }
         for kind in kinds {
-            marks = marks.push(tooltip(
-                agent_icon(kind, NAME_SIZE, move |t| item_text(t, selected)),
-                container(text(kind.label()).size(12)).padding([4, 8]).style(container::rounded_box),
-                tooltip::Position::Bottom,
-            ));
+            marks = marks.push(tip(agent_icon(kind, NAME_SIZE, theme::ink), kind.label(), tooltip::Position::Bottom));
         }
         // A long name wraps, breaking inside a word too when one doesn't fit.
         let name = text(&tab.title).size(NAME_SIZE).width(Length::Fill).wrapping(text::Wrapping::WordOrGlyph);
-        let busy = on_first_line(busy_mark(self.busy_in(panes.iter().copied()), mark_ink(selected)));
-        let mut label = column![row![on_first_line(marks), name, busy, on_first_line(badge)].spacing(4)].spacing(1);
-        if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
+        let busy = on_first_line(busy_mark(self.busy_in(panes.iter().copied()), theme::accent));
+        let mut label = column![row![on_first_line(marks), name, busy, on_first_line(badge)].spacing(6)].spacing(2);
+        if let Some(badge) = self.gone_badge(tab) {
+            label = label.push(badge);
+        } else if let Some(head) = self.git_of(tab).and_then(|g| g.head.as_ref()) {
             label = label.push(branch_label(head, 11.0, 24));
         }
         let label = label.push(muted_text(subtitle));
         let target = DropTarget::Session(tab.id);
-        let style = item_style(selected, self.is_drop_target(target));
-        let body = mouse_area(container(label).padding([6, 8]).width(Length::Fill).style(style))
+        let body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
             .on_press(Message::SelectTab(tab.id))
             .on_double_click(Message::StartRename(RenameTarget::Tab(tab.id)));
-        let actions: Element<'_, Message> = if selected {
-            column![
-                icon_button("✎", Message::StartRename(RenameTarget::Tab(tab.id)), "Rename session"),
-                icon_button("✕", Message::AskDeleteTab(tab.id), "Delete session"),
-            ]
-            .into()
-        } else {
-            space::horizontal().width(ACTIONS_WIDTH).into()
-        };
+        let actions = item_actions(
+            selected,
+            (Message::StartRename(RenameTarget::Tab(tab.id)), "Rename session"),
+            (Message::AskDeleteTab(tab.id), "Delete session"),
+        );
         // A task dragged from the task panel can be dropped here to link it to this session.
-        let mut item = mouse_area(row![body, actions].align_y(Alignment::Center));
+        let mut item = mouse_area(list_item(body, actions, selected, self.is_drop_target(target)));
         if self.task_drag.is_some() {
             item = item
                 .on_enter(Message::TaskDragOver(target, true))

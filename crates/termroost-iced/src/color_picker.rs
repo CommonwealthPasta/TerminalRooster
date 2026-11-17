@@ -7,9 +7,10 @@ use iced::widget::{Column, button, column, container, row, slider, space, text};
 use iced::{Alignment, Border, Element, Length};
 
 use crate::app::Message;
-use crate::sidebar::{BOLD, muted_text};
-use crate::theme::{self, MONO};
+use crate::sidebar::muted_text;
+use crate::theme::{self, MONO, SEMIBOLD};
 use crate::themes::{ColorField, Hex, ThemeDef};
+use crate::ui;
 
 /// Side of one palette swatch, in pixels.
 const CHIP: f32 = 18.0;
@@ -170,7 +171,7 @@ fn chip<'a>(c: Hex, selected: bool, msg: Message) -> Element<'a, Message> {
                 border: Border {
                     width: if hovered { 2.0 } else { 1.0 },
                     color: if hovered { p.background.base.text } else { theme::muted(t).scale_alpha(0.5) },
-                    radius: 3.0.into(),
+                    radius: 4.0.into(),
                 },
                 ..button::Style::default()
             }
@@ -213,7 +214,7 @@ pub fn field_swatch<'a>(c: Hex, open: bool, msg: Message) -> Element<'a, Message
                     } else {
                         theme::muted(t)
                     },
-                    radius: 3.0.into(),
+                    radius: 4.0.into(),
                 },
                 ..button::Style::default()
             }
@@ -239,12 +240,10 @@ pub fn panel<'a>(picker: &ColorPicker, t: &ThemeDef) -> Element<'a, Message> {
     }
     let header = row![
         big,
-        column![text(field.label()).size(14).font(BOLD), value].spacing(2).width(Length::Fill),
-        button(text("Revert").size(12))
-            .padding([4, 10])
-            .style(button::secondary)
+        column![text(field.label()).size(14).font(SEMIBOLD), value].spacing(2).width(Length::Fill),
+        ui::small("Revert", theme::button_secondary)
             .on_press_maybe((current != picker.original).then(|| pick(picker.original))),
-        button(text("Done").size(12)).padding([4, 12]).style(button::primary).on_press(Message::PickColor(None)),
+        ui::small("Done", theme::button_primary).on_press(Message::PickColor(None)),
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -256,7 +255,7 @@ pub fn panel<'a>(picker: &ColorPicker, t: &ThemeDef) -> Element<'a, Message> {
     let adjust = |label: &'a str, max: f32, value: f32, unit: &'a str, set: fn(Hsl, f32) -> Hsl| {
         row![
             text(label).size(12).width(74),
-            slider(0.0..=max, value, move |v| Message::PickerHsl(set(hsl, v))).step(1.0_f32),
+            slider(0.0..=max, value, move |v| Message::PickerHsl(set(hsl, v))).step(1.0_f32).style(theme::slider_track),
             text(format!("{value:.0}{unit}")).font(MONO).size(12).width(40),
         ]
         .spacing(8)
@@ -281,15 +280,12 @@ pub fn panel<'a>(picker: &ColorPicker, t: &ThemeDef) -> Element<'a, Message> {
         ]
         .spacing(14),
     )
-    .padding(12)
+    .padding(14)
     .width(Length::Fill)
     .style(|th: &iced::Theme| {
-        let p = th.extended_palette();
-        container::Style {
-            background: Some(p.background.base.color.into()),
-            border: Border { width: 1.0, color: p.primary.base.color, radius: 6.0.into() },
-            ..container::Style::default()
-        }
+        let mut card = theme::card(th);
+        card.border = Border { width: 1.0, color: theme::accent(th).scale_alpha(0.6), radius: theme::RADIUS.into() };
+        card
     })
     .into()
 }

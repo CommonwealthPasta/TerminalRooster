@@ -1,3 +1,8 @@
+# Interface icons
+
+The line icons in `ui/` and `files/` were drawn for Terminal Rooster and are
+under its own license (MIT).
+
 # Agent logos
 
 The logos are trademarks of their owners: Claude of Anthropic, Codex of

@@ -6,9 +6,12 @@ use iced::{Alignment, Element, Length};
 use super::text::char_column;
 use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, highlight, keys};
 use crate::app::{App, Message};
-use crate::sidebar::{display_dir, icon_button, muted_text};
+use crate::file_icons::{self, Hues, Look};
+use crate::icons::Icon;
+use crate::sidebar::{display_dir, muted_text};
 use crate::terminal_view::TerminalView;
-use crate::theme::{self, MONO};
+use crate::theme::{self, MONO, SEMIBOLD, Tone};
+use crate::ui::{self, icon_button, tip};
 
 impl App {
     /// "Terminals", then each file the visible session has open. Nothing
@@ -17,38 +20,40 @@ impl App {
         let Some(files) = self.session_files().filter(|f| !f.open.is_empty()) else {
             return space::vertical().height(0).into();
         };
-        let tab = |label: String, selected: bool, msg: Message| {
-            button(text(label).size(12).wrapping(text::Wrapping::None))
-                .padding([3, 10])
-                .style(theme::panel_tab(selected))
-                .on_press(msg)
+        let hues = Hues::of(&self.active_theme());
+        // A file's tab leads with the icon its name has in the Files tab.
+        let tab = |label: String, look: Option<Look>, selected: bool, msg: Message| {
+            let font = if selected { SEMIBOLD } else { theme::UI };
+            let icon = look.map(|look| file_icons::icon(look, hues, false, 13.0));
+            let label = row![icon, text(label).size(12).font(font).wrapping(text::Wrapping::None)]
+                .spacing(5)
+                .align_y(Alignment::Center);
+            button(label).padding([3, 10]).style(theme::segment(selected)).on_press(msg)
         };
-        let mut strip = row![tab("Terminals".into(), files.shown.is_none(), Message::Editor(EditorMsg::Show(None)))]
-            .spacing(4)
-            .align_y(Alignment::Center);
+        let terminals = tab("Terminals".into(), None, files.shown.is_none(), Message::Editor(EditorMsg::Show(None)));
+        let mut strip = row![terminals].spacing(4).align_y(Alignment::Center);
         for doc in &files.open {
-            let mut name =
-                doc.path.file_name().map_or_else(|| doc.path.display().to_string(), |n| n.to_string_lossy().into());
+            let mut name = doc.label();
+            // A commit or the changes isn't a file, so it has no file icon.
+            let look = doc.is_file().then(|| file_icons::file(&name));
             if doc.modified() {
                 name.push_str(" ●");
             }
             let item = row![
-                tab(name, files.shown == Some(doc.id), Message::Editor(EditorMsg::Show(Some(doc.id)))),
-                icon_button("✕", Message::Editor(EditorMsg::Close(doc.id)), "Close"),
+                tab(name, look, files.shown == Some(doc.id), Message::Editor(EditorMsg::Show(Some(doc.id)))),
+                icon_button(Icon::Close, Message::Editor(EditorMsg::Close(doc.id)), "Close"),
             ]
             .align_y(Alignment::Center);
-            strip = strip.push(tooltip(
-                item,
-                container(text(display_dir(&doc.path)).size(12)).padding([4, 8]).style(container::rounded_box),
-                tooltip::Position::Bottom,
-            ));
+            strip = strip.push(tip(item, display_dir(&doc.path), tooltip::Position::Bottom));
         }
-        container(strip.wrap()).padding([2, 8]).into()
+        container(column![container(strip.wrap()).padding([5, 8]), ui::divider()]).into()
     }
 
     /// A file shown in place of the terminals.
     pub(crate) fn view_doc<'a>(&'a self, doc: &'a OpenFile) -> Element<'a, Message> {
         match &doc.kind {
+            DocKind::Commit(c) => self.view_commit(doc.id, c),
+            DocKind::Changes(c) => self.view_changes(doc.id, c),
             DocKind::Loading | DocKind::Restored { .. } => center(muted_text("Reading…")).into(),
             // Neovim or Vim: a terminal like the session's, with the keyboard
             // unless a dialog is open.
@@ -61,9 +66,10 @@ impl App {
                 Message::Noop,
                 Message::Noop,
             ))
+            .padding(1)
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::pane(true))
+            .style(theme::terminal_frame)
             .into(),
             DocKind::Text(t) => {
                 let id = doc.id;
@@ -99,26 +105,23 @@ impl App {
 /// Under the text when the file went its own way on disk: what happened,
 /// and what to do about it.
 fn conflict_banner<'a>(id: DocId, conflict: Option<Conflict>) -> Element<'a, Message> {
-    let small = |label: &'a str, msg: EditorMsg| {
-        button(text(label).size(12)).padding([3, 10]).style(button::secondary).on_press(Message::Editor(msg))
-    };
-    let (message, buttons, style): (&str, _, fn(&iced::Theme) -> container::Style) = match conflict {
+    let small =
+        |label: &'a str, msg: EditorMsg| ui::small(label, theme::button_secondary).on_press(Message::Editor(msg));
+    let (message, buttons, tone) = match conflict {
         None => return space::vertical().height(0).into(),
         Some(Conflict::Changed(_)) => (
             "This file changed on disk, and you have unsaved changes here.",
             row![small("Reload", EditorMsg::Reload(id)), small("Keep mine", EditorMsg::KeepMine(id))],
-            theme::notice_banner,
+            Tone::Accent,
         ),
         Some(Conflict::Deleted) => (
             "This file was deleted from disk.",
             row![small("Save it again", EditorMsg::SaveAnyway(id)), small("Close", EditorMsg::Close(id))],
-            theme::error_banner,
+            Tone::Danger,
         ),
     };
-    container(row![text(message).size(13).width(Length::Fill), buttons.spacing(6)].align_y(Alignment::Center))
-        .padding([4, 10])
-        .style(style)
-        .into()
+    let line = row![text(message).size(13).width(Length::Fill), buttons.spacing(6)].align_y(Alignment::Center);
+    container(ui::note(tone, line)).padding([6, 0]).into()
 }
 
 impl App {

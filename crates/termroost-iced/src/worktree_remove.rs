@@ -5,14 +5,17 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iced::widget::{button, checkbox, column, row, space, text};
-use iced::{Element, Task};
+use iced::widget::{column, container, row, text};
+use iced::{Alignment, Element, Length, Task};
 use termroost_core::TabId;
 use termroost_core::detect::{self, FolderProcess};
 use termroost_core::git::{self, Head, Repo};
 
 use crate::app::{App, Dialog, Message, RunningTerminal};
-use crate::sidebar::{BOLD, branch_label, display_dir, muted_text};
+use crate::dialogs::DialogParts;
+use crate::sidebar::{branch_label, display_dir, muted_text};
+use crate::theme::{self, Tone};
+use crate::ui;
 use crate::worktree::WorktreeForm;
 
 /// How long to wait for the stopped terminals' processes before git deletes
@@ -117,15 +120,9 @@ impl App {
                 f.removing = false;
                 match result {
                     Ok(()) => {
-                        tracing::info!(path = %path.display(), "worktree removed");
-                        let closed = f.closed;
-                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        // The dialog said what removing it does; closing is enough.
+                        tracing::info!(path = %path.display(), sessions_closed = f.closed, "worktree removed");
                         self.dialog = None;
-                        self.notice = Some(match closed {
-                            0 => format!("Removed the worktree {name}."),
-                            1 => format!("Removed the worktree {name} and closed its session."),
-                            n => format!("Removed the worktree {name} and closed its {n} sessions."),
-                        });
                         return Task::batch([self.read_git(), self.focus_active()]);
                     }
                     Err(e) => {
@@ -257,16 +254,21 @@ impl App {
         Task::batch([removed, self.after_select()])
     }
 
-    pub(crate) fn view_remove<'a>(&'a self, f: &'a RemoveForm) -> Element<'a, Message> {
+    pub(crate) fn view_remove<'a>(&'a self, f: &'a RemoveForm) -> DialogParts<'a> {
         let s = self.core.state();
         let project = s.tab(f.back.tab).map(|t| t.project);
-        let mut col = column![text("Remove worktree?").size(18).font(BOLD)].spacing(12);
+        let mut col = column![].spacing(12);
 
-        let mut what = row![].spacing(8);
+        let mut what = row![].spacing(8).align_y(Alignment::Center);
         if let Some(head) = &f.head {
             what = what.push(branch_label(head, 13.0, 40));
         }
-        col = col.push(what.push(muted_text(display_dir(&f.path)).size(12)));
+        col = col.push(
+            container(what.push(muted_text(display_dir(&f.path)).size(12)))
+                .padding([8, 12])
+                .width(Length::Fill)
+                .style(theme::list_box),
+        );
         col = col.push(
             text(match &f.head {
                 Some(Head::Branch(b)) => {
@@ -302,89 +304,73 @@ impl App {
             col = col.push(column![text("These stop:").size(13), column(lines).spacing(2).padding([0, 12])].spacing(4));
         }
         for t in &f.blocking {
-            col = col.push(
-                text(format!(
+            col = col.push(ui::note_text(
+                Tone::Danger,
+                format!(
                     "{} has a terminal in this folder running {}. Stop it first, or git may not be able to delete \
                      the folder.",
                     t.place, t.programs
-                ))
-                .size(12)
-                .style(text::danger),
-            );
+                ),
+            ));
         }
         if let Some(others) = f.others.as_ref().filter(|o| !o.is_empty()) {
-            col = col.push(
+            col = col.push(ui::note(
+                Tone::Warning,
                 column![
                     text(format!(
                         "Other programs work in this folder, and it cannot be deleted while they run: {}.",
                         program_list(others.iter().map(|p| p.name.as_str()))
                     ))
-                    .size(13)
-                    .style(text::danger),
-                    checkbox(f.end_others)
-                        .label("End them")
-                        .on_toggle(|on| msg(RemoveMsg::EndOthers(on)))
-                        .size(14)
-                        .text_size(13),
+                    .size(13),
+                    ui::check(f.end_others).label("End them").on_toggle(|on| msg(RemoveMsg::EndOthers(on))),
                 ]
-                .spacing(6),
-            );
+                .spacing(8),
+            ));
         }
 
         let changes: Element<'_, Message> = match &f.changes {
             None => muted_text("Checking for uncommitted changes…").size(12).into(),
             Some(Ok(0)) => muted_text("No uncommitted changes.").size(12).into(),
-            Some(Ok(n)) => column![
-                text(format!(
-                    "It has {n} uncommitted change{}: edited files, or new files git does not ignore.",
-                    if *n == 1 { "" } else { "s" }
-                ))
-                .size(13)
-                .style(text::danger),
-                checkbox(f.discard)
-                    .label("Delete them too")
-                    .on_toggle(|on| msg(RemoveMsg::Discard(on)))
-                    .size(14)
-                    .text_size(13),
-            ]
-            .spacing(6)
-            .into(),
-            Some(Err(e)) => text(format!("git could not check for changes: {e}")).size(12).style(text::danger).into(),
+            Some(Ok(n)) => ui::note(
+                Tone::Warning,
+                column![
+                    text(format!(
+                        "It has {n} uncommitted change{}: edited files, or new files git does not ignore.",
+                        if *n == 1 { "" } else { "s" }
+                    ))
+                    .size(13),
+                    ui::check(f.discard).label("Delete them too").on_toggle(|on| msg(RemoveMsg::Discard(on))),
+                ]
+                .spacing(8),
+            ),
+            Some(Err(e)) => ui::note_text(Tone::Danger, format!("git could not check for changes: {e}")),
         };
         // Once the worktree is gone from git, what is left of it just goes.
         if !f.leftover {
             col = col.push(changes);
         }
         if let Some(e) = &f.error {
-            col = col.push(
-                text(if f.leftover {
+            col = col.push(ui::note_text(
+                Tone::Danger,
+                if f.leftover {
                     format!("The worktree is gone from git, but part of its folder is left: {e}")
                 } else {
                     format!("git did not remove it: {e}")
-                })
-                .size(13)
-                .style(text::danger),
-            );
+                },
+            ));
         }
 
-        let back = button(text("Back")).padding([6, 14]).style(button::secondary);
+        let back = ui::secondary("Back");
         let label = match (f.removing, f.leftover) {
             (true, _) => "Removing…",
             (false, true) => "Delete the rest",
             (false, false) => "Remove worktree",
         };
-        col.push(
-            row![
-                space::horizontal(),
-                if f.removing { back } else { back.on_press(Message::DialogCancel) },
-                button(text(label))
-                    .padding([6, 14])
-                    .style(button::danger)
-                    .on_press_maybe(f.can_remove().then(|| msg(RemoveMsg::Confirm))),
-            ]
-            .spacing(8),
-        )
-        .into()
+        let mut parts = DialogParts::new("Remove worktree?", col)
+            .button(if f.removing { back } else { back.on_press(Message::DialogCancel) })
+            .button(ui::danger(label).on_press_maybe(f.can_remove().then(|| msg(RemoveMsg::Confirm))));
+        parts.closable = !f.removing;
+        parts
     }
 }
 

@@ -1,7 +1,9 @@
 //! Showing a file or folder in the system's file manager.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+use iced::Task;
 
 /// The menu entry: "Show in Explorer" for a file (its folder opens with it
 /// selected), "Open in Explorer" for a folder.
@@ -21,6 +23,15 @@ pub fn label(is_dir: bool) -> &'static str {
 /// thread.
 pub fn reveal(path: &Path, is_dir: bool) -> Result<(), String> {
     imp::reveal(path, is_dir)
+}
+
+/// [`reveal`] on a thread; the task ends with how it went.
+pub fn in_background(path: PathBuf, is_dir: bool) -> Task<Result<(), String>> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(reveal(&path, is_dir));
+    });
+    Task::perform(async move { rx.recv().await.unwrap_or(Ok(())) }, |r| r)
 }
 
 fn run(cmd: &mut Command) -> Result<std::process::ExitStatus, String> {

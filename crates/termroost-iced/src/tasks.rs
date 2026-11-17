@@ -1,15 +1,15 @@
 //! The per-project task panel. A task can be dragged onto a session (in the
 //! sessions list, or the terminals on screen) to link it to that session.
 
-use iced::widget::{
-    checkbox, column, container, mouse_area, pick_list, pin, row, scrollable, space, stack, text, text_input,
-};
+use iced::widget::{column, container, mouse_area, pick_list, pin, row, space, stack, text};
 use iced::{Alignment, Element, Length, Point, mouse};
 use termroost_core::Task;
 
 use crate::app::{App, DropTarget, Message, TASK_EDIT_INPUT, TASK_INPUT, TabChoice};
-use crate::sidebar::{BOLD, icon_button, muted_text};
-use crate::theme;
+use crate::icons::Icon;
+use crate::sidebar::muted_text;
+use crate::theme::{self, SEMIBOLD};
+use crate::ui::{self, icon_button};
 
 /// Width of the label that follows the pointer while a task is dragged.
 const DRAG_LABEL_WIDTH: f32 = 240.0;
@@ -31,7 +31,7 @@ impl App {
             None => "Drop on a session to link it".to_owned(),
         };
         let label = column![
-            text(&task.title).size(13).font(BOLD).wrapping(text::Wrapping::None),
+            text(&task.title).size(13).font(SEMIBOLD).wrapping(text::Wrapping::None),
             muted_text(hint).wrapping(text::Wrapping::None),
         ]
         .spacing(2);
@@ -66,7 +66,7 @@ impl App {
         // The same widgets with or without a drag, so the terminals keep their state.
         let (label, style): (Element<'_, Message>, fn(&iced::Theme) -> container::Style) = match hint {
             Some(hint) => (
-                container(text(hint).size(15).font(BOLD)).padding([8, 14]).style(theme::drag_label).into(),
+                container(text(hint).size(15).font(SEMIBOLD)).padding([10, 16]).style(theme::drag_label).into(),
                 theme::drop_target,
             ),
             None => (space::horizontal().width(0).into(), |_| container::Style::default()),
@@ -101,31 +101,28 @@ impl App {
         let counts = muted_text(format!("{open} open · {done} done"));
 
         let filters = row![
-            checkbox(self.prefs.show_done).label("Show done").on_toggle(Message::ShowDone).size(14).text_size(12),
-            checkbox(self.prefs.tasks_this_tab_only)
+            ui::check(self.prefs.show_done).label("Show done").on_toggle(Message::ShowDone).text_size(12),
+            ui::check(self.prefs.tasks_this_tab_only)
                 .label("This session only")
                 .on_toggle(Message::ThisTabOnly)
-                .size(14)
                 .text_size(12),
         ]
-        .spacing(12);
+        .spacing(14);
 
-        let input = text_input(
+        let input = ui::input(
             if self.prefs.tasks_this_tab_only { "Add a task to this session…" } else { "Add a task…" },
             &self.new_task,
         )
         .id(TASK_INPUT)
         .on_input(Message::NewTaskInput)
-        .on_submit(Message::AddTask)
-        .size(13)
-        .padding(6);
+        .on_submit(Message::AddTask);
 
         let visible = s
             .tasks_of(project)
             .filter(|t| (self.prefs.show_done || !t.done) && (!self.prefs.tasks_this_tab_only || t.tab == active_tab));
-        let list = column(visible.map(|t| self.task_item(t, &choices, active_tab))).spacing(6);
+        let list = column(visible.map(|t| self.task_item(t, &choices, active_tab))).spacing(8);
 
-        column![counts, filters, input, scrollable(list).height(Length::Fill)].spacing(10).into()
+        column![counts, filters, input, ui::scroll(list).height(Length::Fill)].spacing(10).into()
     }
 
     fn task_item<'a>(
@@ -136,12 +133,11 @@ impl App {
     ) -> Element<'a, Message> {
         let id = task.id;
         let title: Element<'_, Message> = match &self.task_edit {
-            Some((edit, value)) if *edit == id => text_input("Task", value)
+            Some((edit, value)) if *edit == id => ui::input("Task", value)
                 .id(TASK_EDIT_INPUT)
                 .on_input(Message::TaskEditInput)
                 .on_submit(Message::TaskEditCommit)
-                .size(13)
-                .padding(4)
+                .padding([4, 8])
                 .into(),
             _ => {
                 let done = task.done;
@@ -159,12 +155,16 @@ impl App {
         let selected = choices.iter().find(|c| c.id == task.tab).cloned();
         let mut link = row![
             muted_text("session"),
-            pick_list(choices.to_vec(), selected, move |c| Message::TaskTab(id, c)).text_size(11).padding([1, 6]),
+            pick_list(choices.to_vec(), selected, move |c| Message::TaskTab(id, c))
+                .text_size(11)
+                .padding([1, 6])
+                .style(theme::dropdown)
+                .menu_style(theme::dropdown_menu),
         ]
         .spacing(6)
         .align_y(Alignment::Center);
         if let Some(tab) = task.tab.filter(|t| Some(*t) != active_tab) {
-            link = link.push(icon_button("↗", Message::SelectTab(tab), "Go to session"));
+            link = link.push(icon_button(Icon::Open, Message::SelectTab(tab), "Go to session"));
         }
 
         let linked_here = task.tab.is_some() && task.tab == active_tab;
@@ -173,10 +173,10 @@ impl App {
         let card = container(
             column![
                 row![
-                    checkbox(task.done).on_toggle(move |d| Message::TaskDone(id, d)).size(16),
+                    ui::check(task.done).on_toggle(move |d| Message::TaskDone(id, d)),
                     title,
-                    icon_button("✎", Message::EditTask(id), "Edit"),
-                    icon_button("✕", Message::DeleteTask(id), "Delete task"),
+                    icon_button(Icon::Edit, Message::EditTask(id), "Edit"),
+                    icon_button(Icon::Trash, Message::DeleteTask(id), "Delete task"),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -184,20 +184,9 @@ impl App {
             ]
             .spacing(4),
         )
-        .padding([6, 8])
+        .padding([8, 10])
         .width(Length::Fill)
-        .style(move |t: &iced::Theme| {
-            let p = t.extended_palette();
-            container::Style {
-                background: Some(iced::Background::Color(p.background.base.color)),
-                border: iced::Border {
-                    width: 1.0,
-                    color: if linked_here { p.primary.base.color } else { p.background.strong.color },
-                    radius: 6.0.into(),
-                },
-                ..container::Style::default()
-            }
-        });
+        .style(theme::task_card(linked_here));
         mouse_area(card)
             .on_press(Message::TaskGrab(id))
             // A click puts it down again here. This doesn't wait for the app-wide

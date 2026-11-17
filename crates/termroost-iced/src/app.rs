@@ -19,14 +19,17 @@ use crate::color_picker::{ColorPicker, Hsl};
 use crate::editor::{DocId, EditorMsg, FileEditor, SessionFiles};
 use crate::files::{FilesMsg, FilesState};
 use crate::git_panel::{GitLog, GitSync, LogRead, SyncOp};
+use crate::git_view::GitViewMsg;
 use crate::groups;
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
+use crate::remotes::{RemotesForm, RemotesMsg};
 use crate::side_panel::SideTab;
 use crate::terminal_view::{self, KeyboardFocus};
 use crate::theme;
 use crate::themes::{self, ColorField, Hex, ThemeDef, ThemeStore};
+use crate::ui;
 use crate::worktree::{WorktreeForm, WorktreeMsg};
 use crate::worktree_remove::{RemoveForm, RemoveMsg};
 
@@ -189,6 +192,8 @@ pub enum Dialog {
     Worktree(Box<WorktreeForm>),
     /// Ask before removing a worktree, which closes its sessions.
     RemoveWorktree(Box<RemoveForm>),
+    /// Add remotes to the Git tab's repository, or change their URLs.
+    Remotes(Box<RemotesForm>),
     /// Quitting while terminals still run programs, or files have unsaved changes.
     ConfirmQuit {
         running: Vec<RunningTerminal>,
@@ -231,6 +236,8 @@ pub struct SettingsState {
     pub editor_found: Option<PathBuf>,
     /// The user's own Neovim, on PATH.
     pub nvim_on_path: Option<PathBuf>,
+    /// Why the file manager didn't open on the data or logs folder.
+    pub folder_error: Option<String>,
 }
 
 /// Choice in a task's "linked session" dropdown.
@@ -319,6 +326,9 @@ pub enum Message {
 
     OpenSettings,
     CloseSettings,
+    /// Open the file manager on one of Terminal Rooster's own folders (settings).
+    OpenFolder(PathBuf),
+    FolderOpened(Result<(), String>),
     AddCodexHook,
     RemoveCodexHook,
     /// Open the Codex window to trust the hook.
@@ -421,18 +431,28 @@ pub enum Message {
 
     /// Time to read the visible sessions' branches again.
     GitPoll,
-    /// Where each session directory stands in git (`None`: not in a repository).
-    GitStatus(Vec<(PathBuf, Option<git::Status>)>),
+    GitStatus {
+        /// Where each session directory of the selected project stands in
+        /// git (`None`: not in a repository).
+        statuses: Vec<(PathBuf, Option<git::Status>)>,
+        /// The directories of all sessions that no longer exist.
+        gone: Vec<PathBuf>,
+    },
     Worktree(WorktreeMsg),
     RemoveWorktree(RemoveMsg),
     LogRead(LogRead),
     LogAllBranches(bool),
-    /// Pull or push the Git tab's repository.
+    /// Pull, push or change the remote of the Git tab's repository.
     GitSync(SyncOp),
     GitSynced(PathBuf, Result<String, String>),
     PullRebase(bool),
     DismissSync,
+    Remotes(RemotesMsg),
+    /// Commits shown in place of the terminals.
+    GitView(GitViewMsg),
 
+    /// Puts text on the clipboard.
+    CopyText(String),
     DismissError,
     DismissNotice,
 }
@@ -472,9 +492,11 @@ pub struct App {
     pub(crate) git: HashMap<PathBuf, Option<git::Status>>,
     /// A periodic git read is running.
     git_polling: bool,
+    /// Session folders deleted outside the app (see `gone_folders`).
+    pub(crate) gone: HashSet<PathBuf>,
     /// The log in the side panel's Git tab.
     pub(crate) git_log: Option<GitLog>,
-    /// The Git tab's last pull or push.
+    /// The Git tab's last pull, push or change of remote.
     pub(crate) git_sync: Option<GitSync>,
     /// The log is being read.
     pub(crate) log_reading: bool,
@@ -582,6 +604,7 @@ impl App {
             notice: None,
             git: HashMap::new(),
             git_polling: false,
+            gone: HashSet::new(),
             git_log: None,
             git_sync: None,
             log_reading: false,
@@ -787,13 +810,20 @@ impl App {
     }
 
     /// Reads the git status of the selected project's sessions on a thread
-    /// (directories may be on a slow network drive).
+    /// (directories may be on a slow network drive), and looks whether the
+    /// folders of all sessions still exist.
     pub(crate) fn read_git(&self) -> Task<Message> {
         let s = self.core.state();
-        let Some(project) = s.selected_project else { return Task::none() };
-        let mut dirs: Vec<PathBuf> = s.tabs_of(project).map(|t| s.tab_working_dir(t)).collect();
-        dirs.sort();
-        dirs.dedup();
+        let sorted = |mut dirs: Vec<PathBuf>| {
+            dirs.sort();
+            dirs.dedup();
+            dirs
+        };
+        let dirs = sorted(match s.selected_project {
+            Some(project) => s.tabs_of(project).map(|t| s.tab_working_dir(t)).collect(),
+            None => Vec::new(),
+        });
+        let all = sorted(s.tabs.iter().map(|t| s.tab_working_dir(t)).collect());
         let (tx, rx) = async_channel::bounded(1);
         std::thread::spawn(move || {
             let statuses = dirs
@@ -803,9 +833,13 @@ impl App {
                     (d, status)
                 })
                 .collect();
-            let _ = tx.send_blocking(statuses);
+            let gone = all.into_iter().filter(|d| !d.is_dir()).collect();
+            let _ = tx.send_blocking((statuses, gone));
         });
-        Task::perform(async move { rx.recv().await.unwrap_or_default() }, Message::GitStatus)
+        Task::perform(async move { rx.recv().await.unwrap_or_default() }, |(statuses, gone)| Message::GitStatus {
+            statuses,
+            gone,
+        })
     }
 
     /// Moves keyboard focus to the focused terminal of the visible tab, or to
@@ -882,6 +916,7 @@ impl App {
         let quiet = match &message {
             Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
             Message::Editor(msg) => !msg.loggable(),
+            Message::GitView(msg) => !msg.loggable(),
             _ => false,
         };
         if !quiet {
@@ -925,7 +960,8 @@ impl App {
                 self.window_id = Some(id);
                 self.window_focused = focused;
                 if focused {
-                    return self.update(Message::Editor(EditorMsg::DiskPoll));
+                    let changes = self.poll_changes();
+                    return Task::batch([self.update(Message::Editor(EditorMsg::DiskPoll)), changes]);
                 }
             }
             Message::WindowFound(id) => self.window_id = self.window_id.or(id),
@@ -1004,6 +1040,12 @@ impl App {
                 }
                 if matches!(self.dialog, Some(Dialog::CodexTrust(_))) {
                     return Task::none();
+                }
+                // A remote's URL being changed: stop changing it, not the dialog.
+                if let Some(Dialog::Remotes(f)) = &self.dialog
+                    && f.editing.is_some()
+                {
+                    return self.update(Message::Remotes(RemotesMsg::CancelEdit));
                 }
                 if self.dialog.is_some() {
                     return self.update(Message::DialogCancel);
@@ -1254,6 +1296,17 @@ impl App {
                 }
                 return self.focus_active();
             }
+            Message::OpenFolder(dir) => {
+                if let Some(st) = &mut self.settings {
+                    st.folder_error = None;
+                }
+                return crate::reveal::in_background(dir, true).map(Message::FolderOpened);
+            }
+            Message::FolderOpened(result) => {
+                if let (Some(st), Err(e)) = (&mut self.settings, result) {
+                    st.folder_error = Some(format!("Could not open the file manager: {e}"));
+                }
+            }
             Message::SystemTheme(mode) => {
                 self.system_mode = mode;
                 self.apply_theme();
@@ -1462,6 +1515,7 @@ impl App {
                     // git is making the worktree; the result moves the session.
                     Some(Dialog::Worktree(f)) if f.creating => return Task::none(),
                     Some(Dialog::RemoveWorktree(f)) if f.removing => return Task::none(),
+                    Some(Dialog::Remotes(f)) if f.busy.is_some() => return Task::none(),
                     Some(Dialog::RemoveWorktree(_)) => {
                         self.cancel_remove();
                         return self.focus_active();
@@ -1697,13 +1751,19 @@ impl App {
             }
             Message::TaskDragEnd => self.task_drag = None,
             Message::GitPoll => {
+                // The changes on screen follow what agents do to the files.
+                let changes = if self.window_focused { self.poll_changes() } else { Task::none() };
                 if !self.git_polling {
                     self.git_polling = true;
-                    return self.read_git();
+                    return Task::batch([self.read_git(), changes]);
                 }
+                return changes;
             }
-            Message::GitStatus(statuses) => {
+            Message::GitStatus { statuses, gone } => {
                 self.git_polling = false;
+                // Before the statuses: a worktree is told apart from a plain
+                // folder by what git said before it went.
+                self.folders_gone(gone);
                 self.git.extend(statuses);
                 // The session on screen may be in another repository now.
                 return self.refresh_log();
@@ -1718,11 +1778,14 @@ impl App {
                 self.mark_prefs();
             }
             Message::DismissSync => self.git_sync = None,
+            Message::Remotes(msg) => return self.update_remotes(msg),
+            Message::GitView(msg) => return self.update_git_view(msg),
             Message::LogAllBranches(all) => {
                 self.prefs.log_all_branches = all;
                 self.mark_prefs();
                 return self.refresh_log();
             }
+            Message::CopyText(text) => return iced::clipboard::write(text),
             Message::DismissError => self.error = None,
             Message::DismissNotice => self.notice = None,
         }
@@ -1794,6 +1857,10 @@ impl App {
             Dialog::RemoveWorktree(form) => {
                 self.dialog = Some(Dialog::RemoveWorktree(form));
                 return self.update_remove(RemoveMsg::Confirm);
+            }
+            Dialog::Remotes(form) => {
+                self.dialog = Some(Dialog::Remotes(form));
+                return self.update_remotes(RemotesMsg::Add);
             }
             Dialog::CloseFile { doc, editor: None, .. } => return self.save_doc(doc, true, false),
             Dialog::CloseFile { doc, editor: Some(_), .. } => {
@@ -2165,9 +2232,11 @@ impl App {
             self.view_settings()
         } else {
             let terminals = self.drop_zone(self.view_main());
-            let mut main = row![self.view_projects(), self.view_tabs(), terminals].height(Length::Fill);
+            let mut main =
+                row![self.view_projects(), ui::vertical_divider(), self.view_tabs(), ui::vertical_divider(), terminals]
+                    .height(Length::Fill);
             if self.prefs.panel_open && self.core.state().selected_project.is_some() {
-                main = main.push(self.view_side_panel());
+                main = main.push(ui::vertical_divider()).push(self.view_side_panel());
             }
             // The second layer shows a dragged task next to the pointer.
             container(stack![main, self.view_task_drag()]).width(Length::Fill).height(Length::Fill).into()
