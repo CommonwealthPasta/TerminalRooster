@@ -8,7 +8,7 @@ use crate::agent::AgentKind;
 use crate::alert::Alert;
 use crate::detect::ObservedAgent;
 use crate::layout::{Axis, Layout};
-use crate::model::{GroupId, PaneId, ProjectId, TabId, TaskId};
+use crate::model::{GroupId, NoteId, PaneId, ProjectId, TabId, TaskId};
 
 /// A state change requested by the front end.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -158,6 +158,25 @@ pub enum Command {
     },
     DeleteTask(TaskId),
 
+    /// Adds a note after the others. Without a title, it is "Note N" with
+    /// the lowest N no other note is named.
+    CreateNote {
+        title: Option<String>,
+    },
+    RenameNote {
+        note: NoteId,
+        title: String,
+    },
+    /// Replaces a note's text.
+    SetNoteText {
+        note: NoteId,
+        text: String,
+    },
+    /// Closes a note; its text is gone.
+    CloseNote(NoteId),
+    /// Closes every note.
+    CloseAllNotes,
+
     SetDefaultShell(Option<String>),
     /// Turns the bash and PowerShell integration that reports failed commands
     /// on or off, for shells started from now on.
@@ -179,6 +198,7 @@ pub enum Outcome {
     Tab(TabId),
     Pane(PaneId),
     Task(TaskId),
+    Note(NoteId),
     /// A tab was relocated; this many of its terminals were busy and stayed
     /// in the old directory.
     Relocated {

@@ -36,6 +36,8 @@ pub enum StoreOp {
     DeletePane(PaneId),
     UpsertTask(Task),
     DeleteTask(TaskId),
+    UpsertNote(Note),
+    DeleteNote(NoteId),
     SelectedProject(Option<ProjectId>),
     Settings(Settings),
     Gui(String, String),
@@ -266,6 +268,17 @@ fn apply(c: &Connection, op: &StoreOp) -> rusqlite::Result<()> {
         StoreOp::DeleteTask(id) => {
             c.execute("DELETE FROM tasks WHERE id = ?1", [id.0])?;
         }
+        StoreOp::UpsertNote(n) => {
+            c.execute(
+                "INSERT INTO notes (id, title, body, sort_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(id) DO UPDATE SET title = excluded.title, body = excluded.body,
+                   sort_order = excluded.sort_order",
+                params![n.id.0, n.title, n.text, n.sort_order, n.created_at],
+            )?;
+        }
+        StoreOp::DeleteNote(id) => {
+            c.execute("DELETE FROM notes WHERE id = ?1", [id.0])?;
+        }
         StoreOp::SelectedProject(p) => match p {
             Some(p) => set_kv(c, KV_SELECTED_PROJECT, &p.0.to_string())?,
             None => {
@@ -393,6 +406,19 @@ fn load(c: &Connection) -> rusqlite::Result<AppState> {
                 sort_order: r.get(6)?,
                 created_at: r.get(7)?,
                 completed_at: r.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut stmt = c.prepare("SELECT id, title, body, sort_order, created_at FROM notes")?;
+    state.notes = stmt
+        .query_map([], |r| {
+            Ok(Note {
+                id: NoteId(r.get(0)?),
+                title: r.get(1)?,
+                text: r.get(2)?,
+                sort_order: r.get(3)?,
+                created_at: r.get(4)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -586,6 +612,28 @@ mod tests {
         assert!(state.groups.is_empty());
         p.group = None;
         assert_eq!(state.projects, [p], "the project stays, outside any group");
+    }
+
+    #[test]
+    fn notes_round_trip_until_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, _) = sample(dir.path());
+        let note = |id, title: &str, text: &str, sort_order| Note {
+            id: NoteId(id),
+            title: title.into(),
+            text: text.into(),
+            sort_order,
+            created_at: 3,
+        };
+        let mut kept = note(30, "Note 1", "line one\r\n\tline two\n", 0);
+        store.write(vec![StoreOp::UpsertNote(kept.clone()), StoreOp::UpsertNote(note(31, "Note 2", "", 1))]);
+        kept.title = "keys".into();
+        kept.text.push('ü');
+        store.write(vec![StoreOp::UpsertNote(kept.clone()), StoreOp::DeleteNote(NoteId(31))]);
+        store.flush();
+        drop(store);
+        let (_s, state) = Store::open(&dir.path().join("t.db")).unwrap();
+        assert_eq!(state.notes, [kept], "the text exactly as it was, and no closed note");
     }
 
     #[test]

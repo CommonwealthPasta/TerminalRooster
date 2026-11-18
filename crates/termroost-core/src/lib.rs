@@ -410,7 +410,11 @@ impl Core {
 
     /// Applies a command. Changes are persisted before the next command runs.
     pub fn dispatch(&mut self, cmd: Command) -> Result<Outcome> {
-        tracing::debug!(?cmd, "dispatch");
+        match &cmd {
+            // Not the text: people paste passwords and keys into notes.
+            Command::SetNoteText { note, text } => tracing::debug!(%note, bytes = text.len(), "dispatch SetNoteText"),
+            _ => tracing::debug!(?cmd, "dispatch"),
+        }
         let mut ops = Vec::new();
         let result = self.apply(cmd, &mut ops);
         if let Err(e) = &result {
@@ -880,6 +884,48 @@ impl Core {
                     return Err(Error::NotFound("task"));
                 }
                 ops.push(StoreOp::DeleteTask(task));
+                Ok(Outcome::None)
+            }
+
+            C::CreateNote { title } => {
+                let title = title
+                    .map(|t| t.trim().to_owned())
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| new_note_title(&self.state.notes));
+                let id = NoteId(self.alloc());
+                let sort_order = self.state.notes.iter().map(|n| n.sort_order + 1).max().unwrap_or(0);
+                let note = Note { id, title, text: String::new(), sort_order, created_at: model::now() };
+                ops.push(StoreOp::UpsertNote(note.clone()));
+                self.state.notes.push(note);
+                self.state.sort();
+                Ok(Outcome::Note(id))
+            }
+            C::RenameNote { note, title } => {
+                let title = non_empty(&title, "note name")?;
+                let n = self.state.note_mut(note).ok_or(Error::NotFound("note"))?;
+                n.title = title;
+                ops.push(StoreOp::UpsertNote(n.clone()));
+                Ok(Outcome::None)
+            }
+            C::SetNoteText { note, text } => {
+                let n = self.state.note_mut(note).ok_or(Error::NotFound("note"))?;
+                if n.text != text {
+                    n.text = text;
+                    ops.push(StoreOp::UpsertNote(n.clone()));
+                }
+                Ok(Outcome::None)
+            }
+            C::CloseNote(note) => {
+                let before = self.state.notes.len();
+                self.state.notes.retain(|n| n.id != note);
+                if self.state.notes.len() == before {
+                    return Err(Error::NotFound("note"));
+                }
+                ops.push(StoreOp::DeleteNote(note));
+                Ok(Outcome::None)
+            }
+            C::CloseAllNotes => {
+                ops.extend(self.state.notes.drain(..).map(|n| StoreOp::DeleteNote(n.id)));
                 Ok(Outcome::None)
             }
 
@@ -1446,7 +1492,14 @@ fn max_id(s: &AppState) -> i64 {
     let t = s.tabs.iter().map(|x| x.id.0);
     let pa = s.panes.keys().map(|x| x.0);
     let ta = s.tasks.iter().map(|x| x.id.0);
-    p.chain(g).chain(t).chain(pa).chain(ta).max().unwrap_or(0)
+    let n = s.notes.iter().map(|x| x.id.0);
+    p.chain(g).chain(t).chain(pa).chain(ta).chain(n).max().unwrap_or(0)
+}
+
+/// "Note N", with the lowest N none of `notes` is named.
+fn new_note_title(notes: &[Note]) -> String {
+    let taken: HashSet<&str> = notes.iter().map(|n| n.title.as_str()).collect();
+    (1..).map(|n| format!("Note {n}")).find(|t| !taken.contains(t.as_str())).expect("a free number")
 }
 
 /// Fixes saved state that does not hang together (e.g. after a crash between
