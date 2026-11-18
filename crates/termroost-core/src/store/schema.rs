@@ -72,6 +72,16 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // 4: terminals that keep running when TerminalRooster quits
     "ALTER TABLE panes ADD COLUMN keep_running INTEGER NOT NULL DEFAULT 0;",
+    // 5: notes
+    r#"
+    CREATE TABLE notes (
+        id         INTEGER PRIMARY KEY,
+        title      TEXT NOT NULL,
+        body       TEXT NOT NULL DEFAULT '',
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+    );
+    "#,
 ];
 
 /// Applies connection pragmas used by every connection.

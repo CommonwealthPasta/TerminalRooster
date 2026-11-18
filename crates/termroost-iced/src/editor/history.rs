@@ -100,6 +100,16 @@ impl History {
         }
     }
 
+    /// Before an edit of `kind` to `content` (at `version`): keeps the text
+    /// for undo if the edit starts a new step, and notes the edit.
+    pub fn before_edit(&mut self, kind: Kind, content: &Content, version: u64) {
+        let now = Instant::now();
+        if self.starts_step(kind, now) {
+            self.push(Snapshot::of(content, version));
+        }
+        self.edited(kind, now);
+    }
+
     /// An edit of `kind` was made.
     pub fn edited(&mut self, kind: Kind, now: Instant) {
         self.open = (kind != Kind::Single).then_some((kind, now));

@@ -267,6 +267,11 @@ impl App {
                     .button(ui::danger("Don't save").on_press(Message::Editor(EditorMsg::Discard(*doc))))
                     .button(ui::primary("Save").on_press(Message::DialogSubmit))
             }
+            Dialog::CloseAllNotes => {
+                let n = s.notes.len();
+                let title = if n == 1 { "Close the note?".to_owned() } else { format!("Close all {n} notes?") };
+                DialogParts::new(title, para("Their text is gone.")).confirm("Close all", true)
+            }
             Dialog::CodexTrust(handle) => {
                 return codex_window(handle, &self.keymap, &self.keyboard_focus, self.prefs.font_size);
             }

@@ -74,6 +74,7 @@ impl App {
                 choices.push(("Git".into(), false, Message::ShowPanel(SideTab::Git)));
             }
             choices.push(("Files".into(), false, Message::ShowPanel(SideTab::Files)));
+            choices.push(("Notes".into(), false, Message::ShowPanel(SideTab::Notes)));
             ui::segmented(choices)
         };
         let mut header = row![text(&tab.title).size(14).font(SEMIBOLD)];

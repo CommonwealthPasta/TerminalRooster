@@ -256,6 +256,46 @@ fn delete_semantics() {
 }
 
 #[test]
+fn notes_stay_until_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut core = open(dir.path());
+    let create = |core: &mut Core, title: Option<&str>| match core
+        .dispatch(Command::CreateNote { title: title.map(Into::into) })
+        .unwrap()
+    {
+        Outcome::Note(id) => id,
+        other => panic!("{other:?}"),
+    };
+    let first = create(&mut core, None);
+    let second = create(&mut core, None);
+    let named = create(&mut core, Some("  links  "));
+    let titles = |core: &Core| core.state().notes.iter().map(|n| n.title.clone()).collect::<Vec<_>>();
+    assert_eq!(titles(&core), ["Note 1", "Note 2", "links"]);
+
+    core.dispatch(Command::SetNoteText { note: second, text: "token: abc\n  indented\n".into() }).unwrap();
+    core.dispatch(Command::RenameNote { note: second, title: "keep".into() }).unwrap();
+    assert!(core.dispatch(Command::RenameNote { note: second, title: " ".into() }).is_err());
+    core.dispatch(Command::CloseNote(first)).unwrap();
+    assert!(core.dispatch(Command::CloseNote(first)).is_err(), "already closed");
+    let third = create(&mut core, None);
+    assert_eq!(core.state().note(third).unwrap().title, "Note 1", "a closed note's name is free again");
+    assert_eq!(titles(&core), ["keep", "links", "Note 1"], "new notes go last");
+    drop(core);
+
+    let mut core = open(dir.path());
+    assert_eq!(titles(&core), ["keep", "links", "Note 1"]);
+    assert_eq!(core.state().note(second).unwrap().text, "token: abc\n  indented\n");
+    assert!(core.state().note(named).unwrap().text.is_empty());
+    let after = create(&mut core, None);
+    assert!(after > third, "ids of notes are not reused");
+
+    core.dispatch(Command::CloseAllNotes).unwrap();
+    assert!(core.state().notes.is_empty());
+    drop(core);
+    assert!(open(dir.path()).state().notes.is_empty());
+}
+
+#[test]
 fn reordering_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let mut core = open(dir.path());
