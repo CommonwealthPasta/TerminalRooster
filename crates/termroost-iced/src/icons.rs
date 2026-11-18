@@ -15,7 +15,6 @@ pub enum Icon {
     Settings,
     SplitRight,
     SplitDown,
-    Refresh,
     Open,
     ChevronDown,
     ChevronRight,
@@ -29,7 +28,7 @@ pub enum Icon {
 }
 
 /// The files, in the order of [`Icon`].
-const SOURCES: [&[u8]; 18] = [
+const SOURCES: [&[u8]; 17] = [
     include_bytes!("../icons/ui/plus.svg"),
     include_bytes!("../icons/ui/close.svg"),
     include_bytes!("../icons/ui/edit.svg"),
@@ -37,7 +36,6 @@ const SOURCES: [&[u8]; 18] = [
     include_bytes!("../icons/ui/settings.svg"),
     include_bytes!("../icons/ui/split_right.svg"),
     include_bytes!("../icons/ui/split_down.svg"),
-    include_bytes!("../icons/ui/refresh.svg"),
     include_bytes!("../icons/ui/open.svg"),
     include_bytes!("../icons/ui/chevron_down.svg"),
     include_bytes!("../icons/ui/chevron_right.svg"),
