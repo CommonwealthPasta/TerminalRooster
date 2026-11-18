@@ -389,6 +389,10 @@ pub enum Message {
     ClosePane(PaneId),
     RestartPane(PaneId),
     StartAgent(PaneId, AgentKind),
+    /// Show a terminal that keeps running in a console window of its own.
+    OpenInWindow(PaneId),
+    /// Show a terminal here again that a window of its own shows.
+    BringBack(PaneId),
 
     /// Show the right panel on this tab, or hide it if it already shows it.
     TogglePanel(SideTab),
@@ -1649,6 +1653,21 @@ impl App {
             Message::RestartPane(pane) => {
                 self.dispatch(Command::RestartPane(pane));
             }
+            Message::OpenInWindow(pane) => {
+                let s = self.core.state();
+                let title = s
+                    .pane(pane)
+                    .and_then(|p| s.tab(p.tab))
+                    .and_then(|t| s.project(t.project).map(|p| format!("{} · {}", p.name, t.title)))
+                    .unwrap_or_else(|| crate::DISPLAY_NAME.to_owned());
+                if let Some(host) = self.core.host_command()
+                    && let Err(e) = crate::host_exe::open_window(host, pane, &title)
+                {
+                    tracing::warn!(%pane, error = %e, "could not open a window for the terminal");
+                    self.error = Some(format!("Could not open a window: {e}"));
+                }
+            }
+            Message::BringBack(pane) => self.core.bring_back(pane),
             Message::StartAgent(pane, kind) => {
                 let args = self.prefs.agent_args.get(kind.as_str()).cloned().unwrap_or_default();
                 self.dispatch(Command::StartAgent { pane, kind, args });

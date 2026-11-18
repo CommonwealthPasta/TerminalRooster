@@ -11,6 +11,49 @@ use termroost_core::HostCommand;
 
 /// The argument that makes this executable a terminal's helper.
 pub const HOST_ARG: &str = "host";
+/// The argument that makes this executable a console window showing a
+/// terminal that keeps running: `attach <terminal id> [window title]`.
+pub const ATTACH_ARG: &str = "attach";
+
+/// Whether terminals can be shown in windows of their own here.
+pub const WINDOWS_OF_THEIR_OWN: bool = cfg!(windows);
+
+/// Shows a terminal that keeps running in a console window of its own,
+/// which runs on its own too (closing Terminal Rooster leaves it open).
+pub fn open_window(host: &HostCommand, pane: termroost_core::PaneId, title: &str) -> std::io::Result<()> {
+    let mut command = std::process::Command::new(&host.program);
+    command
+        .args([ATTACH_ARG, &pane.0.to_string(), title])
+        .envs(host.env.iter().map(|(k, v)| (k, v)))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(dir) = host.program.parent() {
+        command.current_dir(dir);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        // A console of its own (a build without one opens it itself).
+        command.creation_flags(CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB);
+        if let Err(e) = command.spawn() {
+            if e.raw_os_error() != Some(5) {
+                return Err(e);
+            }
+            command.creation_flags(CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP);
+            command.spawn()?;
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        command.spawn().map(drop)
+    }
+}
+
 /// How to start a helper, or `None` when this executable can't be found.
 pub fn command(data_dir: Option<&Path>) -> Option<HostCommand> {
     let exe = std::env::current_exe().map_err(|e| tracing::warn!(error = %e, "can't find this executable")).ok()?;

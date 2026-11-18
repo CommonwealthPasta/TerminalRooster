@@ -142,7 +142,17 @@ impl App {
         let handle = self.core.terminal(pane);
 
         let keeps_running = s.pane(pane).is_some_and(|p| p.keep_running);
+        let elsewhere = handle.as_ref().is_some_and(|h| h.is_shown_elsewhere());
         let body: Element<'_, Message> = match handle.clone() {
+            Some(_) if elsewhere => center(
+                column![
+                    text("In its own window").style(ui::muted),
+                    ui::small("Bring back", theme::button_secondary).on_press(Message::BringBack(pane)),
+                ]
+                .spacing(10)
+                .align_x(Alignment::Center),
+            )
+            .into(),
             Some(h) => TerminalView::new(
                 h,
                 self.keymap.clone(),
@@ -197,6 +207,8 @@ impl App {
         title_row = title_row.push(container(text(title).size(12).wrapping(text::Wrapping::None)).clip(true));
 
         let k = &self.keymap;
+        let pop_out = (keeps_running && !elsewhere && crate::host_exe::WINDOWS_OF_THEIR_OWN)
+            .then(|| icon_button(Icon::Open, Message::OpenInWindow(pane), "Open in its own window"));
         let full = row![
             pick_list(&AgentKind::ALL[..], None::<AgentKind>, move |k| Message::StartAgent(pane, k))
                 .placeholder("Start agent")
@@ -204,19 +216,22 @@ impl App {
                 .padding([2, 8])
                 .style(theme::dropdown)
                 .menu_style(theme::dropdown_menu),
-            icon_button(Icon::Settings, Message::PaneSettings(pane), "Terminal settings & resume command"),
+        ]
+        .push(pop_out)
+        .push(icon_button(Icon::Settings, Message::PaneSettings(pane), "Terminal settings & resume command"))
+        .extend([
             icon_button(
                 Icon::SplitRight,
                 Message::Split(pane, Axis::Vertical),
-                k.tip("Split right", Action::SplitRight)
+                k.tip("Split right", Action::SplitRight),
             ),
             icon_button(
                 Icon::SplitDown,
                 Message::Split(pane, Axis::Horizontal),
-                k.tip("Split down", Action::SplitDown)
+                k.tip("Split down", Action::SplitDown),
             ),
             icon_button(Icon::Close, Message::ClosePane(pane), k.tip("Close terminal", Action::CloseTerminal)),
-        ]
+        ])
         .spacing(CONTROL_SPACING)
         .align_y(Alignment::Center);
         // Narrow panes get only the essentials. Keep `COMPACT_CONTROLS_WIDTH` in step.

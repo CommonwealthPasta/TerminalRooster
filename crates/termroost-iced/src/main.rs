@@ -64,11 +64,26 @@ pub fn app_id() -> &'static str {
 
 fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
-    // A terminal's helper process (see `host_exe`), not the app.
+    // A terminal's helper process, or a window of its own (see `host_exe`),
+    // not the app.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == host_exe::HOST_ARG) {
         let log_guard = logging::init_as(data_dir.as_deref(), "terminalrooster-host");
         let code = termroost_core::host::serve();
+        drop(log_guard);
+        std::process::exit(code);
+    }
+    if args.first().is_some_and(|a| a == host_exe::ATTACH_ARG) {
+        let log_guard = logging::init_as(data_dir.as_deref(), "terminalrooster-window");
+        let code = match (data_dir.as_deref(), args.get(1).and_then(|p| p.parse().ok())) {
+            (Some(dir), Some(pane)) => {
+                termroost_core::host::attach_console(dir, termroost_core::PaneId(pane), args.get(2).map(String::as_str))
+            }
+            _ => {
+                eprintln!("usage: terminalrooster {} <terminal id> [window title]", host_exe::ATTACH_ARG);
+                2
+            }
+        };
         drop(log_guard);
         std::process::exit(code);
     }
