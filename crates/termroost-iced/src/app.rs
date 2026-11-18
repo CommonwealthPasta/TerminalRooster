@@ -181,6 +181,8 @@ pub enum Dialog {
         pane: PaneId,
         resume: String,
         args: String,
+        /// Keep the terminal running when Terminal Rooster quits.
+        keep: bool,
     },
     /// Offer to add the Codex hook (shown once at startup).
     CodexHook,
@@ -366,6 +368,7 @@ pub enum Message {
     DialogShell(String),
     DialogResume(String),
     DialogArgs(String),
+    DialogKeepRunning(bool),
     BrowseDir,
     DirPicked(Option<PathBuf>),
     DialogSubmit,
@@ -1023,7 +1026,12 @@ impl App {
                 // Unsaved files are always asked about; running programs as the user chose.
                 let unsaved = self.unsaved_files();
                 let running = if self.prefs.confirm_quit {
-                    self.running_terminals().into_iter().chain(self.running_editors()).collect()
+                    // Terminals under helpers go on running.
+                    let s = self.core.state();
+                    let stops = |t: &RunningTerminal| {
+                        self.core.host_command().is_none() || !s.pane(t.pane).is_some_and(|p| p.keep_running)
+                    };
+                    self.running_terminals().into_iter().filter(stops).chain(self.running_editors()).collect()
                 } else {
                     Vec::new()
                 };
@@ -1455,8 +1463,8 @@ impl App {
             Message::PaneSettings(pane) => {
                 if let Some(p) = self.core.state().pane(pane) {
                     let args = p.agent.as_ref().map(|a| a.args.clone()).unwrap_or_default();
-                    self.dialog =
-                        Some(Dialog::Pane { pane, resume: p.resume_command.clone().unwrap_or_default(), args });
+                    let resume = p.resume_command.clone().unwrap_or_default();
+                    self.dialog = Some(Dialog::Pane { pane, resume, args, keep: p.keep_running });
                     return operation::focus(DIALOG_FIRST_INPUT);
                 }
             }
@@ -1485,6 +1493,11 @@ impl App {
             Message::DialogArgs(v) => {
                 if let Some(Dialog::Pane { args, .. }) = &mut self.dialog {
                     *args = v;
+                }
+            }
+            Message::DialogKeepRunning(on) => {
+                if let Some(Dialog::Pane { keep, .. }) = &mut self.dialog {
+                    *keep = on;
                 }
             }
             Message::BrowseDir => {
@@ -1536,8 +1549,10 @@ impl App {
                 return self.focus_active();
             }
             Message::DialogStartAgent(kind) => {
-                if let Some(Dialog::Pane { pane, resume, args }) = self.dialog.take() {
+                if let Some(Dialog::Pane { pane, resume, args, keep }) = self.dialog.take() {
                     self.dispatch(Command::SetResumeCommand { pane, command: Some(resume) });
+                    // First: it starts the terminal again, and the agent in the new one.
+                    self.dispatch(Command::SetKeepRunning { pane, on: keep });
                     self.prefs.agent_args.insert(kind.as_str().to_owned(), args.trim().to_owned());
                     self.mark_prefs();
                     self.dispatch(Command::StartAgent { pane, kind, args });
@@ -1840,8 +1855,9 @@ impl App {
                 self.drop_session_files(tab);
                 return self.after_select();
             }
-            Dialog::Pane { pane, resume, .. } => {
+            Dialog::Pane { pane, resume, keep, .. } => {
                 self.dispatch(Command::SetResumeCommand { pane, command: Some(resume) });
+                self.dispatch(Command::SetKeepRunning { pane, on: keep });
             }
             Dialog::CodexHook => return self.update(Message::AddCodexHook),
             Dialog::CodexTrust(h) => {

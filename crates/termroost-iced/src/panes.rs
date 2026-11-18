@@ -141,6 +141,7 @@ impl App {
         let active = tab.focused_pane == Some(pane);
         let handle = self.core.terminal(pane);
 
+        let keeps_running = s.pane(pane).is_some_and(|p| p.keep_running);
         let body: Element<'_, Message> = match handle.clone() {
             Some(h) => TerminalView::new(
                 h,
@@ -187,6 +188,11 @@ impl App {
             let label = container(text(label).size(11).wrapping(text::Wrapping::None)).clip(true);
             let badge = row![icon, label].spacing(4).align_y(Alignment::Center);
             title_row = title_row.push(container(badge).padding([1, 7]).style(theme::badge(Tone::Neutral)).clip(true));
+        }
+        if keeps_running {
+            let mark = text("∞").size(13).style(ui::muted);
+            title_row =
+                title_row.push(tip(mark, "Keeps running when Terminal Rooster quits", tooltip::Position::Bottom));
         }
         title_row = title_row.push(container(text(title).size(12).wrapping(text::Wrapping::None)).clip(true));
 

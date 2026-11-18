@@ -16,6 +16,7 @@ mod git_panel;
 mod git_view;
 mod gone_folders;
 mod groups;
+mod host_exe;
 mod icons;
 mod keymap;
 mod layout_conv;
@@ -63,6 +64,14 @@ pub fn app_id() -> &'static str {
 
 fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
+    // A terminal's helper process (see `host_exe`), not the app.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == host_exe::HOST_ARG) {
+        let log_guard = logging::init_as(data_dir.as_deref(), "terminalrooster-host");
+        let code = termroost_core::host::serve();
+        drop(log_guard);
+        std::process::exit(code);
+    }
     // Flushes the log file when main returns.
     let _log_guard = logging::init(data_dir.as_deref());
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "TerminalRooster starting");
@@ -84,7 +93,8 @@ fn main() -> iced::Result {
         std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
     }
 
-    let core = match Core::open(Config::default()) {
+    let config = Config { host: host_exe::command(data_dir.as_deref()), ..Config::default() };
+    let core = match Core::open(config) {
         Ok(core) => core,
         Err(e) => {
             tracing::error!(error = %e, "could not open the core");
