@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Grid};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Term, TermMode};
@@ -107,6 +107,14 @@ pub(crate) fn serialize<T>(term: &Term<T>, max_lines: usize) -> Option<Vec<u8>> 
     let start = top.max(bottom - max_lines as i32 + 1);
 
     let mut out = String::new();
+    write_lines(grid, start, bottom, &mut out);
+    out.push_str("\x1b[0m");
+    Some(out.into_bytes())
+}
+
+/// Writes the lines `start..=bottom` of a grid, one per line of output.
+fn write_lines(grid: &Grid<Cell>, start: i32, bottom: i32, out: &mut String) {
+    let cols = grid.columns();
     let mut style = Style::DEFAULT;
     for l in start..=bottom {
         let row = &grid[Line(l)];
@@ -121,7 +129,7 @@ pub(crate) fn serialize<T>(term: &Term<T>, max_lines: usize) -> Option<Vec<u8>> 
             }
             let s = Style::of(cell);
             if s != style {
-                s.write_sgr(&mut out);
+                s.write_sgr(out);
                 style = s;
             }
             out.push(if cell.c == '\t' { ' ' } else { cell.c });
@@ -139,8 +147,64 @@ pub(crate) fn serialize<T>(term: &Term<T>, max_lines: usize) -> Option<Vec<u8>> 
             }
         }
     }
-    out.push_str("\x1b[0m");
-    Some(out.into_bytes())
+}
+
+/// Modes a program can set that change what the terminal sends it or how it
+/// draws, with the sequence that sets each (and the defaults of a new term).
+const MODES: &[(TermMode, &str, bool)] = &[
+    (TermMode::SHOW_CURSOR, "\x1b[?25h", true),
+    (TermMode::APP_CURSOR, "\x1b[?1h", false),
+    (TermMode::APP_KEYPAD, "\x1b=", false),
+    (TermMode::MOUSE_REPORT_CLICK, "\x1b[?1000h", false),
+    (TermMode::MOUSE_DRAG, "\x1b[?1002h", false),
+    (TermMode::MOUSE_MOTION, "\x1b[?1003h", false),
+    (TermMode::SGR_MOUSE, "\x1b[?1006h", false),
+    (TermMode::UTF8_MOUSE, "\x1b[?1005h", false),
+    (TermMode::BRACKETED_PASTE, "\x1b[?2004h", false),
+    (TermMode::FOCUS_IN_OUT, "\x1b[?1004h", false),
+    (TermMode::ALTERNATE_SCROLL, "\x1b[?1007h", true),
+    (TermMode::LINE_WRAP, "\x1b[?7h", true),
+    (TermMode::INSERT, "\x1b[4h", false),
+    (TermMode::LINE_FEED_NEW_LINE, "\x1b[20h", false),
+];
+
+/// Serializes everything a program left on a terminal: the history and
+/// screen as laid out now, the cursor and the modes the program set. Replayed
+/// into a new terminal of the same size, it shows the same thing and answers
+/// keys and the mouse the same way.
+///
+/// On the alternate screen only that screen is kept, since the primary one
+/// behind it can't be read.
+pub(crate) fn serialize_state<T>(term: &Term<T>) -> Vec<u8> {
+    let grid = term.grid();
+    let mode = *term.mode();
+    let mut out = String::new();
+    if mode.contains(TermMode::ALT_SCREEN) {
+        out.push_str("\x1b[?1049h\x1b[H");
+    }
+    // Every screen row, blank ones too, so the rows end up where they were.
+    let top = grid.topmost_line().0;
+    let bottom = grid.screen_lines() as i32 - 1;
+    write_lines(grid, top, bottom, &mut out);
+
+    let cursor = &grid.cursor;
+    let _ = write!(out, "\x1b[{};{}H", cursor.point.line.0 + 1, cursor.point.column.0 + 1);
+    Style::of(&cursor.template).write_sgr(&mut out);
+    for &(flag, set, default) in MODES {
+        let on = mode.contains(flag);
+        if on != default {
+            // `h` sets a mode, `l` resets it; `ESC =` and `ESC >` for the keypad.
+            let seq = if on {
+                set.to_owned()
+            } else if set == "\x1b=" {
+                "\x1b>".to_owned()
+            } else {
+                set.replace('h', "l")
+            };
+            out.push_str(&seq);
+        }
+    }
+    out.into_bytes()
 }
 
 /// Feeds saved bytes into a terminal.
@@ -264,6 +328,55 @@ mod tests {
         assert_eq!(bold.fg, Color::Named(NamedColor::Red));
         let rgb = find(&b, 'g');
         assert!(matches!(rgb.fg, Color::Spec(c) if (c.r, c.g, c.b) == (1, 2, 3)));
+    }
+
+    /// Every row of the history and screen, blank ones included.
+    fn all_rows(t: &Term<VoidListener>) -> Vec<String> {
+        let g = t.grid();
+        (g.topmost_line().0..=g.bottommost_line().0)
+            .map(|l| (0..g.columns()).map(|c| g[Line(l)][Column(c)].c).collect::<String>().trim_end().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn state_round_trip_keeps_layout_cursor_and_modes() {
+        let mut a = term(12, 5);
+        for i in 0..8 {
+            feed(&mut a, &format!("line {i}\r\n"));
+        }
+        // A prompt in the middle of the screen with blank rows under it, a
+        // wrapped line, then the cursor moved up into the text.
+        feed(&mut a, "\x1b[2J\x1b[H$ ls\r\n\x1b[44mblue\x1b[0m 0123456789wrap\r\n$ ");
+        feed(&mut a, "\x1b[?2004h\x1b[?1h\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[1;33m\x1b[2;3H");
+
+        let data = serialize_state(&a);
+        let mut b = term(12, 5);
+        replay(&mut b, &data);
+        assert_eq!(all_rows(&a), all_rows(&b));
+        assert_eq!(b.grid().cursor.point, a.grid().cursor.point);
+        assert_eq!(*b.mode(), *a.mode());
+        let template = &b.grid().cursor.template;
+        assert!(template.flags.contains(Flags::BOLD));
+        assert_eq!(template.fg, Color::Named(NamedColor::Yellow));
+        // The background reaches past the text only where it was set.
+        assert_eq!(b.grid()[Line(1)][Column(0)].bg, Color::Named(NamedColor::Blue));
+        // The long line still wraps, so it reflows if the terminal widens.
+        assert!(b.grid()[Line(1)][Column(11)].flags.contains(Flags::WRAPLINE));
+    }
+
+    #[test]
+    fn state_of_the_alternate_screen() {
+        let mut a = term(10, 4);
+        feed(&mut a, "shell\r\n$ vim\r\n\x1b[?1049h\x1b[H~\r\n~\r\n\x1b[4;1H:wq");
+        let data = serialize_state(&a);
+        let mut b = term(10, 4);
+        replay(&mut b, &data);
+        assert!(b.mode().contains(TermMode::ALT_SCREEN));
+        assert_eq!(all_rows(&b), ["~", "~", "", ":wq"]);
+        assert_eq!(b.grid().cursor.point, a.grid().cursor.point);
+        // Leaving it goes back to a primary screen (empty: it can't be read).
+        feed(&mut b, "\x1b[?1049l");
+        assert!(!b.mode().contains(TermMode::ALT_SCREEN));
     }
 
     #[test]

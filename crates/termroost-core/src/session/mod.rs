@@ -8,13 +8,15 @@ pub mod integration;
 pub(crate) mod osc;
 pub mod render;
 pub mod shell;
-mod snapshot;
+pub(crate) mod snapshot;
 mod tap;
 mod terminal;
 
 pub(crate) use snapshot::{just_a_prompt, without_restore_banners};
-pub(crate) use terminal::SpawnSpec;
+#[cfg(windows)]
+pub(crate) use terminal::quote_program;
 pub use terminal::{Activity, GridSize, SelectionKind, TerminalHandle};
+pub(crate) use terminal::{HostPlan, NewHost, SpawnSpec, resize_like_conpty};
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;

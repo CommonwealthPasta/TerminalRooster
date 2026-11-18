@@ -29,4 +29,11 @@ tempfile = "3"
 [target.'cfg(windows)'.dependencies]
 sha2 = "0.10"
 # Same version alacritty_terminal uses.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+] }

@@ -103,6 +103,10 @@ pub struct Pane {
     /// starts here again when the pane is restored; `None` means the tab's
     /// working directory.
     pub cwd: Option<PathBuf>,
+    /// The terminal's program runs under a helper process of its own and
+    /// keeps running when TerminalRooster quits (see [`crate::host`]).
+    #[serde(default)]
+    pub keep_running: bool,
     pub created_at: i64,
 }
 
