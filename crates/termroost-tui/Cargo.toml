@@ -1,0 +1,23 @@
+[package]
+name = "termroost-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Terminal Rooster inside a terminal: projects, sessions and coding agents side by side"
+repository = "https://github.com/Davenport-Physics/TermRoost"
+
+[[bin]]
+name = "terminalrooster-tui"
+path = "src/main.rs"
+
+[dependencies]
+termroost-core.workspace = true
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+async-channel.workspace = true
+directories.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender = "0.2"
+unicode-width = "0.2"
