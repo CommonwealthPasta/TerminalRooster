@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::session::{bundled_bash, bundled_nvim};
 use termroost_core::{
-    Activity, AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git,
+    Activity, AgentKind, Axis, Command, Core, Event, GroupId, NoteId, Outcome, PaneId, ProjectId, TabId, TaskId, git,
 };
 
 use crate::color_picker::{ColorPicker, Hsl};
@@ -23,6 +23,7 @@ use crate::git_view::GitViewMsg;
 use crate::groups;
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
+use crate::notes::{NOTE_EDITOR, Notes, NotesMsg};
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
 use crate::remotes::{RemotesForm, RemotesMsg};
 use crate::side_panel::SideTab;
@@ -90,6 +91,8 @@ pub struct Prefs {
     /// The terminal editor's command line (the file is added at the end);
     /// empty finds Neovim or Vim.
     pub editor_command: String,
+    /// The note the Notes tab shows.
+    pub note: Option<NoteId>,
 }
 
 impl Default for Prefs {
@@ -116,6 +119,7 @@ impl Default for Prefs {
             pull_rebase: true,
             file_editor: FileEditor::Builtin,
             editor_command: String::new(),
+            note: None,
         }
     }
 }
@@ -158,6 +162,7 @@ pub enum RenameTarget {
     Project(ProjectId),
     Group(GroupId),
     Tab(TabId),
+    Note(NoteId),
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +186,8 @@ pub enum Dialog {
         pane: PaneId,
         resume: String,
         args: String,
+        /// Keep the terminal running when Terminal Rooster quits.
+        keep: bool,
     },
     /// Offer to add the Codex hook (shown once at startup).
     CodexHook,
@@ -201,18 +208,18 @@ pub enum Dialog {
         unsaved: Vec<String>,
         dont_ask: bool,
     },
-    /// Closing a file with unsaved changes, or open in a terminal editor
-    /// that is still running (its name).
+    /// Closing a file with unsaved changes.
     CloseFile {
         doc: DocId,
         name: String,
-        editor: Option<String>,
     },
     /// Saving a file that changed on disk since it was read.
     SaveConflict {
         doc: DocId,
         name: String,
     },
+    /// Closing every note.
+    CloseAllNotes,
 }
 
 /// State of the settings page while it is open.
@@ -366,6 +373,7 @@ pub enum Message {
     DialogShell(String),
     DialogResume(String),
     DialogArgs(String),
+    DialogKeepRunning(bool),
     BrowseDir,
     DirPicked(Option<PathBuf>),
     DialogSubmit,
@@ -386,6 +394,10 @@ pub enum Message {
     ClosePane(PaneId),
     RestartPane(PaneId),
     StartAgent(PaneId, AgentKind),
+    /// Show a terminal that keeps running in a console window of its own.
+    OpenInWindow(PaneId),
+    /// Show a terminal here again that a window of its own shows.
+    BringBack(PaneId),
 
     /// Show the right panel on this tab, or hide it if it already shows it.
     TogglePanel(SideTab),
@@ -394,6 +406,7 @@ pub enum Message {
     ClosePanel,
     Files(FilesMsg),
     Editor(EditorMsg),
+    Notes(NotesMsg),
     /// Edit files in the built-in editor or in a terminal editor (settings).
     FileEditor(FileEditor),
     /// The terminal editor's command line changed (settings).
@@ -481,6 +494,8 @@ pub struct App {
     pub(crate) open_files_dirty: bool,
     /// Open files are being compared with the disk.
     pub(crate) disk_polling: bool,
+    /// The text of the notes, being edited.
+    pub(crate) notes: Notes,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     /// What goes on in the terminals that are not idle (see [`Activity`]).
@@ -581,6 +596,7 @@ impl App {
         let prefs = Prefs::load(&core);
         let themes = ThemeStore::load(&core);
         let keymap = Arc::new(Keymap::new(&prefs.shortcuts));
+        let notes = Notes::of(&core.state().notes);
         let mut app = App {
             core,
             grids: HashMap::new(),
@@ -598,6 +614,7 @@ impl App {
             next_version: 0,
             open_files_dirty: false,
             disk_polling: false,
+            notes,
             activity: HashSet::new(),
             busy: HashMap::new(),
             error: None,
@@ -734,8 +751,15 @@ impl App {
             }),
             iced::time::every(GIT_POLL).map(|_| Message::GitPoll),
         ];
-        if self.files_shown() && self.window_focused {
-            subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Files(FilesMsg::Poll)));
+        if self.files_shown() {
+            subs.push(
+                Subscription::run_with(self.files.watch.changes(), |c| c.0.clone())
+                    .map(|c| Message::Files(FilesMsg::Changed(c))),
+            );
+            // Folders that can't be watched are read now and then instead.
+            if self.window_focused && self.files.watch.needs_poll() {
+                subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Files(FilesMsg::Poll)));
+            }
         }
         // Agents change open files: look at them now and then, and when coming back to the window.
         if self.has_text_docs() && self.window_focused {
@@ -757,6 +781,7 @@ impl App {
             || self.prefs_dirty
             || self.themes_dirty
             || self.open_files_dirty
+            || self.notes.unsaved()
             || !self.toasts.is_empty()
         {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick));
@@ -857,7 +882,7 @@ impl App {
         }
     }
 
-    fn mark_prefs(&mut self) {
+    pub(crate) fn mark_prefs(&mut self) {
         self.prefs_dirty = true;
     }
 
@@ -880,6 +905,18 @@ impl App {
         if let Some(value) = self.take_open_files_value() {
             self.dispatch(Command::SetGuiValue { key: App::OPEN_FILES_KEY.into(), value });
         }
+        for (note, text) in self.notes.take_unsaved() {
+            self.dispatch(Command::SetNoteText { note, text });
+        }
+    }
+
+    /// Where the keyboard goes once a rename ends: back to the note's text
+    /// for a note, else to the terminal.
+    fn after_rename(&self, target: RenameTarget) -> Task<Message> {
+        match target {
+            RenameTarget::Note(_) => operation::focus(NOTE_EDITOR),
+            _ => self.focus_active(),
+        }
     }
 
     pub(crate) fn after_select(&mut self) -> Task<Message> {
@@ -901,6 +938,9 @@ impl App {
         let revived = self.revive_shown();
         self.sync_attention();
         let task = Task::batch([task, revived]);
+        // Lets go of the folders when the Files tab is hidden, and watches
+        // another session's when it comes on screen.
+        self.watch_files();
         match self.ensure_files_root() {
             Some(read) => Task::batch([task, read]),
             None => task,
@@ -914,8 +954,12 @@ impl App {
         // Key events are never logged: they can carry what the user types.
         // Nor are editor actions and folder listings: what is in people's files.
         let quiet = match &message {
-            Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
+            Message::Core(_)
+            | Message::Tick
+            | Message::Key(_)
+            | Message::Files(FilesMsg::Listed(_) | FilesMsg::Changed(_) | FilesMsg::NewFileName(_)) => true,
             Message::Editor(msg) => !msg.loggable(),
+            Message::Notes(msg) => !msg.loggable(),
             Message::GitView(msg) => !msg.loggable(),
             _ => false,
         };
@@ -961,7 +1005,9 @@ impl App {
                 self.window_focused = focused;
                 if focused {
                     let changes = self.poll_changes();
-                    return Task::batch([self.update(Message::Editor(EditorMsg::DiskPoll)), changes]);
+                    // In case the system lost track of a change (its queue can overflow).
+                    let files = self.refresh_files();
+                    return Task::batch([self.update(Message::Editor(EditorMsg::DiskPoll)), changes, files]);
                 }
             }
             Message::WindowFound(id) => self.window_id = self.window_id.or(id),
@@ -1023,7 +1069,12 @@ impl App {
                 // Unsaved files are always asked about; running programs as the user chose.
                 let unsaved = self.unsaved_files();
                 let running = if self.prefs.confirm_quit {
-                    self.running_terminals().into_iter().chain(self.running_editors()).collect()
+                    // Terminals under helpers go on running.
+                    let s = self.core.state();
+                    let stops = |t: &RunningTerminal| {
+                        self.core.host_command().is_none() || !s.pane(t.pane).is_some_and(|p| p.keep_running)
+                    };
+                    self.running_terminals().into_iter().filter(stops).chain(self.running_editors()).collect()
                 } else {
                     Vec::new()
                 };
@@ -1067,6 +1118,9 @@ impl App {
                 if self.task_edit.is_some() {
                     return self.update(Message::TaskEditCancel);
                 }
+                if self.cancel_new_file() {
+                    return self.focus_active();
+                }
             }
             Message::Enter => {
                 // Dialogs with text fields submit through the fields themselves.
@@ -1077,6 +1131,7 @@ impl App {
                             | Dialog::ConfirmDeleteTab(_)
                             | Dialog::ConfirmQuit { .. }
                             | Dialog::CloseFile { .. }
+                            | Dialog::CloseAllNotes
                     )
                 ) {
                     return self.submit_dialog();
@@ -1455,8 +1510,8 @@ impl App {
             Message::PaneSettings(pane) => {
                 if let Some(p) = self.core.state().pane(pane) {
                     let args = p.agent.as_ref().map(|a| a.args.clone()).unwrap_or_default();
-                    self.dialog =
-                        Some(Dialog::Pane { pane, resume: p.resume_command.clone().unwrap_or_default(), args });
+                    let resume = p.resume_command.clone().unwrap_or_default();
+                    self.dialog = Some(Dialog::Pane { pane, resume, args, keep: p.keep_running });
                     return operation::focus(DIALOG_FIRST_INPUT);
                 }
             }
@@ -1485,6 +1540,11 @@ impl App {
             Message::DialogArgs(v) => {
                 if let Some(Dialog::Pane { args, .. }) = &mut self.dialog {
                     *args = v;
+                }
+            }
+            Message::DialogKeepRunning(on) => {
+                if let Some(Dialog::Pane { keep, .. }) = &mut self.dialog {
+                    *keep = on;
                 }
             }
             Message::BrowseDir => {
@@ -1536,8 +1596,10 @@ impl App {
                 return self.focus_active();
             }
             Message::DialogStartAgent(kind) => {
-                if let Some(Dialog::Pane { pane, resume, args }) = self.dialog.take() {
+                if let Some(Dialog::Pane { pane, resume, args, keep }) = self.dialog.take() {
                     self.dispatch(Command::SetResumeCommand { pane, command: Some(resume) });
+                    // First: it starts the terminal again, and the agent in the new one.
+                    self.dispatch(Command::SetKeepRunning { pane, on: keep });
                     self.prefs.agent_args.insert(kind.as_str().to_owned(), args.trim().to_owned());
                     self.mark_prefs();
                     self.dispatch(Command::StartAgent { pane, kind, args });
@@ -1557,6 +1619,7 @@ impl App {
                     RenameTarget::Project(p) => s.project(p).map(|p| p.name.clone()),
                     RenameTarget::Group(g) => s.group(g).map(|g| g.name.clone()),
                     RenameTarget::Tab(t) => s.tab(t).map(|t| t.title.clone()),
+                    RenameTarget::Note(n) => s.note(n).map(|n| n.title.clone()),
                 };
                 if let Some(value) = value {
                     self.rename = Some(Rename { target, value });
@@ -1569,19 +1632,19 @@ impl App {
                 }
             }
             Message::RenameCommit => {
-                if let Some(r) = self.rename.take() {
-                    let cmd = match r.target {
-                        RenameTarget::Project(project) => Command::RenameProject { project, name: r.value },
-                        RenameTarget::Group(group) => Command::RenameGroup { group, name: r.value },
-                        RenameTarget::Tab(tab) => Command::RenameTab { tab, title: r.value },
-                    };
-                    self.dispatch(cmd);
-                }
-                return self.focus_active();
+                let Some(r) = self.rename.take() else { return self.focus_active() };
+                let cmd = match r.target {
+                    RenameTarget::Project(project) => Command::RenameProject { project, name: r.value },
+                    RenameTarget::Group(group) => Command::RenameGroup { group, name: r.value },
+                    RenameTarget::Tab(tab) => Command::RenameTab { tab, title: r.value },
+                    RenameTarget::Note(note) => Command::RenameNote { note, title: r.value },
+                };
+                self.dispatch(cmd);
+                return self.after_rename(r.target);
             }
             Message::RenameCancel => {
-                self.rename = None;
-                return self.focus_active();
+                let Some(r) = self.rename.take() else { return self.focus_active() };
+                return self.after_rename(r.target);
             }
 
             Message::FocusPane(pane) => {
@@ -1634,6 +1697,21 @@ impl App {
             Message::RestartPane(pane) => {
                 self.dispatch(Command::RestartPane(pane));
             }
+            Message::OpenInWindow(pane) => {
+                let s = self.core.state();
+                let title = s
+                    .pane(pane)
+                    .and_then(|p| s.tab(p.tab))
+                    .and_then(|t| s.project(t.project).map(|p| format!("{} · {}", p.name, t.title)))
+                    .unwrap_or_else(|| crate::DISPLAY_NAME.to_owned());
+                if let Some(host) = self.core.host_command()
+                    && let Err(e) = crate::host_exe::open_window(host, pane, &title)
+                {
+                    tracing::warn!(%pane, error = %e, "could not open a window for the terminal");
+                    self.error = Some(format!("Could not open a window: {e}"));
+                }
+            }
+            Message::BringBack(pane) => self.core.bring_back(pane),
             Message::StartAgent(pane, kind) => {
                 let args = self.prefs.agent_args.get(kind.as_str()).cloned().unwrap_or_default();
                 self.dispatch(Command::StartAgent { pane, kind, args });
@@ -1657,6 +1735,8 @@ impl App {
                     // keyboard from the terminal.
                     SideTab::Git => Task::batch([self.refresh_log(), self.focus_active()]),
                     SideTab::Files => Task::batch([self.refresh_files(), self.focus_active()]),
+                    // Opened to type or paste into.
+                    SideTab::Notes => operation::focus(NOTE_EDITOR),
                 };
             }
             Message::ClosePanel => {
@@ -1666,6 +1746,7 @@ impl App {
             }
             Message::Files(msg) => return self.update_files(msg),
             Message::Editor(msg) => return self.update_editor(msg),
+            Message::Notes(msg) => return self.update_notes(msg),
             Message::FileEditor(editor) => {
                 self.prefs.file_editor = editor;
                 self.mark_prefs();
@@ -1840,8 +1921,9 @@ impl App {
                 self.drop_session_files(tab);
                 return self.after_select();
             }
-            Dialog::Pane { pane, resume, .. } => {
+            Dialog::Pane { pane, resume, keep, .. } => {
                 self.dispatch(Command::SetResumeCommand { pane, command: Some(resume) });
+                self.dispatch(Command::SetKeepRunning { pane, on: keep });
             }
             Dialog::CodexHook => return self.update(Message::AddCodexHook),
             Dialog::CodexTrust(h) => {
@@ -1862,11 +1944,9 @@ impl App {
                 self.dialog = Some(Dialog::Remotes(form));
                 return self.update_remotes(RemotesMsg::Add);
             }
-            Dialog::CloseFile { doc, editor: None, .. } => return self.save_doc(doc, true, false),
-            Dialog::CloseFile { doc, editor: Some(_), .. } => {
-                return self.update(Message::Editor(EditorMsg::Discard(doc)));
-            }
+            Dialog::CloseFile { doc, .. } => return self.save_doc(doc, true, false),
             Dialog::SaveConflict { doc, .. } => return self.update(Message::Editor(EditorMsg::SaveAnyway(doc))),
+            Dialog::CloseAllNotes => return self.update(Message::Notes(NotesMsg::CloseAll)),
             Dialog::ConfirmQuit { dont_ask, .. } => {
                 if dont_ask {
                     self.prefs.confirm_quit = false;
@@ -2208,6 +2288,7 @@ impl App {
             }
             Action::ToggleTasks => return self.update(Message::TogglePanel(SideTab::Tasks)),
             Action::ToggleFiles => return self.update(Message::TogglePanel(SideTab::Files)),
+            Action::ToggleNotes => return self.update(Message::TogglePanel(SideTab::Notes)),
             Action::FontBigger | Action::FontSmaller | Action::FontReset => {
                 self.prefs.font_size = match action {
                     Action::FontBigger => (self.prefs.font_size + 1.0).min(32.0),

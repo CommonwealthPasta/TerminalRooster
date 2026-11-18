@@ -5,6 +5,7 @@ mod agent_icon;
 mod app;
 mod busy;
 mod color_picker;
+mod context_menu;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod dialogs;
@@ -12,15 +13,18 @@ mod diff_lines;
 mod editor;
 mod file_icons;
 mod files;
+mod folder_watch;
 mod git_panel;
 mod git_view;
 mod gone_folders;
 mod groups;
+mod host_exe;
 mod icons;
 mod keymap;
 mod layout_conv;
 mod leave_room;
 mod logging;
+mod notes;
 mod notify;
 mod on_escape;
 mod panes;
@@ -63,6 +67,29 @@ pub fn app_id() -> &'static str {
 
 fn main() -> iced::Result {
     let data_dir = termroost_core::paths::default_data_dir().ok();
+    // A terminal's helper process, or a window of its own (see `host_exe`),
+    // not the app.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == host_exe::HOST_ARG) {
+        let log_guard = logging::init_as(data_dir.as_deref(), "terminalrooster-host");
+        let code = termroost_core::host::serve();
+        drop(log_guard);
+        std::process::exit(code);
+    }
+    if args.first().is_some_and(|a| a == host_exe::ATTACH_ARG) {
+        let log_guard = logging::init_as(data_dir.as_deref(), "terminalrooster-window");
+        let code = match (data_dir.as_deref(), args.get(1).and_then(|p| p.parse().ok())) {
+            (Some(dir), Some(pane)) => {
+                termroost_core::host::attach_console(dir, termroost_core::PaneId(pane), args.get(2).map(String::as_str))
+            }
+            _ => {
+                eprintln!("usage: terminalrooster {} <terminal id> [window title]", host_exe::ATTACH_ARG);
+                2
+            }
+        };
+        drop(log_guard);
+        std::process::exit(code);
+    }
     // Flushes the log file when main returns.
     let _log_guard = logging::init(data_dir.as_deref());
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "TerminalRooster starting");
@@ -84,7 +111,8 @@ fn main() -> iced::Result {
         std::env::remove_var("CLAUDE_CODE_ENTRYPOINT");
     }
 
-    let core = match Core::open(Config::default()) {
+    let config = Config { host: host_exe::command(data_dir.as_deref()), ..Config::default() };
+    let core = match Core::open(config) {
         Ok(core) => core,
         Err(e) => {
             tracing::error!(error = %e, "could not open the core");

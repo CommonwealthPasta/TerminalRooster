@@ -15,7 +15,6 @@ pub enum Icon {
     Settings,
     SplitRight,
     SplitDown,
-    Refresh,
     Open,
     ChevronDown,
     ChevronRight,
@@ -24,10 +23,12 @@ pub enum Icon {
     ArrowUp,
     Search,
     Copy,
+    Terminal,
+    Branch,
 }
 
 /// The files, in the order of [`Icon`].
-const SOURCES: [&[u8]; 16] = [
+const SOURCES: [&[u8]; 17] = [
     include_bytes!("../icons/ui/plus.svg"),
     include_bytes!("../icons/ui/close.svg"),
     include_bytes!("../icons/ui/edit.svg"),
@@ -35,7 +36,6 @@ const SOURCES: [&[u8]; 16] = [
     include_bytes!("../icons/ui/settings.svg"),
     include_bytes!("../icons/ui/split_right.svg"),
     include_bytes!("../icons/ui/split_down.svg"),
-    include_bytes!("../icons/ui/refresh.svg"),
     include_bytes!("../icons/ui/open.svg"),
     include_bytes!("../icons/ui/chevron_down.svg"),
     include_bytes!("../icons/ui/chevron_right.svg"),
@@ -44,6 +44,8 @@ const SOURCES: [&[u8]; 16] = [
     include_bytes!("../icons/ui/arrow_up.svg"),
     include_bytes!("../icons/ui/search.svg"),
     include_bytes!("../icons/ui/copy.svg"),
+    include_bytes!("../icons/ui/terminal.svg"),
+    include_bytes!("../icons/ui/branch.svg"),
 ];
 
 // Built once so every view hands iced the same handles, and their rasterized

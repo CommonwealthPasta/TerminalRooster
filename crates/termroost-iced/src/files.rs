@@ -4,11 +4,14 @@
 //! slow network drive), and kept by their full path, so sessions in the same
 //! folder share what was read.
 //!
-//! While the tab is on screen, the folders shown are read again every few
-//! seconds, since agents add and remove files all the time.
+//! While the tab is on screen, the folders shown are watched (see
+//! [`folder_watch`]) and read again when they change, since agents add and
+//! remove files all the time. Folders that can't be watched are read again
+//! every few seconds instead.
 //!
-//! Right-clicking an entry (or the folder at the top) opens a small menu
-//! under it, to show the entry in the system's file manager.
+//! Right-clicking an entry (or the folder at the top) opens a small menu that
+//! floats under it, for a new file there or to show the entry in the system's
+//! file manager.
 //!
 //! What git leaves out (`.gitignore`, `.git/info/exclude`, the global
 //! excludes file) is dimmed, along with everything inside it.
@@ -16,19 +19,21 @@
 //! Each entry has an icon for its kind of file (see [`file_icons`]).
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use iced::widget::{button, column, container, mouse_area, row, space, text};
+use iced::widget::{button, column, container, mouse_area, operation, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
+use crate::context_menu::context_menu;
 use crate::file_icons::{self, Hues};
+use crate::folder_watch::{self, Changes, FolderWatch};
 use crate::icons::{Icon, icon};
 use crate::reveal;
 use crate::side_panel::SideTab;
 use crate::sidebar::{muted_text, short_dir};
-use crate::theme;
+use crate::theme::{self, Tone};
 use crate::ui::{self, icon_button};
 
 /// Entries shown per folder; the rest are counted.
@@ -41,7 +46,7 @@ const CHEVRON: f32 = 12.0;
 const ICON: f32 = 14.0;
 /// The space between a chevron, an icon and a name.
 const GAP: f32 = 4.0;
-/// How often the folders shown are read again.
+/// How often the folders shown are read again when they can't be watched.
 pub const POLL: Duration = Duration::from_secs(3);
 
 /// One file or folder in a listing.
@@ -68,8 +73,26 @@ pub struct FilesState {
     listings: HashMap<PathBuf, Listing>,
     /// Folders being read right now.
     reading: HashSet<PathBuf>,
+    /// Folders that changed while being read: read again once that's done.
+    again: HashSet<PathBuf>,
     /// The entry whose menu is open (it was right-clicked).
     menu: Option<PathBuf>,
+    /// A file being named, shown at the top of its folder.
+    new_file: Option<NewFile>,
+    /// Hears of changes in the folders shown.
+    pub(crate) watch: FolderWatch,
+}
+
+/// A new file, until it has a name.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NewFile {
+    /// The folder it goes in.
+    dir: PathBuf,
+    name: String,
+    /// Why it could not be created.
+    error: Option<String>,
+    /// It is being created.
+    creating: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -80,16 +103,64 @@ pub enum FilesMsg {
     Open(PathBuf),
     /// Folders were read.
     Listed(Vec<(PathBuf, Result<Vec<Entry>, String>)>),
-    /// Time to read the folders shown again.
+    /// Something changed in the folders watched.
+    Changed(Changes),
+    /// Time to read the folders shown again (they can't all be watched).
     Poll,
-    /// The refresh button.
-    Refresh,
-    /// An entry was right-clicked: open its menu (or close it, if open).
+    /// An entry was right-clicked: open its menu.
     Menu(PathBuf),
+    /// Something else was clicked, or the wheel turned, while the menu was open.
+    CloseMenu,
     /// Show a file, or open a folder, in the system's file manager.
-    Reveal { path: PathBuf, is_dir: bool },
+    Reveal {
+        path: PathBuf,
+        is_dir: bool,
+    },
     /// The file manager was started, or why not.
     Revealed(Result<(), String>),
+    /// Name a new file in this folder.
+    NewFile(PathBuf),
+    NewFileName(String),
+    /// Enter in the name.
+    CreateFile,
+    /// The file was created in `dir` (and opens), or why not.
+    Created {
+        dir: PathBuf,
+        path: PathBuf,
+        result: Result<(), String>,
+    },
+}
+
+/// The name field of a new file.
+const NEW_FILE_INPUT: &str = "new-file-input";
+
+/// Where a file named `name` goes in `dir`. The name may go through folders
+/// (`docs/notes.md`), but not out of `dir`.
+pub fn new_file_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let name = name.trim();
+    let plain = Path::new(name).components().all(|c| matches!(c, Component::Normal(_)));
+    if name.is_empty() || !plain || name.ends_with(std::path::is_separator) {
+        return Err("Not a file name".into());
+    }
+    Ok(dir.join(name))
+}
+
+/// Creates an empty file at `path`, and the folders it goes in. A file
+/// already there is left alone.
+pub fn create_file(path: &Path) -> Result<(), String> {
+    let exists = || format!("{} already exists", path.file_name().unwrap_or_default().to_string_lossy());
+    // Checked first: on Windows, a folder in the way is "access denied".
+    if path.symlink_metadata().is_ok() {
+        return Err(exists());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// The files and folders in `dir`: folders first, then by name ignoring case.
@@ -136,11 +207,13 @@ pub enum Row<'a> {
         open: bool,
         /// Ignored by git, itself or as part of an ignored folder.
         dim: bool,
+        /// Its menu is open.
+        menu: bool,
     },
     /// "Loading…", an error, or how many entries are not shown.
     Note { text: String, depth: usize },
-    /// The menu of the entry above it.
-    Menu { entry: &'a Entry, depth: usize },
+    /// The name of a new file, at the top of its folder.
+    NewFile { new: &'a NewFile, depth: usize },
 }
 
 /// The tree under `root` as lines: each open folder's listing below it.
@@ -152,30 +225,54 @@ pub fn rows<'a>(root: &Path, state: &'a FilesState) -> Vec<Row<'a>> {
 
 /// `dir` and the open folders shown below it, which are what a refresh reads.
 pub fn shown_dirs(dir: &Path, state: &FilesState) -> Vec<PathBuf> {
-    let open = rows(dir, state).into_iter().filter_map(|r| match r {
-        Row::Entry { entry, open: true, .. } => Some(entry.path.clone()),
-        _ => None,
-    });
-    std::iter::once(dir.to_path_buf()).chain(open).collect()
+    let mut out = Vec::new();
+    push_shown(dir, state, &mut out);
+    out
+}
+
+fn push_shown(dir: &Path, state: &FilesState, out: &mut Vec<PathBuf>) {
+    out.push(dir.to_path_buf());
+    if let Some(Listing::Ready(entries)) = state.listings.get(dir) {
+        for entry in entries.iter().take(MAX_ENTRIES) {
+            if entry.is_dir && state.expanded.contains(&entry.path) {
+                push_shown(&entry.path, state, out);
+            }
+        }
+    }
+}
+
+/// The open folders in `new` that `old` (the folder's listing before) didn't
+/// have: what they hold was never read, or is from before they went away.
+fn appeared(old: Option<&Listing>, new: &[Entry], expanded: &HashSet<PathBuf>) -> Vec<PathBuf> {
+    let before = match old {
+        Some(Listing::Ready(entries)) => entries.as_slice(),
+        _ => &[],
+    };
+    new.iter()
+        .filter(|e| e.is_dir && expanded.contains(&e.path) && !before.iter().any(|b| b.path == e.path))
+        .map(|e| e.path.clone())
+        .collect()
 }
 
 /// `dim`: `dir` is ignored. Git's rules don't say so of the things inside an
 /// ignored folder (`target/` doesn't match `target/debug`), so they inherit it.
 fn push_rows<'a>(dir: &Path, depth: usize, dim: bool, state: &'a FilesState, out: &mut Vec<Row<'a>>) {
+    let new = state.new_file.as_ref().filter(|n| n.dir == dir);
+    if let Some(new) = new {
+        out.push(Row::NewFile { new, depth });
+    }
     match state.listings.get(dir) {
         None => out.push(Row::Note { text: "Loading…".into(), depth }),
         Some(Listing::Failed(e)) => out.push(Row::Note { text: format!("Can't read this folder: {e}"), depth }),
         Some(Listing::Ready(entries)) => {
-            if entries.is_empty() && depth == 0 {
+            if entries.is_empty() && depth == 0 && new.is_none() {
                 out.push(Row::Note { text: "This folder is empty.".into(), depth });
             }
             for entry in entries.iter().take(MAX_ENTRIES) {
                 let open = entry.is_dir && state.expanded.contains(&entry.path);
                 let dim = dim || entry.ignored;
-                out.push(Row::Entry { entry, depth, open, dim });
-                if state.menu.as_ref() == Some(&entry.path) {
-                    out.push(Row::Menu { entry, depth });
-                }
+                let menu = state.menu.as_ref() == Some(&entry.path);
+                out.push(Row::Entry { entry, depth, open, dim, menu });
                 if open {
                     push_rows(&entry.path, depth + 1, dim, state, out);
                 }
@@ -220,17 +317,34 @@ impl App {
         self.files.menu.take().is_some()
     }
 
-    /// Reads the folders the Files tab shows again, if it is on screen.
+    /// Reads the folders the Files tab shows again, if it is on screen, and
+    /// tries again to watch those that couldn't be.
     pub(crate) fn refresh_files(&mut self) -> Task<Message> {
+        self.files.watch.retry();
         match self.files_root().filter(|_| self.files_shown()) {
             Some(root) => self.read_dirs(shown_dirs(&root, &self.files)),
             None => Task::none(),
         }
     }
 
-    /// Reads folders on a thread; those already being read are skipped.
+    /// Watches what the Files tab shows, or nothing when it is not on screen.
+    pub(crate) fn watch_files(&mut self) {
+        let wanted = match self.files_root().filter(|_| self.files_shown()) {
+            Some(root) if folder_watch::WHOLE_TREE => HashSet::from([root]),
+            Some(root) => shown_dirs(&root, &self.files).into_iter().collect(),
+            None => HashSet::new(),
+        };
+        self.files.watch.set(wanted);
+    }
+
+    /// Reads folders on a thread. Those being read already are read again
+    /// once that's done, as they may have changed since it started.
     fn read_dirs(&mut self, dirs: Vec<PathBuf>) -> Task<Message> {
-        let dirs: Vec<PathBuf> = dirs.into_iter().filter(|d| self.files.reading.insert(d.clone())).collect();
+        // Watched before they're read, so no change falls in between.
+        self.watch_files();
+        let (dirs, busy): (Vec<PathBuf>, Vec<PathBuf>) =
+            dirs.into_iter().partition(|d| self.files.reading.insert(d.clone()));
+        self.files.again.extend(busy);
         if dirs.is_empty() {
             return Task::none();
         }
@@ -261,27 +375,41 @@ impl App {
                 Task::batch([read, self.focus_active()])
             }
             FilesMsg::Listed(listed) => {
+                let mut next = Vec::new();
                 for (dir, result) in listed {
                     self.files.reading.remove(&dir);
+                    if self.files.again.remove(&dir) {
+                        next.push(dir.clone());
+                    }
                     let listing = match result {
-                        Ok(entries) => Listing::Ready(entries),
+                        Ok(entries) => {
+                            next.extend(appeared(self.files.listings.get(&dir), &entries, &self.files.expanded));
+                            Listing::Ready(entries)
+                        }
                         Err(e) => Listing::Failed(e),
                     };
                     self.files.listings.insert(dir, listing);
                 }
-                Task::none()
+                self.read_dirs(next)
             }
+            FilesMsg::Changed(changes) => match self.files_root().filter(|_| self.files_shown()) {
+                Some(root) => {
+                    let dirs = shown_dirs(&root, &self.files).into_iter().filter(|d| changes.touches(d)).collect();
+                    self.read_dirs(dirs)
+                }
+                None => Task::none(),
+            },
             FilesMsg::Open(path) => {
                 self.files.menu = None;
                 self.open_file(path)
             }
             FilesMsg::Poll => self.refresh_files(),
-            FilesMsg::Refresh => {
-                self.files.menu = None;
-                Task::batch([self.refresh_files(), self.focus_active()])
-            }
             FilesMsg::Menu(path) => {
-                self.files.menu = if self.files.menu.as_ref() == Some(&path) { None } else { Some(path) };
+                self.files.menu = Some(path);
+                Task::none()
+            }
+            FilesMsg::CloseMenu => {
+                self.files.menu = None;
                 Task::none()
             }
             FilesMsg::Reveal { path, is_dir } => {
@@ -294,7 +422,75 @@ impl App {
                 self.error = Some(format!("Could not open the file manager: {e}"));
                 Task::none()
             }
+            FilesMsg::NewFile(dir) => {
+                self.files.menu = None;
+                // The folder opens, so the name is typed where the file will show.
+                let read = match self.files_root() {
+                    Some(root) if dir != root && self.files.expanded.insert(dir.clone()) => {
+                        self.read_dirs(shown_dirs(&dir, &self.files))
+                    }
+                    _ => Task::none(),
+                };
+                self.files.new_file = Some(NewFile { dir, name: String::new(), error: None, creating: false });
+                Task::batch([read, operation::focus(NEW_FILE_INPUT)])
+            }
+            FilesMsg::NewFileName(name) => {
+                if let Some(new) = &mut self.files.new_file {
+                    new.name = name;
+                    new.error = None;
+                }
+                Task::none()
+            }
+            FilesMsg::CreateFile => {
+                let Some(new) = self.files.new_file.as_mut().filter(|n| !n.creating && !n.name.trim().is_empty())
+                else {
+                    return Task::none();
+                };
+                let path = match new_file_path(&new.dir, &new.name) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        new.error = Some(e);
+                        return Task::none();
+                    }
+                };
+                new.creating = true;
+                let dir = new.dir.clone();
+                // On a thread: the folder may be on a slow network drive.
+                let (tx, rx) = async_channel::bounded(1);
+                let target = path.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send_blocking(create_file(&target));
+                });
+                Task::perform(
+                    async move {
+                        let result = rx.recv().await.unwrap_or_else(|_| Err("creating it stopped".into()));
+                        (dir, path, result)
+                    },
+                    |(dir, path, result)| Message::Files(FilesMsg::Created { dir, path, result }),
+                )
+            }
+            FilesMsg::Created { dir, path, result: Ok(()) } => {
+                self.files.new_file = None;
+                // Folders made on the way to it (`docs/` of `docs/notes.md`) open too.
+                for folder in path.ancestors().skip(1).take_while(|f| *f != dir) {
+                    self.files.expanded.insert(folder.to_path_buf());
+                }
+                let read = self.read_dirs(vec![dir]);
+                Task::batch([read, self.open_file(path)])
+            }
+            FilesMsg::Created { result: Err(e), .. } => {
+                if let Some(new) = &mut self.files.new_file {
+                    new.creating = false;
+                    new.error = Some(e);
+                }
+                Task::none()
+            }
         }
+    }
+
+    /// Stops naming a new file, if one is being named.
+    pub(crate) fn cancel_new_file(&mut self) -> bool {
+        self.files.new_file.take().is_some()
     }
 
     /// The Files tab of the right panel.
@@ -304,20 +500,18 @@ impl App {
         let lines = rows(&root, &self.files).into_iter().map(|r| file_row(r, hues));
         let path = mouse_area(muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill))
             .on_right_press(Message::Files(FilesMsg::Menu(root.clone())));
-        let top = row![path, icon_button(Icon::Refresh, Message::Files(FilesMsg::Refresh), "Read the folders again")]
+        // The folder's own menu, under its name.
+        let menu = (self.files.menu.as_ref() == Some(&root)).then(|| file_menu(root.clone(), true));
+        let path = context_menu(path, menu, Message::Files(FilesMsg::CloseMenu));
+        let top = row![path, icon_button(Icon::Plus, Message::Files(FilesMsg::NewFile(root.clone())), "New file")]
             .align_y(Alignment::Center);
-        // The folder's own menu, under its name; always there, so the tree keeps its place.
-        let root_menu: Element<'_, Message> = match &self.files.menu {
-            Some(m) if *m == root => file_menu(root.clone(), true, 0.0),
-            _ => space::vertical().height(0).into(),
-        };
-        column![top, root_menu, ui::scroll(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
+        column![top, ui::scroll(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
     }
 }
 
 fn file_row(r: Row<'_>, hues: Hues) -> Element<'_, Message> {
     match r {
-        Row::Entry { entry, depth, open, dim } => {
+        Row::Entry { entry, depth, open, dim, menu } => {
             let chevron: Element<'_, Message> = match (entry.is_dir, open) {
                 (true, true) => icon(Icon::ChevronDown, CHEVRON, theme::muted).into(),
                 (true, false) => icon(Icon::ChevronRight, CHEVRON, theme::muted).into(),
@@ -340,30 +534,62 @@ fn file_row(r: Row<'_>, hues: Hues) -> Element<'_, Message> {
                 .padding([3, 6])
                 .style(theme::row_button)
                 .on_press(Message::Files(press));
-            mouse_area(line).on_right_press(Message::Files(FilesMsg::Menu(entry.path.clone()))).into()
+            let line = mouse_area(line).on_right_press(Message::Files(FilesMsg::Menu(entry.path.clone())));
+            let menu = menu.then(|| file_menu(entry.path.clone(), entry.is_dir));
+            // Lined up with the entry's icon, past the line's padding.
+            context_menu(line, menu, Message::Files(FilesMsg::CloseMenu))
+                .indent(6.0 + depth as f32 * INDENT + CHEVRON + GAP)
+                .into()
         }
-        // Both line up with the icons of the entries around them.
-        Row::Menu { entry, depth } => {
-            file_menu(entry.path.clone(), entry.is_dir, depth as f32 * INDENT + CHEVRON + GAP)
-        }
+        // Lined up with the icons of the entries around it.
         Row::Note { text: note, depth } => {
             row![space::horizontal().width(depth as f32 * INDENT + CHEVRON + GAP), muted_text(note)]
                 .padding([3, 6])
                 .into()
         }
+        Row::NewFile { new, depth } => {
+            let indent = depth as f32 * INDENT;
+            let name = ui::input("File name", &new.name)
+                .id(NEW_FILE_INPUT)
+                .size(13)
+                .padding([2, 6])
+                .on_input(|name| Message::Files(FilesMsg::NewFileName(name)))
+                .on_submit(Message::Files(FilesMsg::CreateFile));
+            // Where the file will be, with the icon its name gives it.
+            let line = row![
+                space::horizontal().width(indent),
+                space::horizontal().width(CHEVRON),
+                file_icons::icon(file_icons::file(&new.name), hues, false, ICON),
+                name,
+            ]
+            .spacing(GAP)
+            .align_y(Alignment::Center);
+            let mut lines = column![line].spacing(4);
+            if let Some(e) = &new.error {
+                let under_name = indent + CHEVRON + ICON + 3.0 * GAP;
+                lines = lines.push(row![space::horizontal().width(under_name), ui::note_text(Tone::Danger, e)]);
+            }
+            container(lines).padding([2, 6]).into()
+        }
     }
 }
 
-/// The menu of an entry: for now, showing it in the system's file manager.
-fn file_menu<'a>(path: PathBuf, is_dir: bool, indent: f32) -> Element<'a, Message> {
-    let reveal = button(text(reveal::label(is_dir)).size(13))
-        .width(Length::Fill)
-        .padding([5, 10])
-        .style(theme::row_button)
-        .on_press(Message::Files(FilesMsg::Reveal { path, is_dir }));
-    row![space::horizontal().width(indent), container(reveal).padding(4).width(220).style(theme::menu)]
-        .padding([2, 6])
-        .into()
+/// The menu of an entry: a new file in it (or next to it), or showing it in
+/// the system's file manager.
+fn file_menu<'a>(path: PathBuf, is_dir: bool) -> Element<'a, Message> {
+    let item = |label: &'static str, msg: FilesMsg| {
+        button(text(label).size(13))
+            .width(Length::Fill)
+            .padding([5, 10])
+            .style(theme::row_button)
+            .on_press(Message::Files(msg))
+    };
+    let dir = if is_dir { path.clone() } else { path.parent().map_or_else(|| path.clone(), Path::to_path_buf) };
+    let items = column![
+        item("New file", FilesMsg::NewFile(dir)),
+        item(reveal::label(is_dir), FilesMsg::Reveal { path, is_dir }),
+    ];
+    container(items).padding(4).width(220).style(theme::menu).into()
 }
 
 #[cfg(test)]
@@ -450,18 +676,69 @@ mod tests {
         rows(Path::new(root), state)
             .into_iter()
             .map(|r| match r {
-                Row::Entry { entry, depth, open, dim } => {
+                Row::Entry { entry, depth, open, dim, menu } => {
                     let mark = match (entry.is_dir, open) {
                         (true, true) => "▾",
                         (true, false) => "▸",
                         _ => "",
                     };
-                    format!("{depth}:{mark}{}{}", entry.name, if dim { "~" } else { "" })
+                    let dim = if dim { "~" } else { "" };
+                    let menu = if menu { "[menu]" } else { "" };
+                    format!("{depth}:{mark}{}{dim}{menu}", entry.name)
                 }
                 Row::Note { text, depth } => format!("{depth}:({text})"),
-                Row::Menu { entry, depth } => format!("{depth}:[menu of {}]", entry.name),
+                Row::NewFile { new, depth } => format!("{depth}:[new file {:?}]", new.name),
             })
             .collect()
+    }
+
+    fn naming(dir: &str, name: &str) -> Option<NewFile> {
+        Some(NewFile { dir: dir.into(), name: name.into(), error: None, creating: false })
+    }
+
+    #[test]
+    fn a_new_file_is_named_at_the_top_of_its_folder() {
+        let mut state = FilesState::default();
+        state.listings.insert("/r".into(), Listing::Ready(vec![entry("/r/src", true), entry("/r/x.md", false)]));
+        state.listings.insert("/r/src".into(), Listing::Ready(vec![entry("/r/src/lib.rs", false)]));
+        state.expanded.insert("/r/src".into());
+        state.new_file = naming("/r/src", "main");
+        assert_eq!(lines("/r", &state), ["0:▾src", "1:[new file \"main\"]", "1:lib.rs", "0:x.md"]);
+        state.new_file = naming("/r", "");
+        assert_eq!(lines("/r", &state), ["0:[new file \"\"]", "0:▾src", "1:lib.rs", "0:x.md"]);
+        // Not "This folder is empty." under it.
+        state.listings.insert("/r".into(), Listing::Ready(Vec::new()));
+        assert_eq!(lines("/r", &state), ["0:[new file \"\"]"]);
+    }
+
+    #[test]
+    fn new_file_names_stay_in_their_folder() {
+        let dir = Path::new("/r");
+        assert_eq!(new_file_path(dir, " notes.md "), Ok(dir.join("notes.md")));
+        assert_eq!(new_file_path(dir, "docs/notes.md"), Ok(dir.join("docs/notes.md")));
+        for bad in ["", "  ", "../x", "a/../../x", "/etc/x", ".", "docs/"] {
+            assert!(new_file_path(dir, bad).is_err(), "{bad:?}");
+        }
+        #[cfg(windows)]
+        for bad in [r"C:\x", r"\x", r"docs\"] {
+            assert!(new_file_path(dir, bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn creating_a_file_makes_its_folders_and_keeps_what_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        create_file(&root.join("a.txt")).unwrap();
+        assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"");
+        create_file(&root.join("docs/deep/b.md")).unwrap();
+        assert!(root.join("docs/deep/b.md").is_file());
+
+        std::fs::write(root.join("a.txt"), "kept").unwrap();
+        assert_eq!(create_file(&root.join("a.txt")), Err("a.txt already exists".into()));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "kept");
+        assert_eq!(create_file(&root.join("docs")), Err("docs already exists".into()), "a folder");
+        assert!(create_file(&root.join("a.txt/c.txt")).is_err(), "a file in the way of a folder");
     }
 
     #[test]
@@ -496,16 +773,28 @@ mod tests {
     }
 
     #[test]
-    fn a_menu_opens_under_its_entry() {
+    fn open_folders_new_to_a_listing_are_read() {
+        let expanded: HashSet<PathBuf> = ["/r/a".into(), "/r/b".into(), "/r/x.md".into()].into();
+        let old = Listing::Ready(vec![entry("/r/a", true), entry("/r/c", true)]);
+        let new = [entry("/r/a", true), entry("/r/b", true), entry("/r/c", true), entry("/r/x.md", false)];
+        assert_eq!(appeared(Some(&old), &new, &expanded), [PathBuf::from("/r/b")], "b came back; a was there");
+        let all_open = [PathBuf::from("/r/a"), PathBuf::from("/r/b")];
+        assert_eq!(appeared(None, &new, &expanded), all_open, "a first listing");
+        assert_eq!(appeared(Some(&Listing::Failed("denied".into())), &new, &expanded), all_open);
+    }
+
+    #[test]
+    fn a_menu_belongs_to_its_entry_and_takes_no_line() {
         let mut state = FilesState::default();
         state.listings.insert("/r".into(), Listing::Ready(vec![entry("/r/src", true), entry("/r/x.md", false)]));
         state.listings.insert("/r/src".into(), Listing::Ready(vec![entry("/r/src/lib.rs", false)]));
         state.expanded.insert("/r/src".into());
         state.menu = Some("/r/src".into());
-        assert_eq!(lines("/r", &state), ["0:▾src", "0:[menu of src]", "1:lib.rs", "0:x.md"]);
+        assert_eq!(lines("/r", &state), ["0:▾src[menu]", "1:lib.rs", "0:x.md"]);
         state.menu = Some("/r/src/lib.rs".into());
-        assert_eq!(lines("/r", &state), ["0:▾src", "1:lib.rs", "1:[menu of lib.rs]", "0:x.md"]);
-        assert_eq!(shown_dirs(Path::new("/r"), &state).len(), 2, "menus aren't folders to read");
+        assert_eq!(lines("/r", &state), ["0:▾src", "1:lib.rs[menu]", "0:x.md"]);
+        state.menu = Some("/r".into());
+        assert_eq!(lines("/r", &state), ["0:▾src", "1:lib.rs", "0:x.md"], "the folder's own is at the top");
     }
 
     #[test]

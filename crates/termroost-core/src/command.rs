@@ -8,7 +8,7 @@ use crate::agent::AgentKind;
 use crate::alert::Alert;
 use crate::detect::ObservedAgent;
 use crate::layout::{Axis, Layout};
-use crate::model::{GroupId, PaneId, ProjectId, TabId, TaskId};
+use crate::model::{GroupId, NoteId, PaneId, ProjectId, TabId, TaskId};
 
 /// A state change requested by the front end.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -126,6 +126,13 @@ pub enum Command {
     ClearAgent(PaneId),
     /// Starts a new shell in an exited (or running) pane, keeping its scrollback.
     RestartPane(PaneId),
+    /// Whether the pane's terminal keeps running when TerminalRooster quits.
+    /// A running program can't move in or out of a helper, so the terminal
+    /// starts again (an agent resumes its conversation).
+    SetKeepRunning {
+        pane: PaneId,
+        on: bool,
+    },
 
     CreateTask {
         project: ProjectId,
@@ -151,6 +158,25 @@ pub enum Command {
     },
     DeleteTask(TaskId),
 
+    /// Adds a note after the others. Without a title, it is "Note N" with
+    /// the lowest N no other note is named.
+    CreateNote {
+        title: Option<String>,
+    },
+    RenameNote {
+        note: NoteId,
+        title: String,
+    },
+    /// Replaces a note's text.
+    SetNoteText {
+        note: NoteId,
+        text: String,
+    },
+    /// Closes a note; its text is gone.
+    CloseNote(NoteId),
+    /// Closes every note.
+    CloseAllNotes,
+
     SetDefaultShell(Option<String>),
     /// Turns the bash and PowerShell integration that reports failed commands
     /// on or off, for shells started from now on.
@@ -172,6 +198,7 @@ pub enum Outcome {
     Tab(TabId),
     Pane(PaneId),
     Task(TaskId),
+    Note(NoteId),
     /// A tab was relocated; this many of its terminals were busy and stayed
     /// in the old directory.
     Relocated {
@@ -222,4 +249,8 @@ pub enum Event {
     /// working, or programs started or stopped. Read it with
     /// [`crate::TerminalHandle::activity`].
     ActivityChanged(PaneId),
+    /// A terminal that keeps running when TerminalRooster quits is now
+    /// shown elsewhere (a console window of its own); its program runs on.
+    /// [`crate::Core::bring_back`] shows it here again.
+    ShownElsewhere(PaneId),
 }

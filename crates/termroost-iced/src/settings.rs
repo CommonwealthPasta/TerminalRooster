@@ -437,7 +437,8 @@ impl App {
                 setting(
                     "Shell integration for bash and PowerShell",
                     Some(
-                        "Lets Terminal Rooster see how each command ends, which failed commands need. It is loaded \
+                        "Gives each terminal its own command history, and lets Terminal Rooster see how each \
+                         command ends, which failed commands need. It is loaded \
                          when a terminal starts, from Terminal Rooster's own folder; your startup files are not \
                          changed. Other shells can report a command's status themselves with OSC 133;D. Applies to \
                          terminals started from now on."

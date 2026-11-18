@@ -30,6 +30,12 @@ pub fn log_dir(data_dir: &Path) -> PathBuf {
 /// Installs the global subscriber and a panic hook that logs panics.
 /// Keep the returned guard alive until exit: dropping it flushes the file.
 pub fn init(data_dir: Option<&Path>) -> Option<WorkerGuard> {
+    init_as(data_dir, "terminalrooster")
+}
+
+/// As [`init`], logging to files named after `prefix`: each kind of process
+/// writes (and rotates) files of its own.
+pub fn init_as(data_dir: Option<&Path>, prefix: &str) -> Option<WorkerGuard> {
     let stderr = fmt::layer().with_writer(std::io::stderr).with_filter(filter());
 
     let mut guard = None;
@@ -38,7 +44,7 @@ pub fn init(data_dir: Option<&Path>) -> Option<WorkerGuard> {
         let appender = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|()| {
             RollingFileAppender::builder()
                 .rotation(Rotation::DAILY)
-                .filename_prefix("terminalrooster")
+                .filename_prefix(prefix)
                 .filename_suffix("log")
                 .max_log_files(7)
                 .build(&dir)

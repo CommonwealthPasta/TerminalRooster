@@ -54,6 +54,21 @@ fn unsaved_note(n: usize) -> String {
 }
 
 /// Body text of a dialog.
+/// The terminal settings' switch for keeping a terminal running when
+/// Terminal Rooster quits. `was`: the setting as saved.
+fn keep_running<'a>(keep: bool, was: bool) -> Element<'a, Message> {
+    let switch = row![
+        para("Keep running when Terminal Rooster quits").width(Length::Fill),
+        ui::switch(keep).on_toggle(Message::DialogKeepRunning)
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    if keep == was {
+        return switch.into();
+    }
+    column![switch, ui::note(Tone::Warning, para("Saving restarts this terminal."))].spacing(8).into()
+}
+
 fn para<'a>(s: impl text::IntoFragment<'a>) -> text::Text<'a> {
     text(s).size(TEXT)
 }
@@ -240,17 +255,16 @@ impl App {
             .button(ui::secondary("Cancel").on_press(Message::DialogCancel))
             .button(ui::secondary("Reload").on_press(Message::Editor(EditorMsg::Reload(*doc))))
             .button(ui::danger("Overwrite").on_press(Message::DialogSubmit)),
-            Dialog::CloseFile { doc, name, editor: Some(editor) } => DialogParts::new(
-                format!("Close {name}?"),
-                para(format!("{editor} still has it open. Closing ends {editor}; changes not saved in it are lost.")),
-            )
-            .button(ui::secondary("Cancel").on_press(Message::DialogCancel))
-            .button(ui::danger(format!("End {editor}")).on_press(Message::Editor(EditorMsg::Discard(*doc)))),
-            Dialog::CloseFile { doc, name, editor: None } => {
+            Dialog::CloseFile { doc, name } => {
                 DialogParts::new(format!("Save the changes to {name}?"), para("If you don't save them, they are lost."))
                     .button(ui::secondary("Cancel").on_press(Message::DialogCancel))
                     .button(ui::danger("Don't save").on_press(Message::Editor(EditorMsg::Discard(*doc))))
                     .button(ui::primary("Save").on_press(Message::DialogSubmit))
+            }
+            Dialog::CloseAllNotes => {
+                let n = s.notes.len();
+                let title = if n == 1 { "Close the note?".to_owned() } else { format!("Close all {n} notes?") };
+                DialogParts::new(title, para("Their text is gone.")).confirm("Close all", true)
             }
             Dialog::CodexTrust(handle) => {
                 return codex_window(handle, &self.keymap, &self.keyboard_focus, self.prefs.font_size);
@@ -295,7 +309,7 @@ impl App {
                         .button(ui::primary("OK").on_press(Message::DialogSubmit))
                 }
             }
-            Dialog::Pane { pane, resume, args } => {
+            Dialog::Pane { pane, resume, args, keep } => {
                 let agent = s.pane(*pane).and_then(|p| p.agent.as_ref());
                 let status: Element<'_, Message> = match agent {
                     Some(a) => {
@@ -345,6 +359,7 @@ impl App {
                             .on_input(Message::DialogResume)
                             .on_submit(Message::DialogSubmit),
                     ),
+                    keep_running(*keep, s.pane(*pane).is_some_and(|p| p.keep_running)),
                 ]
                 .spacing(14);
                 DialogParts::new("Terminal settings", body).confirm("Save", false)

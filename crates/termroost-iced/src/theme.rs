@@ -358,7 +358,7 @@ pub fn button_bare(t: &Theme, status: button::Status) -> button::Style {
     button_style(None, text_color, 0.0)
 }
 
-/// "New project" and "New session" under their lists: quiet until hovered.
+/// "New project" under the list of projects: quiet until hovered.
 pub fn add_item_button(t: &Theme, status: button::Status) -> button::Style {
     match status {
         button::Status::Active | button::Status::Disabled => button_style(None, muted(t), RADIUS),
@@ -546,6 +546,40 @@ pub fn file_editor(t: &Theme, status: text_editor::Status) -> text_editor::Style
     }
 }
 
+/// A note's text in the Notes tab, set into the panel like a field.
+pub fn note_editor(t: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let edge_color = match status {
+        text_editor::Status::Active => edge(t),
+        text_editor::Status::Hovered => ink(t).scale_alpha(0.32),
+        text_editor::Status::Focused { .. } => accent(t),
+        text_editor::Status::Disabled => line(t),
+    };
+    text_editor::Style {
+        background: field(t).into(),
+        border: Border { width: 1.0, color: edge_color, radius: RADIUS.into() },
+        placeholder: faint(t),
+        value: ink(t),
+        selection: accent(t).scale_alpha(0.3),
+    }
+}
+
+/// A note's tab in the Notes tab: the shown one raised, like a chosen [`segment`].
+pub fn note_tab(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| {
+        let style = container::Style { border: border::rounded(RADIUS_SM), ..container::Style::default() };
+        if selected {
+            container::Style {
+                background: Some(chosen(t).into()),
+                text_color: Some(ink(t)),
+                shadow: shadow_sm(t),
+                ..style
+            }
+        } else {
+            container::Style { text_color: Some(muted(t)), ..style }
+        }
+    }
+}
+
 // Surfaces
 
 /// The side columns: projects, sessions and the right panel.
@@ -678,6 +712,16 @@ pub fn list_item(selected: bool, drop_target: bool) -> impl Fn(&Theme) -> contai
             style.border = style.border.width(1.5).color(accent(t));
         }
         style
+    }
+}
+
+/// The fill of a list item in a [`side_column`], behind something drawn over
+/// its text so the text doesn't show through.
+pub fn list_item_cover(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| container::Style {
+        background: Some(if selected { chosen(t) } else { side(t) }.into()),
+        border: border::rounded(RADIUS_SM),
+        ..container::Style::default()
     }
 }
 

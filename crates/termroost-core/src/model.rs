@@ -46,6 +46,10 @@ id_type!(
     /// Identifier of a [`ProjectGroup`].
     GroupId
 );
+id_type!(
+    /// Identifier of a [`Note`].
+    NoteId
+);
 
 /// A project: a named working directory that owns tabs and tasks.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,6 +107,10 @@ pub struct Pane {
     /// starts here again when the pane is restored; `None` means the tab's
     /// working directory.
     pub cwd: Option<PathBuf>,
+    /// The terminal's program runs under a helper process of its own and
+    /// keeps running when TerminalRooster quits (see [`crate::host`]).
+    #[serde(default)]
+    pub keep_running: bool,
     pub created_at: i64,
 }
 
@@ -118,6 +126,29 @@ pub struct Task {
     pub sort_order: i64,
     pub created_at: i64,
     pub completed_at: Option<i64>,
+}
+
+/// Text kept for a while, like a scratch file: it stays, across restarts,
+/// until it is closed. Notes belong to no project.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    pub id: NoteId,
+    pub title: String,
+    pub text: String,
+    pub sort_order: i64,
+    pub created_at: i64,
+}
+
+impl std::fmt::Debug for Note {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Not the text: logs must not show what people paste (passwords, keys).
+        f.debug_struct("Note")
+            .field("id", &self.id)
+            .field("title", &self.title)
+            .field("bytes", &self.text.len())
+            .field("sort_order", &self.sort_order)
+            .finish()
+    }
 }
 
 /// Global settings stored in the database.
@@ -153,6 +184,8 @@ pub struct AppState {
     pub panes: HashMap<PaneId, Pane>,
     /// Sorted by project, then `sort_order`.
     pub tasks: Vec<Task>,
+    /// Sorted by `sort_order`.
+    pub notes: Vec<Note>,
     pub selected_project: Option<ProjectId>,
     pub settings: Settings,
     /// Opaque key/value storage for front ends (window geometry, panel widths...).
@@ -199,6 +232,14 @@ impl AppState {
 
     pub fn pane(&self, id: PaneId) -> Option<&Pane> {
         self.panes.get(&id)
+    }
+
+    pub fn note(&self, id: NoteId) -> Option<&Note> {
+        self.notes.iter().find(|n| n.id == id)
+    }
+
+    pub(crate) fn note_mut(&mut self, id: NoteId) -> Option<&mut Note> {
+        self.notes.iter_mut().find(|n| n.id == id)
     }
 
     /// Tabs of a project in display order.
@@ -252,6 +293,7 @@ impl AppState {
         let rank = |p: &ProjectId| order.get(p).copied().unwrap_or(usize::MAX);
         self.tabs.sort_by_key(|t| (rank(&t.project), t.sort_order, t.id));
         self.tasks.sort_by_key(|t| (rank(&t.project), t.sort_order, t.id));
+        self.notes.sort_by_key(|n| (n.sort_order, n.id));
     }
 }
 

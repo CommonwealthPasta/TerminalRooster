@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use iced::widget::{MouseArea, button, column, container, mouse_area, row, space, stack, text, tooltip};
+use iced::widget::{MouseArea, button, column, container, hover, mouse_area, row, space, stack, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 use termroost_core::git::Head;
 use termroost_core::{AgentKind, PaneId, Project, ProjectGroup, Tab, TabId};
@@ -18,7 +18,7 @@ use crate::notify::{Category, Notice};
 use crate::on_escape::on_escape;
 use crate::reorder::reorder;
 use crate::theme::{self, BOLD, SEMIBOLD, Tone};
-use crate::ui::{self, icon_button, tip};
+use crate::ui::{self, ICON_BUTTON_WIDTH, icon_button, tip};
 use crate::worktree::WorktreeMsg;
 
 /// Width of the edit/delete buttons in the selected list item.
@@ -55,8 +55,11 @@ pub fn branch_label<'a>(head: &Head, size: f32, max: usize) -> Element<'a, Messa
     .into()
 }
 
+/// Text size of [`muted_text`].
+const MUTED_SIZE: f32 = 11.0;
+
 pub fn muted_text<'a>(s: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
-    text(s).size(11).style(ui::muted)
+    text(s).size(MUTED_SIZE).style(ui::muted)
 }
 
 /// Shows a path with the home directory abbreviated to `~`.
@@ -104,6 +107,8 @@ pub fn matches_search(name: &str, group: Option<&str>, dir: &Path, query: &str) 
 
 /// Text size of a list item's name.
 const NAME_SIZE: f32 = 14.0;
+/// Space around the text of a list item.
+const ITEM_PADDING: Padding = Padding { top: 7.0, right: 6.0, bottom: 7.0, left: 6.0 };
 
 /// `content` centered on the first line of a list item's name, where it
 /// stays when the name wraps.
@@ -139,6 +144,22 @@ fn item_actions<'a>(selected: bool, edit: (Message, &'a str), delete: (Message, 
     } else {
         space::horizontal().width(ACTIONS_WIDTH).into()
     }
+}
+
+/// A button that copies `dir`, for over the end of the folder line that ends a
+/// list item. It sits on the item's own fill, which hides the end of a long
+/// folder rather than letting it run under the button.
+fn copy_dir_button<'a>(dir: &Path, selected: bool) -> Element<'a, Message> {
+    let copy = icon_button(Icon::Copy, Message::CopyText(dir.display().to_string()), "Copy path");
+    let copy = container(copy).padding(Padding { left: 4.0, ..Padding::ZERO }).style(theme::list_item_cover(selected));
+    // Centered on the folder's line.
+    let line = text::LineHeight::default().to_absolute(MUTED_SIZE.into()).0;
+    let bottom = ITEM_PADDING.bottom + (line - ICON_BUTTON_WIDTH) / 2.0;
+    container(copy)
+        .padding(Padding { right: ITEM_PADDING.right, bottom, ..Padding::ZERO })
+        .align_right(Length::Fill)
+        .align_bottom(Length::Fill)
+        .into()
 }
 
 /// The line down the left of a group's projects, as wide as they are indented.
@@ -302,7 +323,7 @@ impl App {
             label = label.push(marker(notice, tabs().any(|t| self.activity.contains(&t.id))));
         }
         let label = label.push(ui::badge(projects.len().to_string(), Tone::Neutral));
-        let mut body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
+        let mut body = mouse_area(container(label).padding(ITEM_PADDING).width(Length::Fill))
             .on_double_click(Message::GroupDoubleClicked(group.id));
         if !searching {
             // On release, so pressing it to drag it doesn't open or close it.
@@ -335,10 +356,15 @@ impl App {
             ]
             .spacing(4)
             .align_y(Alignment::Center),
-            muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None),
+            // Cut at the item's edge, where the copy button covers its end:
+            // a long folder name would otherwise run on past the button.
+            container(muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None)).clip(true),
         ]
         .spacing(1);
-        let body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
+        // The folder can be copied without opening the project, from a button
+        // that shows while the pointer is over it.
+        let label = container(label).padding(ITEM_PADDING).width(Length::Fill);
+        let body = mouse_area(hover(label, copy_dir_button(&p.working_dir, selected)))
             .on_press(Message::SelectProject(p.id))
             .on_double_click(Message::StartRename(RenameTarget::Project(p.id)));
         let actions = item_actions(
@@ -354,32 +380,30 @@ impl App {
         let Some(project) = s.selected_project.and_then(|p| s.project(p)) else {
             return container(space::horizontal()).width(210).height(Length::Fill).style(theme::side_column).into();
         };
-        let header = row![
+        let mut header = row![
             column![
                 text(&project.name).size(15).font(SEMIBOLD),
                 muted_text(short_dir(&project.working_dir, 26)).wrapping(text::Wrapping::None)
             ]
             .spacing(1)
             .width(Length::Fill),
-            icon_button(Icon::Plus, Message::NewTab, self.keymap.tip("New session", Action::NewSession)),
-        ]
-        .align_y(Alignment::Center)
-        .padding(HEADER_PADDING);
+            icon_button(Icon::Terminal, Message::NewTab, self.keymap.tip("New session", Action::NewSession)),
+        ];
+        // In a repository, the Worktrees dialog too: a new worktree gets a
+        // session of its own.
+        if self.in_repo() {
+            header = header.push(icon_button(
+                Icon::Branch,
+                Message::Worktree(WorktreeMsg::Open),
+                "New worktree\nIn a session of its own, or open an existing one",
+            ));
+        }
+        let header = header.spacing(2).align_y(Alignment::Center).padding(HEADER_PADDING);
         let ids: Vec<TabId> = s.tabs_of(project.id).map(|t| t.id).collect();
         let list = reorder(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
             .spacing(LIST_SPACING)
             .on_move_if(self.rename.is_none(), move |from, to| Message::MoveTab(ids[from], to));
-        let mut items = column![list, add_item(Message::NewTab, "New session")];
-        // In a repository, the Worktrees dialog too: a new worktree gets a
-        // session of its own.
-        if self.in_repo() {
-            items = items.push(tip(
-                add_item(Message::Worktree(WorktreeMsg::Open), "New worktree"),
-                "Make a git worktree, in a new session\nOr open an existing one",
-                tooltip::Position::Bottom,
-            ));
-        }
-        let items = items.spacing(LIST_SPACING).padding([0.0, COLUMN_PADDING]);
+        let items = column![list].spacing(LIST_SPACING).padding([0.0, COLUMN_PADDING]);
         let heading =
             container(ui::heading("Sessions")).padding(Padding { left: HEADER_PADDING.left, ..Padding::ZERO });
         container(column![header, heading, ui::scroll(items).height(Length::Fill)].spacing(6))
@@ -436,7 +460,7 @@ impl App {
         }
         let label = label.push(muted_text(subtitle));
         let target = DropTarget::Session(tab.id);
-        let body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
+        let body = mouse_area(container(label).padding(ITEM_PADDING).width(Length::Fill))
             .on_press(Message::SelectTab(tab.id))
             .on_double_click(Message::StartRename(RenameTarget::Tab(tab.id)));
         let actions = item_actions(

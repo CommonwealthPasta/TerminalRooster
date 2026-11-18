@@ -27,6 +27,7 @@ pub enum Action {
     MoveProjectDown,
     ToggleTasks,
     ToggleFiles,
+    ToggleNotes,
     SplitRight,
     SplitDown,
     CloseTerminal,
@@ -56,7 +57,7 @@ struct Info {
 
 impl Action {
     /// In the order Settings lists them.
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 30] = [
         Action::NewProject,
         Action::NewSession,
         Action::NextSession,
@@ -70,6 +71,7 @@ impl Action {
         Action::MoveProjectDown,
         Action::ToggleTasks,
         Action::ToggleFiles,
+        Action::ToggleNotes,
         Action::SplitRight,
         Action::SplitDown,
         Action::CloseTerminal,
@@ -110,6 +112,7 @@ impl Action {
             }
             Action::ToggleTasks => ("toggle_tasks", "Show / hide tasks", GENERAL, &["Ctrl+Shift+K"]),
             Action::ToggleFiles => ("toggle_files", "Show / hide files", GENERAL, &["Ctrl+Shift+F"]),
+            Action::ToggleNotes => ("toggle_notes", "Show / hide notes", GENERAL, &["Ctrl+Shift+J"]),
             Action::SplitRight => ("split_right", "Split right", TERMINALS, &["Ctrl+Shift+E"]),
             Action::SplitDown => ("split_down", "Split down", TERMINALS, &["Ctrl+Shift+O"]),
             Action::CloseTerminal => ("close_terminal", "Close terminal", TERMINALS, &["Ctrl+Shift+W"]),
