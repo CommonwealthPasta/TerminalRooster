@@ -56,6 +56,15 @@ fn file_arg(file: &Path, root: &Path) -> String {
     }
 }
 
+/// What to type into the running editor `name` to have it quit as `:qa`
+/// does, from whatever mode it is in (Ctrl+\ Ctrl+N leaves Insert and any
+/// other mode). Neovim and Vim refuse while changes are not saved, and say
+/// so. `None` for other editors.
+pub fn quit_keys(name: &str) -> Option<&'static [u8]> {
+    let vim = ["nvim", "vim"].iter().any(|v| name.eq_ignore_ascii_case(v));
+    vim.then_some(b"\x1c\x0e:qa\r".as_slice())
+}
+
 /// [`launch`] with the editor and `PATH` of this machine.
 pub fn launch_here(setting: &str, file: &Path, root: &Path) -> Result<Launch, String> {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -93,6 +102,13 @@ mod tests {
         assert_eq!(l.command.args, ["--vsplit", "a b.txt"]);
         assert!(launch("emacs", &root.join("x"), root, nvim, lookup).unwrap_err().contains("emacs"));
         assert!(launch("", &root.join("x"), root, || None, lookup).unwrap_err().contains("Neovim"));
+    }
+
+    #[test]
+    fn only_vim_and_neovim_are_asked_to_quit() {
+        assert_eq!(quit_keys("nvim"), Some(&b"\x1c\x0e:qa\r"[..]));
+        assert!(quit_keys("vim").is_some() && quit_keys("NVIM").is_some());
+        assert!(quit_keys("hx").is_none() && quit_keys("nano").is_none());
     }
 
     #[cfg(windows)]

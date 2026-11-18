@@ -177,8 +177,12 @@ impl std::fmt::Debug for TextDoc {
 pub enum EditorMsg {
     /// Show one of the visible session's files, or its terminals (`None`).
     Show(Option<DocId>),
-    /// Close a file, asking first if it has unsaved changes.
+    /// Close a file, asking first if it has unsaved changes. Neovim or Vim
+    /// is asked to quit instead, and the file closes when it does.
     Close(DocId),
+    /// Neovim or Vim was asked to quit a moment ago: if it hasn't (it has
+    /// changes not saved, and says so), show it.
+    QuitCheck(DocId),
     /// Close a file without saving its changes.
     Discard(DocId),
     /// A file was read (or can't be edited, and why).
@@ -616,19 +620,35 @@ impl App {
                 self.focus_active()
             }
             EditorMsg::Close(id) => {
-                // A running terminal editor may have changes it hasn't saved.
-                let running = |d: &OpenFile| match &d.kind {
-                    DocKind::Terminal { handle, name, .. } if handle.exit_status().is_none() => Some(name.clone()),
-                    _ => None,
-                };
-                if let Some((tab, doc)) = self.doc(id).filter(|(_, d)| d.modified() || running(d).is_some()) {
-                    let name = self.file_label(Some(tab), &doc.path);
-                    let editor = running(doc);
-                    self.dialog = Some(Dialog::CloseFile { doc: id, name, editor });
-                    return Task::none();
+                let Some((tab, doc)) = self.doc(id) else { return Task::none() };
+                match &doc.kind {
+                    DocKind::Terminal { handle, name, .. } if handle.exit_status().is_none() => {
+                        // Its own `:qa`, so changes not saved in it keep it open
+                        // (it says why); the file closes when it ends. Other
+                        // editors are just ended.
+                        if let Some(keys) = external::quit_keys(name) {
+                            handle.write(keys);
+                            return Task::batch([self.focus_active(), quit_check(id)]);
+                        }
+                    }
+                    _ if doc.modified() => {
+                        let name = self.file_label(Some(tab), &doc.path);
+                        self.dialog = Some(Dialog::CloseFile { doc: id, name });
+                        return Task::none();
+                    }
+                    _ => {}
                 }
                 self.close_doc(id);
                 self.focus_active()
+            }
+            EditorMsg::QuitCheck(id) => {
+                let running = |d: &OpenFile| matches!(&d.kind, DocKind::Terminal { handle, .. } if handle.exit_status().is_none());
+                let Some((tab, _)) = self.doc(id).filter(|(_, d)| running(d)) else { return Task::none() };
+                if let Some(files) = self.editors.get_mut(&tab) {
+                    files.shown = Some(id);
+                    self.open_files_dirty = true;
+                }
+                if Some(tab) == self.active_tab_id() { self.focus_active() } else { Task::none() }
             }
             EditorMsg::Discard(id) => {
                 self.dialog = None;
@@ -796,6 +816,19 @@ impl App {
             }
         }
     }
+}
+
+/// How long Neovim or Vim gets to quit before the refusal is shown.
+const QUIT_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// [`EditorMsg::QuitCheck`] once Neovim or Vim had time to quit.
+fn quit_check(id: DocId) -> Task<Message> {
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        std::thread::sleep(QUIT_WAIT);
+        let _ = tx.send_blocking(());
+    });
+    Task::perform(async move { rx.recv().await.ok() }, move |_| Message::Editor(EditorMsg::QuitCheck(id)))
 }
 
 /// Tab inserts the file's indent at the cursor (replacing a selection);
