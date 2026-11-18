@@ -255,13 +255,7 @@ impl App {
             .button(ui::secondary("Cancel").on_press(Message::DialogCancel))
             .button(ui::secondary("Reload").on_press(Message::Editor(EditorMsg::Reload(*doc))))
             .button(ui::danger("Overwrite").on_press(Message::DialogSubmit)),
-            Dialog::CloseFile { doc, name, editor: Some(editor) } => DialogParts::new(
-                format!("Close {name}?"),
-                para(format!("{editor} still has it open. Closing ends {editor}; changes not saved in it are lost.")),
-            )
-            .button(ui::secondary("Cancel").on_press(Message::DialogCancel))
-            .button(ui::danger(format!("End {editor}")).on_press(Message::Editor(EditorMsg::Discard(*doc)))),
-            Dialog::CloseFile { doc, name, editor: None } => {
+            Dialog::CloseFile { doc, name } => {
                 DialogParts::new(format!("Save the changes to {name}?"), para("If you don't save them, they are lost."))
                     .button(ui::secondary("Cancel").on_press(Message::DialogCancel))
                     .button(ui::danger("Don't save").on_press(Message::Editor(EditorMsg::Discard(*doc))))

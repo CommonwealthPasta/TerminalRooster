@@ -208,12 +208,10 @@ pub enum Dialog {
         unsaved: Vec<String>,
         dont_ask: bool,
     },
-    /// Closing a file with unsaved changes, or open in a terminal editor
-    /// that is still running (its name).
+    /// Closing a file with unsaved changes.
     CloseFile {
         doc: DocId,
         name: String,
-        editor: Option<String>,
     },
     /// Saving a file that changed on disk since it was read.
     SaveConflict {
@@ -1946,10 +1944,7 @@ impl App {
                 self.dialog = Some(Dialog::Remotes(form));
                 return self.update_remotes(RemotesMsg::Add);
             }
-            Dialog::CloseFile { doc, editor: None, .. } => return self.save_doc(doc, true, false),
-            Dialog::CloseFile { doc, editor: Some(_), .. } => {
-                return self.update(Message::Editor(EditorMsg::Discard(doc)));
-            }
+            Dialog::CloseFile { doc, .. } => return self.save_doc(doc, true, false),
             Dialog::SaveConflict { doc, .. } => return self.update(Message::Editor(EditorMsg::SaveAnyway(doc))),
             Dialog::CloseAllNotes => return self.update(Message::Notes(NotesMsg::CloseAll)),
             Dialog::ConfirmQuit { dont_ask, .. } => {
