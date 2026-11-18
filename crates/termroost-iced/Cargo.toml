@@ -23,6 +23,8 @@ directories.workspace = true
 ttf-parser = "0.25"
 # The Files tab dims what .gitignore leaves out.
 ignore = "0.4"
+# The Files tab hears from the system when the folders it shows change.
+notify = "8.2"
 chrono.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

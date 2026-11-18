@@ -753,8 +753,15 @@ impl App {
             }),
             iced::time::every(GIT_POLL).map(|_| Message::GitPoll),
         ];
-        if self.files_shown() && self.window_focused {
-            subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Files(FilesMsg::Poll)));
+        if self.files_shown() {
+            subs.push(
+                Subscription::run_with(self.files.watch.changes(), |c| c.0.clone())
+                    .map(|c| Message::Files(FilesMsg::Changed(c))),
+            );
+            // Folders that can't be watched are read now and then instead.
+            if self.window_focused && self.files.watch.needs_poll() {
+                subs.push(iced::time::every(crate::files::POLL).map(|_| Message::Files(FilesMsg::Poll)));
+            }
         }
         // Agents change open files: look at them now and then, and when coming back to the window.
         if self.has_text_docs() && self.window_focused {
@@ -933,6 +940,9 @@ impl App {
         let revived = self.revive_shown();
         self.sync_attention();
         let task = Task::batch([task, revived]);
+        // Lets go of the folders when the Files tab is hidden, and watches
+        // another session's when it comes on screen.
+        self.watch_files();
         match self.ensure_files_root() {
             Some(read) => Task::batch([task, read]),
             None => task,
@@ -946,7 +956,10 @@ impl App {
         // Key events are never logged: they can carry what the user types.
         // Nor are editor actions and folder listings: what is in people's files.
         let quiet = match &message {
-            Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
+            Message::Core(_)
+            | Message::Tick
+            | Message::Key(_)
+            | Message::Files(FilesMsg::Listed(_) | FilesMsg::Changed(_)) => true,
             Message::Editor(msg) => !msg.loggable(),
             Message::Notes(msg) => !msg.loggable(),
             Message::GitView(msg) => !msg.loggable(),
@@ -994,7 +1007,9 @@ impl App {
                 self.window_focused = focused;
                 if focused {
                     let changes = self.poll_changes();
-                    return Task::batch([self.update(Message::Editor(EditorMsg::DiskPoll)), changes]);
+                    // In case the system lost track of a change (its queue can overflow).
+                    let files = self.refresh_files();
+                    return Task::batch([self.update(Message::Editor(EditorMsg::DiskPoll)), changes, files]);
                 }
             }
             Message::WindowFound(id) => self.window_id = self.window_id.or(id),

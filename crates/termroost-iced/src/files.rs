@@ -4,8 +4,10 @@
 //! slow network drive), and kept by their full path, so sessions in the same
 //! folder share what was read.
 //!
-//! While the tab is on screen, the folders shown are read again every few
-//! seconds, since agents add and remove files all the time.
+//! While the tab is on screen, the folders shown are watched (see
+//! [`folder_watch`]) and read again when they change, since agents add and
+//! remove files all the time. Folders that can't be watched are read again
+//! every few seconds instead.
 //!
 //! Right-clicking an entry (or the folder at the top) opens a small menu
 //! under it, to show the entry in the system's file manager.
@@ -24,6 +26,7 @@ use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
 use crate::file_icons::{self, Hues};
+use crate::folder_watch::{self, Changes, FolderWatch};
 use crate::icons::{Icon, icon};
 use crate::reveal;
 use crate::side_panel::SideTab;
@@ -41,7 +44,7 @@ const CHEVRON: f32 = 12.0;
 const ICON: f32 = 14.0;
 /// The space between a chevron, an icon and a name.
 const GAP: f32 = 4.0;
-/// How often the folders shown are read again.
+/// How often the folders shown are read again when they can't be watched.
 pub const POLL: Duration = Duration::from_secs(3);
 
 /// One file or folder in a listing.
@@ -68,8 +71,12 @@ pub struct FilesState {
     listings: HashMap<PathBuf, Listing>,
     /// Folders being read right now.
     reading: HashSet<PathBuf>,
+    /// Folders that changed while being read: read again once that's done.
+    again: HashSet<PathBuf>,
     /// The entry whose menu is open (it was right-clicked).
     menu: Option<PathBuf>,
+    /// Hears of changes in the folders shown.
+    pub(crate) watch: FolderWatch,
 }
 
 #[derive(Clone, Debug)]
@@ -80,7 +87,9 @@ pub enum FilesMsg {
     Open(PathBuf),
     /// Folders were read.
     Listed(Vec<(PathBuf, Result<Vec<Entry>, String>)>),
-    /// Time to read the folders shown again.
+    /// Something changed in the folders watched.
+    Changed(Changes),
+    /// Time to read the folders shown again (they can't all be watched).
     Poll,
     /// The refresh button.
     Refresh,
@@ -152,11 +161,33 @@ pub fn rows<'a>(root: &Path, state: &'a FilesState) -> Vec<Row<'a>> {
 
 /// `dir` and the open folders shown below it, which are what a refresh reads.
 pub fn shown_dirs(dir: &Path, state: &FilesState) -> Vec<PathBuf> {
-    let open = rows(dir, state).into_iter().filter_map(|r| match r {
-        Row::Entry { entry, open: true, .. } => Some(entry.path.clone()),
-        _ => None,
-    });
-    std::iter::once(dir.to_path_buf()).chain(open).collect()
+    let mut out = Vec::new();
+    push_shown(dir, state, &mut out);
+    out
+}
+
+fn push_shown(dir: &Path, state: &FilesState, out: &mut Vec<PathBuf>) {
+    out.push(dir.to_path_buf());
+    if let Some(Listing::Ready(entries)) = state.listings.get(dir) {
+        for entry in entries.iter().take(MAX_ENTRIES) {
+            if entry.is_dir && state.expanded.contains(&entry.path) {
+                push_shown(&entry.path, state, out);
+            }
+        }
+    }
+}
+
+/// The open folders in `new` that `old` (the folder's listing before) didn't
+/// have: what they hold was never read, or is from before they went away.
+fn appeared(old: Option<&Listing>, new: &[Entry], expanded: &HashSet<PathBuf>) -> Vec<PathBuf> {
+    let before = match old {
+        Some(Listing::Ready(entries)) => entries.as_slice(),
+        _ => &[],
+    };
+    new.iter()
+        .filter(|e| e.is_dir && expanded.contains(&e.path) && !before.iter().any(|b| b.path == e.path))
+        .map(|e| e.path.clone())
+        .collect()
 }
 
 /// `dim`: `dir` is ignored. Git's rules don't say so of the things inside an
@@ -220,17 +251,34 @@ impl App {
         self.files.menu.take().is_some()
     }
 
-    /// Reads the folders the Files tab shows again, if it is on screen.
+    /// Reads the folders the Files tab shows again, if it is on screen, and
+    /// tries again to watch those that couldn't be.
     pub(crate) fn refresh_files(&mut self) -> Task<Message> {
+        self.files.watch.retry();
         match self.files_root().filter(|_| self.files_shown()) {
             Some(root) => self.read_dirs(shown_dirs(&root, &self.files)),
             None => Task::none(),
         }
     }
 
-    /// Reads folders on a thread; those already being read are skipped.
+    /// Watches what the Files tab shows, or nothing when it is not on screen.
+    pub(crate) fn watch_files(&mut self) {
+        let wanted = match self.files_root().filter(|_| self.files_shown()) {
+            Some(root) if folder_watch::WHOLE_TREE => HashSet::from([root]),
+            Some(root) => shown_dirs(&root, &self.files).into_iter().collect(),
+            None => HashSet::new(),
+        };
+        self.files.watch.set(wanted);
+    }
+
+    /// Reads folders on a thread. Those being read already are read again
+    /// once that's done, as they may have changed since it started.
     fn read_dirs(&mut self, dirs: Vec<PathBuf>) -> Task<Message> {
-        let dirs: Vec<PathBuf> = dirs.into_iter().filter(|d| self.files.reading.insert(d.clone())).collect();
+        // Watched before they're read, so no change falls in between.
+        self.watch_files();
+        let (dirs, busy): (Vec<PathBuf>, Vec<PathBuf>) =
+            dirs.into_iter().partition(|d| self.files.reading.insert(d.clone()));
+        self.files.again.extend(busy);
         if dirs.is_empty() {
             return Task::none();
         }
@@ -261,16 +309,30 @@ impl App {
                 Task::batch([read, self.focus_active()])
             }
             FilesMsg::Listed(listed) => {
+                let mut next = Vec::new();
                 for (dir, result) in listed {
                     self.files.reading.remove(&dir);
+                    if self.files.again.remove(&dir) {
+                        next.push(dir.clone());
+                    }
                     let listing = match result {
-                        Ok(entries) => Listing::Ready(entries),
+                        Ok(entries) => {
+                            next.extend(appeared(self.files.listings.get(&dir), &entries, &self.files.expanded));
+                            Listing::Ready(entries)
+                        }
                         Err(e) => Listing::Failed(e),
                     };
                     self.files.listings.insert(dir, listing);
                 }
-                Task::none()
+                self.read_dirs(next)
             }
+            FilesMsg::Changed(changes) => match self.files_root().filter(|_| self.files_shown()) {
+                Some(root) => {
+                    let dirs = shown_dirs(&root, &self.files).into_iter().filter(|d| changes.touches(d)).collect();
+                    self.read_dirs(dirs)
+                }
+                None => Task::none(),
+            },
             FilesMsg::Open(path) => {
                 self.files.menu = None;
                 self.open_file(path)
@@ -493,6 +555,17 @@ mod tests {
         let dirs: Vec<PathBuf> = ["/r", "/r/a", "/r/a/x"].into_iter().map(PathBuf::from).collect();
         assert_eq!(shown_dirs(Path::new("/r"), &state), dirs);
         assert_eq!(shown_dirs(Path::new("/r/a"), &state), dirs[1..]);
+    }
+
+    #[test]
+    fn open_folders_new_to_a_listing_are_read() {
+        let expanded: HashSet<PathBuf> = ["/r/a".into(), "/r/b".into(), "/r/x.md".into()].into();
+        let old = Listing::Ready(vec![entry("/r/a", true), entry("/r/c", true)]);
+        let new = [entry("/r/a", true), entry("/r/b", true), entry("/r/c", true), entry("/r/x.md", false)];
+        assert_eq!(appeared(Some(&old), &new, &expanded), [PathBuf::from("/r/b")], "b came back; a was there");
+        let all_open = [PathBuf::from("/r/a"), PathBuf::from("/r/b")];
+        assert_eq!(appeared(None, &new, &expanded), all_open, "a first listing");
+        assert_eq!(appeared(Some(&Listing::Failed("denied".into())), &new, &expanded), all_open);
     }
 
     #[test]
