@@ -715,6 +715,16 @@ pub fn list_item(selected: bool, drop_target: bool) -> impl Fn(&Theme) -> contai
     }
 }
 
+/// The fill of a list item in a [`side_column`], behind something drawn over
+/// its text so the text doesn't show through.
+pub fn list_item_cover(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| container::Style {
+        background: Some(if selected { chosen(t) } else { side(t) }.into()),
+        border: border::rounded(RADIUS_SM),
+        ..container::Style::default()
+    }
+}
+
 /// The bar at the left edge of the selected list item; nothing on the others.
 pub fn selection_bar(selected: bool) -> impl Fn(&Theme) -> container::Style {
     move |t| container::Style {
