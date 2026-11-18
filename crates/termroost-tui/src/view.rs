@@ -10,13 +10,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Clear;
-use termroost_core::{AgentEvent, Alert, Axis, GridSize, ProjectId, RenderContent, Rgb, Tab, TabId, git};
+use termroost_core::{AgentEvent, Alert, Axis, GridSize, ProjectId, RenderContent, Tab, TabId, git};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{App, Edit, Focus, Note, Row};
-use crate::colors::ui;
+use crate::colors::{self, ui};
 use crate::folders;
 use crate::panes::{self, Placed};
 
@@ -431,8 +431,7 @@ fn paint(buf: &mut Buffer, area: Rect, c: &RenderContent) {
                 continue;
             }
             let Some(out) = buf.cell_mut((area.x + col as u16, area.y + row as u16)) else { continue };
-            let rgb = |c: Rgb| Color::Rgb(c.r, c.g, c.b);
-            let mut style = Style::new().fg(rgb(cell.fg)).bg(rgb(cell.bg));
+            let mut style = colors::cell_style(cell.fg, cell.bg);
             // Hidden text, or a wide character cut by the edge.
             if cell.fg == cell.bg || (cell.wide && col + 1 >= cols) {
                 out.set_char(' ');

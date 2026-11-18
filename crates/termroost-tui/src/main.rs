@@ -75,7 +75,7 @@ fn main() -> ExitCode {
     let _log = logging::init(termroost_core::paths::default_data_dir().ok().as_deref());
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "terminalrooster-tui starting");
 
-    let core = match Core::open(Config::default()) {
+    let core = match Core::open(Config { palette: colors::palette(), ..Config::default() }) {
         Ok(core) => core,
         Err(e) => {
             tracing::error!(error = %e, "could not open the core");
