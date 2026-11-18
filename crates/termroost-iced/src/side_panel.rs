@@ -1,5 +1,5 @@
 //! The right panel: the project's tasks, the git log of the session on
-//! screen, or the files of the session's folder.
+//! screen, the files of the session's folder, or the notes.
 
 use iced::widget::{column, container, row, space};
 use iced::{Alignment, Element, Length};
@@ -22,16 +22,18 @@ pub enum SideTab {
     Git,
     #[serde(alias = "files")]
     Files,
+    Notes,
 }
 
 impl SideTab {
-    pub const ALL: [SideTab; 3] = [SideTab::Tasks, SideTab::Git, SideTab::Files];
+    pub const ALL: [SideTab; 4] = [SideTab::Tasks, SideTab::Git, SideTab::Files, SideTab::Notes];
 
     pub fn label(self) -> &'static str {
         match self {
             SideTab::Tasks => "Tasks",
             SideTab::Git => "Git",
             SideTab::Files => "Files",
+            SideTab::Notes => "Notes",
         }
     }
 
@@ -41,6 +43,7 @@ impl SideTab {
             SideTab::Tasks => Some(Action::ToggleTasks),
             SideTab::Git => None,
             SideTab::Files => Some(Action::ToggleFiles),
+            SideTab::Notes => Some(Action::ToggleNotes),
         }
     }
 }
@@ -73,6 +76,7 @@ impl App {
             SideTab::Tasks => self.view_tasks(),
             SideTab::Git => self.view_git_log(),
             SideTab::Files => self.view_files(),
+            SideTab::Notes => self.view_notes(),
         };
         container(column![header, body].spacing(12).padding([10, 12]))
             .width(300)
@@ -93,6 +97,7 @@ mod tests {
             ("\"Tasks\"", SideTab::Tasks),
             ("\"Git\"", SideTab::Git),
             ("\"Files\"", SideTab::Files),
+            ("\"Notes\"", SideTab::Notes),
             ("\"tasks\"", SideTab::Tasks),
             ("\"files\"", SideTab::Files),
         ] {

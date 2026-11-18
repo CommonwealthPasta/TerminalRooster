@@ -546,6 +546,40 @@ pub fn file_editor(t: &Theme, status: text_editor::Status) -> text_editor::Style
     }
 }
 
+/// A note's text in the Notes tab, set into the panel like a field.
+pub fn note_editor(t: &Theme, status: text_editor::Status) -> text_editor::Style {
+    let edge_color = match status {
+        text_editor::Status::Active => edge(t),
+        text_editor::Status::Hovered => ink(t).scale_alpha(0.32),
+        text_editor::Status::Focused { .. } => accent(t),
+        text_editor::Status::Disabled => line(t),
+    };
+    text_editor::Style {
+        background: field(t).into(),
+        border: Border { width: 1.0, color: edge_color, radius: RADIUS.into() },
+        placeholder: faint(t),
+        value: ink(t),
+        selection: accent(t).scale_alpha(0.3),
+    }
+}
+
+/// A note's tab in the Notes tab: the shown one raised, like a chosen [`segment`].
+pub fn note_tab(selected: bool) -> impl Fn(&Theme) -> container::Style {
+    move |t| {
+        let style = container::Style { border: border::rounded(RADIUS_SM), ..container::Style::default() };
+        if selected {
+            container::Style {
+                background: Some(chosen(t).into()),
+                text_color: Some(ink(t)),
+                shadow: shadow_sm(t),
+                ..style
+            }
+        } else {
+            container::Style { text_color: Some(muted(t)), ..style }
+        }
+    }
+}
+
 // Surfaces
 
 /// The side columns: projects, sessions and the right panel.

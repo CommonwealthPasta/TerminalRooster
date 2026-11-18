@@ -22,6 +22,7 @@ mod keymap;
 mod layout_conv;
 mod leave_room;
 mod logging;
+mod notes;
 mod notify;
 mod on_escape;
 mod panes;

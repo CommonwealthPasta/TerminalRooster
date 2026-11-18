@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use termroost_core::session::shell::{self, ShellOption};
 use termroost_core::session::{bundled_bash, bundled_nvim};
 use termroost_core::{
-    Activity, AgentKind, Axis, Command, Core, Event, GroupId, Outcome, PaneId, ProjectId, TabId, TaskId, git,
+    Activity, AgentKind, Axis, Command, Core, Event, GroupId, NoteId, Outcome, PaneId, ProjectId, TabId, TaskId, git,
 };
 
 use crate::color_picker::{ColorPicker, Hsl};
@@ -23,6 +23,7 @@ use crate::git_view::GitViewMsg;
 use crate::groups;
 use crate::keymap::{Action, Combo, Keymap};
 use crate::layout_conv;
+use crate::notes::{NOTE_EDITOR, Notes, NotesMsg};
 use crate::notify::{self, Category, Level, Notice, PaneNotices, Toast};
 use crate::remotes::{RemotesForm, RemotesMsg};
 use crate::side_panel::SideTab;
@@ -90,6 +91,8 @@ pub struct Prefs {
     /// The terminal editor's command line (the file is added at the end);
     /// empty finds Neovim or Vim.
     pub editor_command: String,
+    /// The note the Notes tab shows.
+    pub note: Option<NoteId>,
 }
 
 impl Default for Prefs {
@@ -116,6 +119,7 @@ impl Default for Prefs {
             pull_rebase: true,
             file_editor: FileEditor::Builtin,
             editor_command: String::new(),
+            note: None,
         }
     }
 }
@@ -158,6 +162,7 @@ pub enum RenameTarget {
     Project(ProjectId),
     Group(GroupId),
     Tab(TabId),
+    Note(NoteId),
 }
 
 #[derive(Clone, Debug)]
@@ -215,6 +220,8 @@ pub enum Dialog {
         doc: DocId,
         name: String,
     },
+    /// Closing every note.
+    CloseAllNotes,
 }
 
 /// State of the settings page while it is open.
@@ -401,6 +408,7 @@ pub enum Message {
     ClosePanel,
     Files(FilesMsg),
     Editor(EditorMsg),
+    Notes(NotesMsg),
     /// Edit files in the built-in editor or in a terminal editor (settings).
     FileEditor(FileEditor),
     /// The terminal editor's command line changed (settings).
@@ -488,6 +496,8 @@ pub struct App {
     pub(crate) open_files_dirty: bool,
     /// Open files are being compared with the disk.
     pub(crate) disk_polling: bool,
+    /// The text of the notes, being edited.
+    pub(crate) notes: Notes,
     /// Tabs with output the user has not looked at yet.
     pub(crate) activity: HashSet<TabId>,
     /// What goes on in the terminals that are not idle (see [`Activity`]).
@@ -588,6 +598,7 @@ impl App {
         let prefs = Prefs::load(&core);
         let themes = ThemeStore::load(&core);
         let keymap = Arc::new(Keymap::new(&prefs.shortcuts));
+        let notes = Notes::of(&core.state().notes);
         let mut app = App {
             core,
             grids: HashMap::new(),
@@ -605,6 +616,7 @@ impl App {
             next_version: 0,
             open_files_dirty: false,
             disk_polling: false,
+            notes,
             activity: HashSet::new(),
             busy: HashMap::new(),
             error: None,
@@ -764,6 +776,7 @@ impl App {
             || self.prefs_dirty
             || self.themes_dirty
             || self.open_files_dirty
+            || self.notes.unsaved()
             || !self.toasts.is_empty()
         {
             subs.push(iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick));
@@ -864,7 +877,7 @@ impl App {
         }
     }
 
-    fn mark_prefs(&mut self) {
+    pub(crate) fn mark_prefs(&mut self) {
         self.prefs_dirty = true;
     }
 
@@ -886,6 +899,18 @@ impl App {
         }
         if let Some(value) = self.take_open_files_value() {
             self.dispatch(Command::SetGuiValue { key: App::OPEN_FILES_KEY.into(), value });
+        }
+        for (note, text) in self.notes.take_unsaved() {
+            self.dispatch(Command::SetNoteText { note, text });
+        }
+    }
+
+    /// Where the keyboard goes once a rename ends: back to the note's text
+    /// for a note, else to the terminal.
+    fn after_rename(&self, target: RenameTarget) -> Task<Message> {
+        match target {
+            RenameTarget::Note(_) => operation::focus(NOTE_EDITOR),
+            _ => self.focus_active(),
         }
     }
 
@@ -923,6 +948,7 @@ impl App {
         let quiet = match &message {
             Message::Core(_) | Message::Tick | Message::Key(_) | Message::Files(FilesMsg::Listed(_)) => true,
             Message::Editor(msg) => !msg.loggable(),
+            Message::Notes(msg) => !msg.loggable(),
             Message::GitView(msg) => !msg.loggable(),
             _ => false,
         };
@@ -1089,6 +1115,7 @@ impl App {
                             | Dialog::ConfirmDeleteTab(_)
                             | Dialog::ConfirmQuit { .. }
                             | Dialog::CloseFile { .. }
+                            | Dialog::CloseAllNotes
                     )
                 ) {
                     return self.submit_dialog();
@@ -1576,6 +1603,7 @@ impl App {
                     RenameTarget::Project(p) => s.project(p).map(|p| p.name.clone()),
                     RenameTarget::Group(g) => s.group(g).map(|g| g.name.clone()),
                     RenameTarget::Tab(t) => s.tab(t).map(|t| t.title.clone()),
+                    RenameTarget::Note(n) => s.note(n).map(|n| n.title.clone()),
                 };
                 if let Some(value) = value {
                     self.rename = Some(Rename { target, value });
@@ -1588,19 +1616,19 @@ impl App {
                 }
             }
             Message::RenameCommit => {
-                if let Some(r) = self.rename.take() {
-                    let cmd = match r.target {
-                        RenameTarget::Project(project) => Command::RenameProject { project, name: r.value },
-                        RenameTarget::Group(group) => Command::RenameGroup { group, name: r.value },
-                        RenameTarget::Tab(tab) => Command::RenameTab { tab, title: r.value },
-                    };
-                    self.dispatch(cmd);
-                }
-                return self.focus_active();
+                let Some(r) = self.rename.take() else { return self.focus_active() };
+                let cmd = match r.target {
+                    RenameTarget::Project(project) => Command::RenameProject { project, name: r.value },
+                    RenameTarget::Group(group) => Command::RenameGroup { group, name: r.value },
+                    RenameTarget::Tab(tab) => Command::RenameTab { tab, title: r.value },
+                    RenameTarget::Note(note) => Command::RenameNote { note, title: r.value },
+                };
+                self.dispatch(cmd);
+                return self.after_rename(r.target);
             }
             Message::RenameCancel => {
-                self.rename = None;
-                return self.focus_active();
+                let Some(r) = self.rename.take() else { return self.focus_active() };
+                return self.after_rename(r.target);
             }
 
             Message::FocusPane(pane) => {
@@ -1691,6 +1719,8 @@ impl App {
                     // keyboard from the terminal.
                     SideTab::Git => Task::batch([self.refresh_log(), self.focus_active()]),
                     SideTab::Files => Task::batch([self.refresh_files(), self.focus_active()]),
+                    // Opened to type or paste into.
+                    SideTab::Notes => operation::focus(NOTE_EDITOR),
                 };
             }
             Message::ClosePanel => {
@@ -1700,6 +1730,7 @@ impl App {
             }
             Message::Files(msg) => return self.update_files(msg),
             Message::Editor(msg) => return self.update_editor(msg),
+            Message::Notes(msg) => return self.update_notes(msg),
             Message::FileEditor(editor) => {
                 self.prefs.file_editor = editor;
                 self.mark_prefs();
@@ -1902,6 +1933,7 @@ impl App {
                 return self.update(Message::Editor(EditorMsg::Discard(doc)));
             }
             Dialog::SaveConflict { doc, .. } => return self.update(Message::Editor(EditorMsg::SaveAnyway(doc))),
+            Dialog::CloseAllNotes => return self.update(Message::Notes(NotesMsg::CloseAll)),
             Dialog::ConfirmQuit { dont_ask, .. } => {
                 if dont_ask {
                     self.prefs.confirm_quit = false;
@@ -2243,6 +2275,7 @@ impl App {
             }
             Action::ToggleTasks => return self.update(Message::TogglePanel(SideTab::Tasks)),
             Action::ToggleFiles => return self.update(Message::TogglePanel(SideTab::Files)),
+            Action::ToggleNotes => return self.update(Message::TogglePanel(SideTab::Notes)),
             Action::FontBigger | Action::FontSmaller | Action::FontReset => {
                 self.prefs.font_size = match action {
                     Action::FontBigger => (self.prefs.font_size + 1.0).min(32.0),
