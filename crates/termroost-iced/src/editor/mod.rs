@@ -5,7 +5,7 @@
 mod disk;
 mod external;
 mod highlight;
-mod history;
+pub(crate) mod history;
 mod keys;
 mod saved;
 mod text;
@@ -140,11 +140,7 @@ impl TextDoc {
 
     /// Before an edit of `kind`: keeps the text for undo if the edit starts a new step.
     fn keep_for_undo(&mut self, kind: history::Kind) {
-        let now = Instant::now();
-        if self.history.starts_step(kind, now) {
-            self.history.push(Snapshot::of(&self.content, self.version));
-        }
-        self.history.edited(kind, now);
+        self.history.before_edit(kind, &self.content, self.version);
     }
 
     /// Shows `file` as read from disk now, with nothing left unsaved. The
