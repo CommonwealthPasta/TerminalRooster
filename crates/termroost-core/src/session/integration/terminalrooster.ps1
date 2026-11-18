@@ -3,11 +3,32 @@
 # After each command typed at the prompt, tells the terminal how it ended:
 # OSC 633;E with the command line, then OSC 133;D with the exit status.
 # When the working directory changes, reports it with OSC 633;P;Cwd=<dir>.
+# Keeps the terminal's own history in the file TERMINALROOSTER_HISTFILE names.
 # TerminalRooster runs this after the profile, so it wraps whatever prompt
 # function the profile set up (oh-my-posh, starship, ...).
 
 if (-not $global:__TerminalRoosterLoaded) {
     $global:__TerminalRoosterLoaded = $true
+
+    # The terminal's own history, so that after a restart Up brings back what
+    # was typed here. A new terminal's file starts as a copy of PSReadLine's
+    # usual one. PSReadLine reads its file at the first prompt, which comes
+    # after this, and adds each command to it as soon as it ran.
+    & {
+        $file = $env:TERMINALROOSTER_HISTFILE
+        Remove-Item Env:TERMINALROOSTER_HISTFILE -ErrorAction Ignore
+        if (-not $file -or -not (Get-Module PSReadLine)) { return }
+        $options = Get-PSReadLineOption
+        if ($options.HistorySaveStyle -eq 'SaveNothing') { return }
+        if (-not (Test-Path -LiteralPath $file)) {
+            if (Test-Path -LiteralPath $options.HistorySavePath) {
+                Copy-Item -LiteralPath $options.HistorySavePath -Destination $file -ErrorAction Ignore
+            } else {
+                try { [IO.File]::WriteAllText($file, '') } catch { }
+            }
+        }
+        Set-PSReadLineOption -HistorySavePath $file
+    }
     $global:__TerminalRoosterLastId = (Get-History -Count 1).Id
     $global:__TerminalRoosterPrompt = $function:prompt
     $global:__TerminalRoosterCwd = $null

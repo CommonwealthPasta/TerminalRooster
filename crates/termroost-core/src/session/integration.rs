@@ -142,6 +142,7 @@ pub(crate) fn apply(shell: &mut ShellCommand, env: &mut HashMap<String, String>,
             }
             shell.args.push("-Command".into());
             shell.args.push(format!(". {}", quote(&dir.join(PWSH_FILE).display().to_string(), true)));
+            env.insert(HISTORY_ENV.into(), history_file(dir, pane, "ps_history").display().to_string());
         }
         _ => {}
     }
@@ -174,13 +175,15 @@ mod tests {
         apply(&mut shell, &mut env, dir, PaneId(7));
         assert_eq!(shell.args[..3], ["-NoLogo", "-NoExit", "-Command"]);
         assert!(shell.args[3].starts_with(". '") && shell.args[3].ends_with("terminalrooster.ps1'"));
-        assert!(env.is_empty());
+        assert_eq!(Path::new(&env[HISTORY_ENV]), dir.join("history").join("7.ps_history"));
 
         for line in ["pwsh -c Get-Date", "pwsh -Command x", "pwsh -File a.ps1", "pwsh a.ps1", "pwsh -NonInteractive"] {
             let mut shell = cmd(line);
             let before = shell.clone();
+            let mut env = HashMap::new();
             apply(&mut shell, &mut env, dir, PaneId(7));
             assert_eq!(shell, before, "{line}");
+            assert!(env.is_empty(), "{line}");
         }
         let mut shell = cmd("powershell -NoExit");
         apply(&mut shell, &mut env, dir, PaneId(7));

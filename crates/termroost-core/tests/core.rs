@@ -831,6 +831,27 @@ fn restored_terminals_keep_their_own_bash_history() {
     assert_eq!(std::fs::read_to_string(&shared).unwrap(), "echo from-shared\n");
 }
 
+/// The same for Windows PowerShell, and PowerShell 7 where installed. Their
+/// usual history (PSReadLine's) can't be moved to the test's folder; it is
+/// only read.
+#[cfg(windows)]
+#[test]
+fn restored_terminals_keep_their_own_powershell_history() {
+    use termroost_core::session::shell;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    for exe in ["powershell", "pwsh"] {
+        let Some(program) = shell::find_program(exe, &path) else {
+            eprintln!("{exe} not installed; skipping it");
+            continue;
+        };
+        eprintln!("using {}", program.display());
+        let dir = tempfile::tempdir().unwrap();
+        let shell = shell::join_command_line(&[program.display().to_string().as_str(), "-NoLogo", "-NoProfile"]);
+        let history = |pane: PaneId| dir.path().join(format!("shell-integration/history/{pane}.ps_history"));
+        restored_terminals_keep_their_own_history(dir.path(), &shell, history, |x| format!("echo \"{x}-$(6*7)\""));
+    }
+}
+
 /// Git Bash's `bin\bash.exe` runs the real bash as a child; an idle Git Bash
 /// must still count as idle when its session moves. Skipped without Git Bash.
 #[cfg(windows)]
