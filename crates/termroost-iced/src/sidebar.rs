@@ -55,8 +55,11 @@ pub fn branch_label<'a>(head: &Head, size: f32, max: usize) -> Element<'a, Messa
     .into()
 }
 
+/// Text size of [`muted_text`].
+const MUTED_SIZE: f32 = 11.0;
+
 pub fn muted_text<'a>(s: impl text::IntoFragment<'a>) -> iced::widget::Text<'a> {
-    text(s).size(11).style(ui::muted)
+    text(s).size(MUTED_SIZE).style(ui::muted)
 }
 
 /// Shows a path with the home directory abbreviated to `~`.
@@ -104,6 +107,8 @@ pub fn matches_search(name: &str, group: Option<&str>, dir: &Path, query: &str) 
 
 /// Text size of a list item's name.
 const NAME_SIZE: f32 = 14.0;
+/// Space around the text of a list item.
+const ITEM_PADDING: Padding = Padding { top: 7.0, right: 6.0, bottom: 7.0, left: 6.0 };
 
 /// `content` centered on the first line of a list item's name, where it
 /// stays when the name wraps.
@@ -302,7 +307,7 @@ impl App {
             label = label.push(marker(notice, tabs().any(|t| self.activity.contains(&t.id))));
         }
         let label = label.push(ui::badge(projects.len().to_string(), Tone::Neutral));
-        let mut body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
+        let mut body = mouse_area(container(label).padding(ITEM_PADDING).width(Length::Fill))
             .on_double_click(Message::GroupDoubleClicked(group.id));
         if !searching {
             // On release, so pressing it to drag it doesn't open or close it.
@@ -338,7 +343,7 @@ impl App {
             muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None),
         ]
         .spacing(1);
-        let body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
+        let body = mouse_area(container(label).padding(ITEM_PADDING).width(Length::Fill))
             .on_press(Message::SelectProject(p.id))
             .on_double_click(Message::StartRename(RenameTarget::Project(p.id)));
         let actions = item_actions(
@@ -434,7 +439,7 @@ impl App {
         }
         let label = label.push(muted_text(subtitle));
         let target = DropTarget::Session(tab.id);
-        let body = mouse_area(container(label).padding([7, 6]).width(Length::Fill))
+        let body = mouse_area(container(label).padding(ITEM_PADDING).width(Length::Fill))
             .on_press(Message::SelectTab(tab.id))
             .on_double_click(Message::StartRename(RenameTarget::Tab(tab.id)));
         let actions = item_actions(
