@@ -47,6 +47,7 @@ impl App {
         if list_shown {
             if !roomy {
                 f.render_widget(Clear, Rect { width: list.width + 1, ..list });
+                self.hits.list = Rect { width: list.width + 1, ..list };
             }
             self.draw_list(f, list);
             let beside: Vec<Rect> =
@@ -59,6 +60,9 @@ impl App {
     // ---- the list ----
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
+        if self.hits.list.is_empty() {
+            self.hits.list = area;
+        }
         if area.height == 0 {
             return;
         }
@@ -138,6 +142,7 @@ impl App {
                 (tab.title.clone(), 4, self.session_status(&tab))
             }
         };
+        self.hits.rows.push((line.y, row));
         let pointed = self.focus == Focus::List && cursor == Some(row);
         let is_shown = matches!(row, Row::Session(t) if Some(t) == shown);
         let buf = f.buffer_mut();
@@ -214,8 +219,12 @@ impl App {
     /// The lines under the list: a note, a question, or the keys that work here.
     fn list_footer(&self, width: usize) -> Vec<Vec<(String, Style)>> {
         let mut lines = Vec::new();
-        if let Some((Note::Problem(text), _)) = &self.note {
-            lines.extend(wrap(text, width).into_iter().take(3).map(|l| vec![(l, ui::bad())]));
+        if let Some((note, _)) = &self.note {
+            let (text, style) = match note {
+                Note::Done(t) => (t, ui::good()),
+                Note::Problem(t) => (t, ui::bad()),
+            };
+            lines.extend(wrap(text, width).into_iter().take(3).map(|l| vec![(l, style)]));
         }
         let keys: &[(&str, &str)] = match &self.edit {
             Some(Edit::Rename { .. }) => &[("↵", "save"), ("esc", "cancel")],
@@ -275,7 +284,11 @@ impl App {
             self.draw_empty(f, area);
             return vec![Rect { height: 1, ..area }];
         };
-        let arranged = panes::arrange(&tab.layout, area);
+        let layout = match &self.resizing {
+            Some((t, l)) if *t == tab.id => l.clone(),
+            _ => tab.layout.clone(),
+        };
+        let arranged = panes::arrange(&layout, area);
         let focused = self.focused_pane();
         for placed in &arranged.panes {
             self.draw_pane(f, *placed, &tab, Some(placed.pane) == focused);
@@ -286,6 +299,7 @@ impl App {
         }
         self.hits.tab = Some(tab.id);
         self.hits.panes = arranged.panes;
+        self.hits.dividers = arranged.dividers;
         headers
     }
 
@@ -300,7 +314,11 @@ impl App {
             && content.width > 0
             && content.height > 0
         {
-            h.resize(GridSize { cols: content.width, rows: content.height, ..h.size() });
+            // While a divider is dragged the terminals keep their size: each
+            // resize makes Windows' console repaint, so they resize once, on release.
+            if self.resizing.is_none() {
+                h.resize(GridSize { cols: content.width, rows: content.height, ..h.size() });
+            }
             let cursor = h.with_content(|c| {
                 paint(f.buffer_mut(), content, c);
                 c.cursor
@@ -452,6 +470,13 @@ fn paint(buf: &mut Buffer, area: Rect, c: &RenderContent) {
                 if on {
                     style = style.add_modifier(m);
                 }
+            }
+            if cell.selected {
+                style = if style.add_modifier.contains(Modifier::REVERSED) {
+                    style.remove_modifier(Modifier::REVERSED)
+                } else {
+                    style.add_modifier(Modifier::REVERSED)
+                };
             }
             out.set_style(style);
         }

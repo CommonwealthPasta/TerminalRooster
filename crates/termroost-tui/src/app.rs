@@ -1,5 +1,5 @@
-//! What has the keyboard, what is selected, and what each key and core
-//! event does. Drawing is in `view.rs`.
+//! What has the keyboard, what is selected, and what each key, click and
+//! core event does. Drawing is in `view.rs`.
 //!
 //! The screen has two places: the list of projects and their sessions on the
 //! left, and the selected session's terminals. Alt+arrows move between them
@@ -9,13 +9,19 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::Rect;
-use termroost_core::{Alert, Axis, Command, Core, Event, Outcome, PaneId, ProjectId, TabId, TerminalHandle, git};
+use ratatui::crossterm::event::{
+    Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton as CButton, MouseEvent,
+    MouseEventKind as CMouse,
+};
+use ratatui::layout::{Position, Rect};
+use termroost_core::{
+    Alert, Axis, Command, Core, Event, Layout, MouseEventKind, MouseInput, Outcome, PaneId, ProjectId, SelectionKind,
+    TabId, TerminalHandle, git,
+};
 
-use crate::panes::Placed;
+use crate::panes::{Divider, Placed};
 use crate::text_field::TextField;
-use crate::{folders, input};
+use crate::{clipboard, folders, input, panes};
 
 pub enum Msg {
     Input(TermEvent),
@@ -60,17 +66,32 @@ pub enum Edit {
 }
 
 pub enum Note {
+    Done(String),
     Problem(String),
 }
 
-/// Where the terminals were drawn, for moving between them.
+/// A mouse button held down.
+enum Drag {
+    /// Moving a divider; the layout is saved on release.
+    Resize { tab: TabId, divider: Divider, layout: Layout },
+    /// The program in the terminal gets the mouse.
+    Forward { pane: PaneId, button: termroost_core::MouseButton },
+    /// Selecting text, from this cell.
+    Select { pane: PaneId, from: (usize, usize), moved: bool },
+}
+
+/// Where things were drawn, for the mouse.
 #[derive(Default)]
 pub struct Hits {
+    pub list: Rect,
+    pub rows: Vec<(u16, Row)>,
     pub tab: Option<TabId>,
     pub panes: Vec<Placed>,
+    pub dividers: Vec<Divider>,
 }
 
 const NOTE_FOR: Duration = Duration::from_millis(2500);
+const MULTI_CLICK: Duration = Duration::from_millis(450);
 
 pub struct App {
     pub core: Core,
@@ -85,11 +106,13 @@ pub struct App {
     pub note: Option<(Note, Instant)>,
     pub hits: Hits,
     pub home: Option<PathBuf>,
+    /// A layout being resized with the mouse, shown before it is saved.
+    pub resizing: Option<(TabId, Layout)>,
     /// First row of the list in view.
     pub list_scroll: usize,
     /// Some session's agent is working, so its spinner turns.
     pub animating: bool,
-    /// Escape sequences for the outer terminal (its title).
+    /// Escape sequences for the outer terminal (clipboard, title).
     pub out: Vec<String>,
     pub title: String,
     pub cursor_shape: Option<termroost_core::CursorShape>,
@@ -97,6 +120,9 @@ pub struct App {
     pub dirty: bool,
     pub quit: bool,
     launch_dir: PathBuf,
+    drag: Option<Drag>,
+    /// The last left press in a terminal: when, where, and how many in a row.
+    last_click: Option<(Instant, PaneId, u16, u16, u8)>,
     /// The terminal last told it has the keyboard.
     keyboard: Option<PaneId>,
 }
@@ -114,6 +140,7 @@ impl App {
             note: None,
             hits: Hits::default(),
             home: directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()),
+            resizing: None,
             list_scroll: 0,
             animating: false,
             out: Vec::new(),
@@ -123,6 +150,8 @@ impl App {
             dirty: true,
             quit: false,
             launch_dir,
+            drag: None,
+            last_click: None,
             keyboard: None,
         };
         if let Some(dir) = open {
@@ -273,13 +302,13 @@ impl App {
                 return;
             }
             Event::ProcessExited { pane, code } => self.exited(pane, code),
+            Event::ClipboardStore(text) => self.out.push(clipboard::osc52(&text)),
             Event::Alert { pane, alert } => {
                 if !(self.window_focused && self.shown(pane)) {
                     self.alerts.insert(pane, alert);
                 }
             }
             Event::Bell(_)
-            | Event::ClipboardStore(_)
             | Event::CodexHookReported
             | Event::AgentObserved { .. }
             | Event::CwdChanged { .. }
@@ -304,6 +333,7 @@ impl App {
     fn input(&mut self, ev: TermEvent) {
         match ev {
             TermEvent::Key(k) if k.kind != KeyEventKind::Release => self.key(k),
+            TermEvent::Mouse(m) => self.mouse(m),
             TermEvent::Paste(text) => self.paste(&text),
             TermEvent::FocusGained => self.window_focused = true,
             TermEvent::FocusLost => self.window_focused = false,
@@ -571,6 +601,15 @@ impl App {
         }
     }
 
+    fn click_row(&mut self, row: Row) {
+        self.edit = None;
+        self.select(row);
+        self.focus = match row {
+            Row::Session(_) => Focus::Terminal,
+            Row::Project(_) => Focus::List,
+        };
+    }
+
     // ---- changes ----
 
     fn new_session(&mut self) {
@@ -701,6 +740,162 @@ impl App {
             self.quit = true;
         } else {
             self.edit = Some(Edit::Quit(names));
+        }
+    }
+
+    // ---- mouse ----
+
+    fn mouse(&mut self, m: MouseEvent) {
+        let (x, y) = (m.column, m.row);
+        let mods = input::modifiers(m.modifiers);
+        match m.kind {
+            CMouse::Down(b) => self.press(b, x, y, mods),
+            CMouse::Drag(_) => self.drag_to(x, y),
+            CMouse::Up(_) => self.release(x, y),
+            CMouse::Moved => {
+                if let Some((placed, col, row)) = self.cell_at(x, y)
+                    && let Some(h) = self.core.terminal(placed.pane)
+                    && h.wants_mouse()
+                {
+                    h.mouse(&MouseInput { kind: MouseEventKind::Move { held: None }, col, row, mods });
+                }
+            }
+            CMouse::ScrollUp | CMouse::ScrollDown => {
+                let delta = if m.kind == CMouse::ScrollUp { 3 } else { -3 };
+                if let Some((placed, col, row)) = self.cell_at(x, y)
+                    && let Some(h) = self.core.terminal(placed.pane)
+                {
+                    h.scroll_lines(delta, col, row);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The terminal cell under the mouse, if it is over one (and not under the list).
+    fn cell_at(&self, x: u16, y: u16) -> Option<(Placed, usize, usize)> {
+        if self.hits.list.contains(Position { x, y }) {
+            return None;
+        }
+        let placed = *self.hits.panes.iter().find(|p| p.content().contains(Position { x, y }))?;
+        let c = placed.content();
+        Some((placed, (x - c.x) as usize, (y - c.y) as usize))
+    }
+
+    /// The cell in the pane's content nearest to the mouse.
+    fn clamped_cell(&self, pane: PaneId, x: u16, y: u16) -> Option<(usize, usize)> {
+        let c = self.hits.panes.iter().find(|p| p.pane == pane)?.content();
+        if c.width == 0 || c.height == 0 {
+            return None;
+        }
+        let col = x.clamp(c.x, c.right() - 1) - c.x;
+        let row = y.clamp(c.y, c.bottom() - 1) - c.y;
+        Some((col as usize, row as usize))
+    }
+
+    fn press(&mut self, button: CButton, x: u16, y: u16, mods: termroost_core::Modifiers) {
+        let left = button == CButton::Left;
+        if self.hits.list.contains(Position { x, y }) {
+            if left && let Some((_, row)) = self.hits.rows.iter().find(|(ry, _)| *ry == y).copied() {
+                self.click_row(row);
+            }
+            return;
+        }
+        if left
+            && let Some(tab) = self.hits.tab
+            && let Some(divider) = self.hits.dividers.iter().find(|d| d.hit(x, y)).cloned()
+            && let Some(layout) = self.core.state().tab(tab).map(|t| t.layout.clone())
+        {
+            self.resizing = Some((tab, layout.clone()));
+            self.drag = Some(Drag::Resize { tab, divider, layout });
+            return;
+        }
+        let Some(placed) = self.hits.panes.iter().find(|p| p.area.contains(Position { x, y })).copied() else {
+            return;
+        };
+        self.edit = None;
+        self.focus = Focus::Terminal;
+        if self.focused_pane() != Some(placed.pane) {
+            self.dispatch(Command::FocusPane(placed.pane));
+        }
+        let Some((_, col, row)) = self.cell_at(x, y) else { return };
+        let Some(h) = self.core.terminal(placed.pane) else { return };
+        let pane = placed.pane;
+        if h.wants_mouse() && !mods.shift {
+            let button = input::button(button);
+            h.mouse(&MouseInput { kind: MouseEventKind::Press(button), col, row, mods });
+            self.drag = Some(Drag::Forward { pane, button });
+            return;
+        }
+        if !left {
+            return;
+        }
+        let count = match self.last_click {
+            Some((at, p, cx, cy, n)) if p == pane && (cx, cy) == (x, y) && at.elapsed() < MULTI_CLICK => n % 3 + 1,
+            _ => 1,
+        };
+        self.last_click = Some((Instant::now(), pane, x, y, count));
+        let kind = match count {
+            1 => SelectionKind::Simple,
+            2 => SelectionKind::Word,
+            _ => SelectionKind::Line,
+        };
+        h.select_start(col, row, false, kind);
+        self.drag = Some(Drag::Select { pane, from: (col, row), moved: count > 1 });
+    }
+
+    fn drag_to(&mut self, x: u16, y: u16) {
+        match &mut self.drag {
+            Some(Drag::Resize { tab, divider, layout }) => {
+                panes::set_ratio(layout, &divider.path, divider.ratio_at(x, y));
+                self.resizing = Some((*tab, layout.clone()));
+            }
+            Some(Drag::Forward { pane, button }) => {
+                let (pane, button) = (*pane, *button);
+                if let Some((col, row)) = self.clamped_cell(pane, x, y)
+                    && let Some(h) = self.core.terminal(pane)
+                {
+                    let kind = MouseEventKind::Move { held: Some(button) };
+                    h.mouse(&MouseInput { kind, col, row, mods: termroost_core::Modifiers::NONE });
+                }
+            }
+            Some(Drag::Select { pane, from, moved }) => {
+                *moved = true;
+                let (pane, from) = (*pane, *from);
+                if let Some((col, row)) = self.clamped_cell(pane, x, y)
+                    && let Some(h) = self.core.terminal(pane)
+                {
+                    h.select_update(col, row, (row, col) >= (from.1, from.0));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn release(&mut self, x: u16, y: u16) {
+        match self.drag.take() {
+            Some(Drag::Resize { tab, layout, .. }) => {
+                self.resizing = None;
+                self.dispatch(Command::SetLayout { tab, layout });
+            }
+            Some(Drag::Forward { pane, button }) => {
+                if let Some((col, row)) = self.clamped_cell(pane, x, y)
+                    && let Some(h) = self.core.terminal(pane)
+                {
+                    let kind = MouseEventKind::Release(button);
+                    h.mouse(&MouseInput { kind, col, row, mods: termroost_core::Modifiers::NONE });
+                }
+            }
+            Some(Drag::Select { pane, moved, .. }) => {
+                let Some(h) = self.core.terminal(pane) else { return };
+                if !moved {
+                    h.clear_selection();
+                } else if let Some(text) = h.selection_text() {
+                    self.out.push(clipboard::osc52(&text));
+                    self.note = Some((Note::Done("Copied".into()), Instant::now()));
+                }
+            }
+            None => {}
         }
     }
 }

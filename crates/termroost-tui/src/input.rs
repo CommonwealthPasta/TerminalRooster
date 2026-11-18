@@ -1,7 +1,7 @@
-//! crossterm keys in the core's terms.
+//! crossterm keys and mouse buttons in the core's terms.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use termroost_core::{Key, KeyInput, Modifiers, NamedKey};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton as CMouseButton};
+use termroost_core::{Key, KeyInput, Modifiers, MouseButton, NamedKey};
 
 pub fn modifiers(m: KeyModifiers) -> Modifiers {
     Modifiers {
@@ -46,6 +46,14 @@ pub fn key(k: &KeyEvent) -> Option<KeyInput> {
         KeyCode::Delete => named(NamedKey::Delete),
         KeyCode::F(n) => named(NamedKey::F(n)),
         _ => None,
+    }
+}
+
+pub fn button(b: CMouseButton) -> MouseButton {
+    match b {
+        CMouseButton::Left => MouseButton::Left,
+        CMouseButton::Right => MouseButton::Right,
+        CMouseButton::Middle => MouseButton::Middle,
     }
 }
 

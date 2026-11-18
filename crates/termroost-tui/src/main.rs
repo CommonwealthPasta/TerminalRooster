@@ -3,6 +3,7 @@
 //! One of the two runs at a time.
 
 mod app;
+mod clipboard;
 mod colors;
 mod folders;
 mod input;
@@ -198,7 +199,7 @@ impl Screen {
         let mut out = io::stdout();
         // Saves the window title, to put it back when done.
         out.write_all(b"\x1b[22;0t")?;
-        execute!(out, terminal::EnterAlternateScreen)?;
+        execute!(out, terminal::EnterAlternateScreen, event::EnableMouseCapture)?;
         // On Windows the console reports focus by itself, and crossterm reads
         // no bracketed paste there: turning these on would turn their escape
         // sequences into keys.
@@ -231,7 +232,7 @@ fn restore() {
     }
     #[cfg(not(windows))]
     let _ = execute!(out, event::DisableBracketedPaste, event::DisableFocusChange);
-    let _ = execute!(out, SetCursorStyle::DefaultUserShape, Show);
+    let _ = execute!(out, event::DisableMouseCapture, SetCursorStyle::DefaultUserShape, Show);
     let _ = execute!(out, terminal::LeaveAlternateScreen);
     let _ = out.write_all(b"\x1b[23;0t");
     let _ = out.flush();
