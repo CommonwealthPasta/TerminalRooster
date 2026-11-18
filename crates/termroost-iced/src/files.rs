@@ -18,10 +18,10 @@
 //! Each entry has an icon for its kind of file (see [`file_icons`]).
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use iced::widget::{button, column, container, mouse_area, row, space, text};
+use iced::widget::{button, column, container, mouse_area, operation, row, space, text};
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
@@ -31,7 +31,7 @@ use crate::icons::{Icon, icon};
 use crate::reveal;
 use crate::side_panel::SideTab;
 use crate::sidebar::{muted_text, short_dir};
-use crate::theme;
+use crate::theme::{self, Tone};
 use crate::ui;
 
 /// Entries shown per folder; the rest are counted.
@@ -75,8 +75,22 @@ pub struct FilesState {
     again: HashSet<PathBuf>,
     /// The entry whose menu is open (it was right-clicked).
     menu: Option<PathBuf>,
+    /// A file being named, shown at the top of its folder.
+    new_file: Option<NewFile>,
     /// Hears of changes in the folders shown.
     pub(crate) watch: FolderWatch,
+}
+
+/// A new file, until it has a name.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NewFile {
+    /// The folder it goes in.
+    dir: PathBuf,
+    name: String,
+    /// Why it could not be created.
+    error: Option<String>,
+    /// It is being created.
+    creating: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -94,9 +108,55 @@ pub enum FilesMsg {
     /// An entry was right-clicked: open its menu (or close it, if open).
     Menu(PathBuf),
     /// Show a file, or open a folder, in the system's file manager.
-    Reveal { path: PathBuf, is_dir: bool },
+    Reveal {
+        path: PathBuf,
+        is_dir: bool,
+    },
     /// The file manager was started, or why not.
     Revealed(Result<(), String>),
+    /// Name a new file in this folder.
+    NewFile(PathBuf),
+    NewFileName(String),
+    /// Enter in the name.
+    CreateFile,
+    /// The file was created in `dir` (and opens), or why not.
+    Created {
+        dir: PathBuf,
+        path: PathBuf,
+        result: Result<(), String>,
+    },
+}
+
+/// The name field of a new file.
+const NEW_FILE_INPUT: &str = "new-file-input";
+
+/// Where a file named `name` goes in `dir`. The name may go through folders
+/// (`docs/notes.md`), but not out of `dir`.
+pub fn new_file_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let name = name.trim();
+    let plain = Path::new(name).components().all(|c| matches!(c, Component::Normal(_)));
+    if name.is_empty() || !plain || name.ends_with(std::path::is_separator) {
+        return Err("Not a file name".into());
+    }
+    Ok(dir.join(name))
+}
+
+/// Creates an empty file at `path`, and the folders it goes in. A file
+/// already there is left alone.
+pub fn create_file(path: &Path) -> Result<(), String> {
+    let exists = || format!("{} already exists", path.file_name().unwrap_or_default().to_string_lossy());
+    // Checked first: on Windows, a folder in the way is "access denied".
+    if path.symlink_metadata().is_ok() {
+        return Err(exists());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// The files and folders in `dir`: folders first, then by name ignoring case.
@@ -148,6 +208,8 @@ pub enum Row<'a> {
     Note { text: String, depth: usize },
     /// The menu of the entry above it.
     Menu { entry: &'a Entry, depth: usize },
+    /// The name of a new file, at the top of its folder.
+    NewFile { new: &'a NewFile, depth: usize },
 }
 
 /// The tree under `root` as lines: each open folder's listing below it.
@@ -191,11 +253,15 @@ fn appeared(old: Option<&Listing>, new: &[Entry], expanded: &HashSet<PathBuf>) -
 /// `dim`: `dir` is ignored. Git's rules don't say so of the things inside an
 /// ignored folder (`target/` doesn't match `target/debug`), so they inherit it.
 fn push_rows<'a>(dir: &Path, depth: usize, dim: bool, state: &'a FilesState, out: &mut Vec<Row<'a>>) {
+    let new = state.new_file.as_ref().filter(|n| n.dir == dir);
+    if let Some(new) = new {
+        out.push(Row::NewFile { new, depth });
+    }
     match state.listings.get(dir) {
         None => out.push(Row::Note { text: "Loading…".into(), depth }),
         Some(Listing::Failed(e)) => out.push(Row::Note { text: format!("Can't read this folder: {e}"), depth }),
         Some(Listing::Ready(entries)) => {
-            if entries.is_empty() && depth == 0 {
+            if entries.is_empty() && depth == 0 && new.is_none() {
                 out.push(Row::Note { text: "This folder is empty.".into(), depth });
             }
             for entry in entries.iter().take(MAX_ENTRIES) {
@@ -350,7 +416,75 @@ impl App {
                 self.error = Some(format!("Could not open the file manager: {e}"));
                 Task::none()
             }
+            FilesMsg::NewFile(dir) => {
+                self.files.menu = None;
+                // The folder opens, so the name is typed where the file will show.
+                let read = match self.files_root() {
+                    Some(root) if dir != root && self.files.expanded.insert(dir.clone()) => {
+                        self.read_dirs(shown_dirs(&dir, &self.files))
+                    }
+                    _ => Task::none(),
+                };
+                self.files.new_file = Some(NewFile { dir, name: String::new(), error: None, creating: false });
+                Task::batch([read, operation::focus(NEW_FILE_INPUT)])
+            }
+            FilesMsg::NewFileName(name) => {
+                if let Some(new) = &mut self.files.new_file {
+                    new.name = name;
+                    new.error = None;
+                }
+                Task::none()
+            }
+            FilesMsg::CreateFile => {
+                let Some(new) = self.files.new_file.as_mut().filter(|n| !n.creating && !n.name.trim().is_empty())
+                else {
+                    return Task::none();
+                };
+                let path = match new_file_path(&new.dir, &new.name) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        new.error = Some(e);
+                        return Task::none();
+                    }
+                };
+                new.creating = true;
+                let dir = new.dir.clone();
+                // On a thread: the folder may be on a slow network drive.
+                let (tx, rx) = async_channel::bounded(1);
+                let target = path.clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send_blocking(create_file(&target));
+                });
+                Task::perform(
+                    async move {
+                        let result = rx.recv().await.unwrap_or_else(|_| Err("creating it stopped".into()));
+                        (dir, path, result)
+                    },
+                    |(dir, path, result)| Message::Files(FilesMsg::Created { dir, path, result }),
+                )
+            }
+            FilesMsg::Created { dir, path, result: Ok(()) } => {
+                self.files.new_file = None;
+                // Folders made on the way to it (`docs/` of `docs/notes.md`) open too.
+                for folder in path.ancestors().skip(1).take_while(|f| *f != dir) {
+                    self.files.expanded.insert(folder.to_path_buf());
+                }
+                let read = self.read_dirs(vec![dir]);
+                Task::batch([read, self.open_file(path)])
+            }
+            FilesMsg::Created { result: Err(e), .. } => {
+                if let Some(new) = &mut self.files.new_file {
+                    new.creating = false;
+                    new.error = Some(e);
+                }
+                Task::none()
+            }
         }
+    }
+
+    /// Stops naming a new file, if one is being named.
+    pub(crate) fn cancel_new_file(&mut self) -> bool {
+        self.files.new_file.take().is_some()
     }
 
     /// The Files tab of the right panel.
@@ -405,17 +539,49 @@ fn file_row(r: Row<'_>, hues: Hues) -> Element<'_, Message> {
                 .padding([3, 6])
                 .into()
         }
+        Row::NewFile { new, depth } => {
+            let indent = depth as f32 * INDENT;
+            let name = ui::input("File name", &new.name)
+                .id(NEW_FILE_INPUT)
+                .size(13)
+                .padding([2, 6])
+                .on_input(|name| Message::Files(FilesMsg::NewFileName(name)))
+                .on_submit(Message::Files(FilesMsg::CreateFile));
+            // Where the file will be, with the icon its name gives it.
+            let line = row![
+                space::horizontal().width(indent),
+                space::horizontal().width(CHEVRON),
+                file_icons::icon(file_icons::file(&new.name), hues, false, ICON),
+                name,
+            ]
+            .spacing(GAP)
+            .align_y(Alignment::Center);
+            let mut lines = column![line].spacing(4);
+            if let Some(e) = &new.error {
+                let under_name = indent + CHEVRON + ICON + 3.0 * GAP;
+                lines = lines.push(row![space::horizontal().width(under_name), ui::note_text(Tone::Danger, e)]);
+            }
+            container(lines).padding([2, 6]).into()
+        }
     }
 }
 
-/// The menu of an entry: for now, showing it in the system's file manager.
+/// The menu of an entry: a new file in it (or next to it), or showing it in
+/// the system's file manager.
 fn file_menu<'a>(path: PathBuf, is_dir: bool, indent: f32) -> Element<'a, Message> {
-    let reveal = button(text(reveal::label(is_dir)).size(13))
-        .width(Length::Fill)
-        .padding([5, 10])
-        .style(theme::row_button)
-        .on_press(Message::Files(FilesMsg::Reveal { path, is_dir }));
-    row![space::horizontal().width(indent), container(reveal).padding(4).width(220).style(theme::menu)]
+    let item = |label: &'static str, msg: FilesMsg| {
+        button(text(label).size(13))
+            .width(Length::Fill)
+            .padding([5, 10])
+            .style(theme::row_button)
+            .on_press(Message::Files(msg))
+    };
+    let dir = if is_dir { path.clone() } else { path.parent().map_or_else(|| path.clone(), Path::to_path_buf) };
+    let items = column![
+        item("New file", FilesMsg::NewFile(dir)),
+        item(reveal::label(is_dir), FilesMsg::Reveal { path, is_dir }),
+    ];
+    row![space::horizontal().width(indent), container(items).padding(4).width(220).style(theme::menu)]
         .padding([2, 6])
         .into()
 }
@@ -514,8 +680,58 @@ mod tests {
                 }
                 Row::Note { text, depth } => format!("{depth}:({text})"),
                 Row::Menu { entry, depth } => format!("{depth}:[menu of {}]", entry.name),
+                Row::NewFile { new, depth } => format!("{depth}:[new file {:?}]", new.name),
             })
             .collect()
+    }
+
+    fn naming(dir: &str, name: &str) -> Option<NewFile> {
+        Some(NewFile { dir: dir.into(), name: name.into(), error: None, creating: false })
+    }
+
+    #[test]
+    fn a_new_file_is_named_at_the_top_of_its_folder() {
+        let mut state = FilesState::default();
+        state.listings.insert("/r".into(), Listing::Ready(vec![entry("/r/src", true), entry("/r/x.md", false)]));
+        state.listings.insert("/r/src".into(), Listing::Ready(vec![entry("/r/src/lib.rs", false)]));
+        state.expanded.insert("/r/src".into());
+        state.new_file = naming("/r/src", "main");
+        assert_eq!(lines("/r", &state), ["0:▾src", "1:[new file \"main\"]", "1:lib.rs", "0:x.md"]);
+        state.new_file = naming("/r", "");
+        assert_eq!(lines("/r", &state), ["0:[new file \"\"]", "0:▾src", "1:lib.rs", "0:x.md"]);
+        // Not "This folder is empty." under it.
+        state.listings.insert("/r".into(), Listing::Ready(Vec::new()));
+        assert_eq!(lines("/r", &state), ["0:[new file \"\"]"]);
+    }
+
+    #[test]
+    fn new_file_names_stay_in_their_folder() {
+        let dir = Path::new("/r");
+        assert_eq!(new_file_path(dir, " notes.md "), Ok(dir.join("notes.md")));
+        assert_eq!(new_file_path(dir, "docs/notes.md"), Ok(dir.join("docs/notes.md")));
+        for bad in ["", "  ", "../x", "a/../../x", "/etc/x", ".", "docs/"] {
+            assert!(new_file_path(dir, bad).is_err(), "{bad:?}");
+        }
+        #[cfg(windows)]
+        for bad in [r"C:\x", r"\x", r"docs\"] {
+            assert!(new_file_path(dir, bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn creating_a_file_makes_its_folders_and_keeps_what_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        create_file(&root.join("a.txt")).unwrap();
+        assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"");
+        create_file(&root.join("docs/deep/b.md")).unwrap();
+        assert!(root.join("docs/deep/b.md").is_file());
+
+        std::fs::write(root.join("a.txt"), "kept").unwrap();
+        assert_eq!(create_file(&root.join("a.txt")), Err("a.txt already exists".into()));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "kept");
+        assert_eq!(create_file(&root.join("docs")), Err("docs already exists".into()), "a folder");
+        assert!(create_file(&root.join("a.txt/c.txt")).is_err(), "a file in the way of a folder");
     }
 
     #[test]

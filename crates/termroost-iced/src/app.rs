@@ -959,7 +959,7 @@ impl App {
             Message::Core(_)
             | Message::Tick
             | Message::Key(_)
-            | Message::Files(FilesMsg::Listed(_) | FilesMsg::Changed(_)) => true,
+            | Message::Files(FilesMsg::Listed(_) | FilesMsg::Changed(_) | FilesMsg::NewFileName(_)) => true,
             Message::Editor(msg) => !msg.loggable(),
             Message::Notes(msg) => !msg.loggable(),
             Message::GitView(msg) => !msg.loggable(),
@@ -1119,6 +1119,9 @@ impl App {
                 }
                 if self.task_edit.is_some() {
                     return self.update(Message::TaskEditCancel);
+                }
+                if self.cancel_new_file() {
+                    return self.focus_active();
                 }
             }
             Message::Enter => {
