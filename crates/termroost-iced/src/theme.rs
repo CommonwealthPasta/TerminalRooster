@@ -358,7 +358,7 @@ pub fn button_bare(t: &Theme, status: button::Status) -> button::Style {
     button_style(None, text_color, 0.0)
 }
 
-/// "New project" and "New session" under their lists: quiet until hovered.
+/// "New project" under the list of projects: quiet until hovered.
 pub fn add_item_button(t: &Theme, status: button::Status) -> button::Style {
     match status {
         button::Status::Active | button::Status::Disabled => button_style(None, muted(t), RADIUS),

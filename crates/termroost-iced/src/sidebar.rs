@@ -354,32 +354,30 @@ impl App {
         let Some(project) = s.selected_project.and_then(|p| s.project(p)) else {
             return container(space::horizontal()).width(210).height(Length::Fill).style(theme::side_column).into();
         };
-        let header = row![
+        let mut header = row![
             column![
                 text(&project.name).size(15).font(SEMIBOLD),
                 muted_text(short_dir(&project.working_dir, 26)).wrapping(text::Wrapping::None)
             ]
             .spacing(1)
             .width(Length::Fill),
-            icon_button(Icon::Plus, Message::NewTab, self.keymap.tip("New session", Action::NewSession)),
-        ]
-        .align_y(Alignment::Center)
-        .padding(HEADER_PADDING);
+            icon_button(Icon::Terminal, Message::NewTab, self.keymap.tip("New session", Action::NewSession)),
+        ];
+        // In a repository, the Worktrees dialog too: a new worktree gets a
+        // session of its own.
+        if self.in_repo() {
+            header = header.push(icon_button(
+                Icon::Branch,
+                Message::Worktree(WorktreeMsg::Open),
+                "New worktree\nIn a session of its own, or open an existing one",
+            ));
+        }
+        let header = header.spacing(2).align_y(Alignment::Center).padding(HEADER_PADDING);
         let ids: Vec<TabId> = s.tabs_of(project.id).map(|t| t.id).collect();
         let list = reorder(s.tabs_of(project.id).map(|t| self.tab_item(project, t)))
             .spacing(LIST_SPACING)
             .on_move_if(self.rename.is_none(), move |from, to| Message::MoveTab(ids[from], to));
-        let mut items = column![list, add_item(Message::NewTab, "New session")];
-        // In a repository, the Worktrees dialog too: a new worktree gets a
-        // session of its own.
-        if self.in_repo() {
-            items = items.push(tip(
-                add_item(Message::Worktree(WorktreeMsg::Open), "New worktree"),
-                "Make a git worktree, in a new session\nOr open an existing one",
-                tooltip::Position::Bottom,
-            ));
-        }
-        let items = items.spacing(LIST_SPACING).padding([0.0, COLUMN_PADDING]);
+        let items = column![list].spacing(LIST_SPACING).padding([0.0, COLUMN_PADDING]);
         let heading =
             container(ui::heading("Sessions")).padding(Padding { left: HEADER_PADDING.left, ..Padding::ZERO });
         container(column![header, heading, ui::scroll(items).height(Length::Fill)].spacing(6))
