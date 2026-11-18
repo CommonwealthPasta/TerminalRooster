@@ -12,6 +12,7 @@ mod diff_lines;
 mod editor;
 mod file_icons;
 mod files;
+mod folder_watch;
 mod git_panel;
 mod git_view;
 mod gone_folders;
