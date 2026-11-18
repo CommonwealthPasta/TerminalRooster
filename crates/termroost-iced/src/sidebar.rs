@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use iced::widget::{MouseArea, button, column, container, mouse_area, row, space, stack, text, tooltip};
+use iced::widget::{MouseArea, button, column, container, hover, mouse_area, row, space, stack, text, tooltip};
 use iced::{Alignment, Element, Length, Padding};
 use termroost_core::git::Head;
 use termroost_core::{AgentKind, PaneId, Project, ProjectGroup, Tab, TabId};
@@ -18,7 +18,7 @@ use crate::notify::{Category, Notice};
 use crate::on_escape::on_escape;
 use crate::reorder::reorder;
 use crate::theme::{self, BOLD, SEMIBOLD, Tone};
-use crate::ui::{self, icon_button, tip};
+use crate::ui::{self, ICON_BUTTON_WIDTH, icon_button, tip};
 use crate::worktree::WorktreeMsg;
 
 /// Width of the edit/delete buttons in the selected list item.
@@ -144,6 +144,22 @@ fn item_actions<'a>(selected: bool, edit: (Message, &'a str), delete: (Message, 
     } else {
         space::horizontal().width(ACTIONS_WIDTH).into()
     }
+}
+
+/// A button that copies `dir`, for over the end of the folder line that ends a
+/// list item. It sits on the item's own fill, which hides the end of a long
+/// folder rather than letting it run under the button.
+fn copy_dir_button<'a>(dir: &Path, selected: bool) -> Element<'a, Message> {
+    let copy = icon_button(Icon::Copy, Message::CopyText(dir.display().to_string()), "Copy path");
+    let copy = container(copy).padding(Padding { left: 4.0, ..Padding::ZERO }).style(theme::list_item_cover(selected));
+    // Centered on the folder's line.
+    let line = text::LineHeight::default().to_absolute(MUTED_SIZE.into()).0;
+    let bottom = ITEM_PADDING.bottom + (line - ICON_BUTTON_WIDTH) / 2.0;
+    container(copy)
+        .padding(Padding { right: ITEM_PADDING.right, bottom, ..Padding::ZERO })
+        .align_right(Length::Fill)
+        .align_bottom(Length::Fill)
+        .into()
 }
 
 /// The line down the left of a group's projects, as wide as they are indented.
@@ -340,12 +356,15 @@ impl App {
             ]
             .spacing(4)
             .align_y(Alignment::Center),
-            // Cut at the item's edge: a long folder name would otherwise run
-            // on under the edit and delete buttons.
+            // Cut at the item's edge, where the copy button covers its end:
+            // a long folder name would otherwise run on past the button.
             container(muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None)).clip(true),
         ]
         .spacing(1);
-        let body = mouse_area(container(label).padding(ITEM_PADDING).width(Length::Fill))
+        // The folder can be copied without opening the project, from a button
+        // that shows while the pointer is over it.
+        let label = container(label).padding(ITEM_PADDING).width(Length::Fill);
+        let body = mouse_area(hover(label, copy_dir_button(&p.working_dir, selected)))
             .on_press(Message::SelectProject(p.id))
             .on_double_click(Message::StartRename(RenameTarget::Project(p.id)));
         let actions = item_actions(
