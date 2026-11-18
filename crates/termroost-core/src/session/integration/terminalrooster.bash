@@ -4,6 +4,7 @@
 # OSC 633;E with the command, then OSC 133;C. After it, tells how it ended:
 # OSC 633;E with the command line, then OSC 133;D with the exit status.
 # When the working directory changes, reports it with OSC 633;P;Cwd=<dir>.
+# Keeps the terminal's own history in the file TERMINALROOSTER_HISTFILE names.
 # TerminalRooster starts bash with PROMPT_COMMAND set to source this file on
 # the first prompt (after ~/.bashrc has run); it then takes that entry out of
 # PROMPT_COMMAND again and runs whatever else ~/.bashrc put there.
@@ -27,6 +28,26 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
         __terminalrooster_original="${__terminalrooster_original:1}"
     done
     unset TERMINALROOSTER_BASH_INTEGRATION
+
+    # The terminal's own history, so that after a restart Up brings back what
+    # was typed here. A new terminal's file starts as a copy of the history
+    # bash read at startup; an existing one is read instead of it, and written
+    # back to trim it to HISTFILESIZE. Each command is added as soon as it ran
+    # (see the prompt hook), so a shell that is ended loses none. Comes before
+    # HISTCMD is noted below, as reading the file changes it.
+    __terminalrooster_history=
+    if [[ -n "${TERMINALROOSTER_HISTFILE-}" && -n "${HISTFILE-}" && -o history ]]; then
+        if [[ -f "$TERMINALROOSTER_HISTFILE" ]]; then
+            builtin history -c
+            builtin history -r "$TERMINALROOSTER_HISTFILE"
+        fi
+        if builtin history -w "$TERMINALROOSTER_HISTFILE" 2>/dev/null; then
+            HISTFILE="$TERMINALROOSTER_HISTFILE"
+            __terminalrooster_history=1
+        fi
+    fi
+    unset TERMINALROOSTER_HISTFILE
+
     __terminalrooster_at_prompt=
     __terminalrooster_running=
     __terminalrooster_command=
@@ -65,6 +86,8 @@ if [[ -z "${__terminalrooster_loaded-}" && $- == *i* ]]; then
     __terminalrooster_prompt_command() {
         local status=$?
         __terminalrooster_at_prompt=
+        # Adds the command just typed to the terminal's history file.
+        [[ -n "$__terminalrooster_history" ]] && builtin history -a
         # A command ran if the DEBUG trap saw it, or if it went into the
         # history: a lone subshell like `(make)` runs no simple command here.
         if [[ -n "$__terminalrooster_running" || "${HISTCMD-}" != "$__terminalrooster_histcmd" ]]; then

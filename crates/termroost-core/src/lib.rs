@@ -164,6 +164,9 @@ impl Core {
             tracing::warn!("repaired {} inconsistencies in saved state", repairs.len());
             store.write(repairs);
         }
+        if let Some(dir) = &integration {
+            session::integration::forget_history(dir, |pane| state.panes.contains_key(&pane));
+        }
 
         let (events_tx, events_rx) = async_channel::unbounded();
         let bg = Background {
@@ -1031,7 +1034,7 @@ impl Core {
         if self.state.settings.shell_integration
             && let Some(dir) = &self.integration
         {
-            session::integration::apply(&mut shell, &mut env, dir);
+            session::integration::apply(&mut shell, &mut env, dir, pane);
         }
         Some(SpawnSpec { shell, cwd, env })
     }

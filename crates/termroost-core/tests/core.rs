@@ -750,6 +750,87 @@ fn restored_terminals_start_where_their_shell_was() {
     wait_for_text(&mut core, pane, "app]");
 }
 
+/// Waits until `needle` shows `count` times in the terminal.
+fn wait_for_count(core: &mut Core, pane: PaneId, needle: &str, count: usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    wait_for(core, Duration::from_secs(20), |c, _| {
+        let text = screen_text(c, pane);
+        assert!(Instant::now() < deadline, "timed out waiting for {needle:?} {count} times:\n{text}");
+        text.matches(needle).count() >= count
+    });
+}
+
+/// Each terminal has its own shell history: after a restart, Up brings back
+/// the last command typed in that terminal, not the one typed in another.
+/// `shell` starts the shell; `history` is the pane's history file;
+/// `command(x)` prints `<x>-42`. Returns the two terminals' panes.
+fn restored_terminals_keep_their_own_history(
+    dir: &Path,
+    shell: &str,
+    history: impl Fn(PaneId) -> std::path::PathBuf,
+    command: impl Fn(&str) -> String,
+) -> [PaneId; 2] {
+    let wait = Duration::from_secs(15);
+    let (a, b) = {
+        let mut core = open(dir);
+        core.dispatch(Command::SetDefaultShell(Some(shell.to_owned()))).unwrap();
+        core.dispatch(Command::CreateProject { name: "p".into(), working_dir: dir.into(), shell: None }).unwrap();
+        let a = only_pane(&core);
+        let Outcome::Pane(b) = core.dispatch(Command::SplitPane { pane: a, axis: Axis::Vertical }).unwrap() else {
+            panic!()
+        };
+        for (pane, x) in [(a, "a"), (b, "b")] {
+            // The file is there before the shell reads its first line: what
+            // is typed can't end up in the user's own history.
+            wait_for(&mut core, wait, |_, _| history(pane).is_file());
+            core.terminal(pane).unwrap().write(format!("{}\r", command(x)));
+            wait_for_text(&mut core, pane, &format!("{x}-42"));
+            let saved = |_: &mut Core, _: Option<&Event>| {
+                std::fs::read_to_string(history(pane)).is_ok_and(|t| t.trim_end().ends_with(&command(x)))
+            };
+            wait_for(&mut core, wait, saved);
+        }
+        (a, b)
+    };
+
+    let mut core = open(dir);
+    for (pane, x) in [(a, "a"), (b, "b")] {
+        // Typed before the shell reads lines, it waits for it.
+        let before = screen_text(&core, pane).matches(&format!("{x}-42")).count();
+        core.terminal(pane).unwrap().write("\x1b[A\r");
+        wait_for_count(&mut core, pane, &format!("{x}-42"), before + 1);
+    }
+    [a, b]
+}
+
+#[test]
+fn restored_terminals_keep_their_own_bash_history() {
+    use termroost_core::session::shell;
+    let Some(bash) = shell::detect_shells().into_iter().find(|o| o.name.to_lowercase().contains("bash")) else {
+        eprintln!("no bash installed; skipping");
+        return;
+    };
+    let bash = shell::split_command_line(&bash.command).unwrap().program;
+    eprintln!("using {bash}");
+    let dir = tempfile::tempdir().unwrap();
+    let slashes = |p: &Path| p.display().to_string().replace('\\', "/");
+    // bash's usual history, in the test's folder instead of the user's.
+    let shared = dir.path().join("bash_history");
+    std::fs::write(&shared, "echo from-shared\n").unwrap();
+    let rc = dir.path().join("bashrc");
+    std::fs::write(&rc, format!("HISTFILE='{}'\n", slashes(&shared))).unwrap();
+    let shell = shell::join_command_line(&[bash.as_str(), "--rcfile", &slashes(&rc), "-i"]);
+    let history = |pane: PaneId| dir.path().join(format!("shell-integration/history/{pane}.bash_history"));
+    let panes =
+        restored_terminals_keep_their_own_history(dir.path(), &shell, history, |x| format!("echo {x}-$((6*7))"));
+    // A new terminal's history starts as a copy of the usual one, which
+    // stays as it was.
+    for pane in panes {
+        assert!(std::fs::read_to_string(history(pane)).unwrap().starts_with("echo from-shared\n"));
+    }
+    assert_eq!(std::fs::read_to_string(&shared).unwrap(), "echo from-shared\n");
+}
+
 /// Git Bash's `bin\bash.exe` runs the real bash as a child; an idle Git Bash
 /// must still count as idle when its session moves. Skipped without Git Bash.
 #[cfg(windows)]
