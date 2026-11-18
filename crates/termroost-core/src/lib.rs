@@ -20,6 +20,7 @@ pub mod command;
 pub mod detect;
 pub mod error;
 pub mod git;
+pub mod host;
 pub mod layout;
 pub mod model;
 pub mod paths;
@@ -39,6 +40,7 @@ pub use codex_hook::CodexHookStatus;
 pub use command::{Command, Event, Outcome};
 pub use detect::{AgentHomes, ObservedAgent, Program};
 pub use error::{Error, Result};
+pub use host::HostCommand;
 pub use layout::{Axis, Layout};
 pub use model::*;
 pub use session::input::{Key, KeyInput, Modifiers, MouseButton, MouseEventKind, MouseInput, NamedKey};
@@ -46,7 +48,7 @@ pub use session::render::{CellStyle, CursorInfo, CursorShape, Palette, RenderCel
 pub use session::{Activity, GridSize, SelectionKind, TerminalHandle};
 
 use paths::InstanceLock;
-use session::{Background, SpawnSpec};
+use session::{Background, HostPlan, NewHost, SpawnSpec};
 use store::{Store, StoreOp};
 
 /// The name of a group made by [`Command::GroupProjects`].
@@ -63,6 +65,10 @@ pub struct Config {
     pub autosave_interval: Duration,
     /// Where Claude Code, Codex and Grok keep their session records.
     pub agent_homes: AgentHomes,
+    /// How to start the helper process a terminal that keeps running when
+    /// TerminalRooster quits runs under (see [`host`]). Without one, such
+    /// terminals run like the others.
+    pub host: Option<HostCommand>,
 }
 
 impl Default for Config {
@@ -72,6 +78,7 @@ impl Default for Config {
             palette: Palette::default(),
             autosave_interval: Duration::from_secs(5),
             agent_homes: AgentHomes::from_env(),
+            host: None,
         }
     }
 }
@@ -121,6 +128,7 @@ pub struct Core {
     autosave: Option<(mpsc::Sender<()>, JoinHandle<()>)>,
     data_dir: PathBuf,
     homes: AgentHomes,
+    host: Option<HostCommand>,
     renamed: Renamed,
     /// Where the shell integration scripts are, if they could be written.
     integration: Option<PathBuf>,
@@ -195,6 +203,7 @@ impl Core {
             autosave: Some((stop_tx, autosave)),
             data_dir,
             homes: config.agent_homes,
+            host: config.host,
             renamed,
             integration,
             _lock: lock,
@@ -207,6 +216,7 @@ impl Core {
             tasks = core.state.tasks.len(),
             "core opened"
         );
+        core.end_stray_helpers();
         if let Some(tab) = core.state.active_tab().map(|t| t.id) {
             core.activate_tab(tab);
         }
@@ -672,6 +682,7 @@ impl Core {
                     resume_command: None,
                     agent: None,
                     cwd: None,
+                    keep_running: false,
                     created_at: model::now(),
                 };
                 ops.push(StoreOp::UpsertPane(record.clone()));
@@ -760,6 +771,31 @@ impl Core {
                 ops.push(StoreOp::UpsertPane(p.clone()));
                 if let Some(h) = self.terminal(pane) {
                     h.set_agent(None);
+                }
+                Ok(Outcome::None)
+            }
+            C::SetKeepRunning { pane, on } => {
+                let p = self.state.panes.get_mut(&pane).ok_or(Error::NotFound("pane"))?;
+                if p.keep_running == on {
+                    return Ok(Outcome::None);
+                }
+                p.keep_running = on;
+                ops.push(StoreOp::UpsertPane(p.clone()));
+                tracing::info!(%pane, on, "keep running changed");
+                if let Some(handle) = self.terminal(pane) {
+                    // Shown elsewhere, the helper isn't this process's to end.
+                    if handle.is_shown_elsewhere() {
+                        self.end_helper(pane);
+                    }
+                    handle.print_notice(if on {
+                        "─── keeps running when Terminal Rooster quits ───"
+                    } else {
+                        "─── stops when Terminal Rooster quits ───"
+                    });
+                    self.start_process(pane, &handle, true);
+                } else if !on {
+                    // Its session isn't open: the helper from an earlier run.
+                    self.end_helper(pane);
                 }
                 Ok(Outcome::None)
             }
@@ -903,8 +939,15 @@ impl Core {
             sort_order,
             created_at: model::now(),
         };
-        let pane =
-            Pane { id: pane_id, tab: tab_id, resume_command: None, agent: None, cwd: None, created_at: model::now() };
+        let pane = Pane {
+            id: pane_id,
+            tab: tab_id,
+            resume_command: None,
+            agent: None,
+            cwd: None,
+            keep_running: false,
+            created_at: model::now(),
+        };
         ops.push(StoreOp::UpsertTab(tab.clone()));
         ops.push(StoreOp::UpsertPane(pane.clone()));
         self.state.tabs.push(tab);
@@ -1014,8 +1057,135 @@ impl Core {
         }
         handle.set_agent(self.state.pane(pane).and_then(|p| p.agent.as_ref()).map(|a| a.kind));
         self.bg.sessions.lock().unwrap().insert(pane, handle.clone());
-        self.start_process(pane, &handle, restored);
+        // A helper that kept the terminal running while TerminalRooster was closed.
+        let running = self
+            .state
+            .pane(pane)
+            .is_some_and(|p| p.keep_running)
+            .then(|| host::proto::conn_file(&self.data_dir, pane))
+            .and_then(|file| host::proto::read_conn(&file).map(|info| (file, info)));
+        match running {
+            Some(existing) => self.attach_running(pane, &handle, existing, restored),
+            None => self.start_process(pane, &handle, restored),
+        }
         handle
+    }
+
+    /// Whether the pane's program runs under a helper of its own (see [`host`]).
+    fn keeps_running(&self, pane: PaneId) -> bool {
+        self.host.is_some() && self.state.pane(pane).is_some_and(|p| p.keep_running)
+    }
+
+    /// Shows a terminal that a helper kept running, or starts it anew should
+    /// the helper be gone. `restored`: as in [`Core::start_process`].
+    fn attach_running(
+        &mut self,
+        pane: PaneId,
+        handle: &TerminalHandle,
+        existing: (PathBuf, host::proto::ConnInfo),
+        restored: bool,
+    ) {
+        tracing::info!(%pane, helper = existing.1.pid, "showing a terminal that kept running");
+        let line = if restored { self.resume_line(pane) } else { None };
+        let start = self.process_spec(pane, handle).and_then(|spec| self.new_host(pane, &spec, handle, line));
+        handle.attach_host(HostPlan { existing: Some(existing), steal: false, start });
+    }
+
+    /// How to start a helper for the pane's program, if it keeps running when
+    /// TerminalRooster quits. What the terminal shows now stays above the
+    /// program's output; `then_type` is typed once the program runs.
+    fn new_host(
+        &self,
+        pane: PaneId,
+        spec: &SpawnSpec,
+        handle: &TerminalHandle,
+        then_type: Option<String>,
+    ) -> Option<NewHost> {
+        if !self.keeps_running(pane) {
+            return None;
+        }
+        let command = self.host.clone()?;
+        let dir = host::proto::hosts_dir(&self.data_dir);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(error = %e, dir = %dir.display(), "no folder for terminal helpers; the terminal won't keep running");
+            return None;
+        }
+        let preload = handle
+            .snapshot(self.state.settings.saved_scrollback_lines)
+            .filter(|d| !d.is_empty())
+            .map(|d| String::from_utf8_lossy(&d).into_owned());
+        Some(NewHost {
+            command,
+            cwd: dir,
+            then_type,
+            spec: host::proto::Spec {
+                pane,
+                conn_file: host::proto::conn_file(&self.data_dir, pane),
+                token: host::proto::new_token(),
+                program: spec.shell.program.clone(),
+                args: spec.shell.args.clone(),
+                cwd: spec.cwd.clone(),
+                env: spec.env.clone(),
+                size: handle.size(),
+                scrollback_lines: self.state.settings.scrollback_lines,
+                preload,
+            },
+        })
+    }
+
+    /// Ends the helper of a pane, if one runs, whether this process shows
+    /// its terminal or not (it may be shown elsewhere, or not shown yet).
+    fn end_helper(&self, pane: PaneId) {
+        let file = host::proto::conn_file(&self.data_dir, pane);
+        let Some(info) = host::proto::read_conn(&file) else { return };
+        tracing::info!(%pane, helper = info.pid, "ending the terminal's helper");
+        std::thread::spawn(move || {
+            if let Err(e) = host::client::end(&info) {
+                tracing::debug!(%pane, error = %e, "could not end the terminal's helper (gone already?)");
+                host::proto::remove_conn_of(&file, info.pid);
+            }
+        });
+    }
+
+    /// How helper processes are started, if they can be.
+    pub fn host_command(&self) -> Option<&HostCommand> {
+        self.host.as_ref()
+    }
+
+    /// Shows a terminal here again that is shown elsewhere (see
+    /// [`Event::ShownElsewhere`]). The other client lets go.
+    pub fn bring_back(&mut self, pane: PaneId) {
+        let Some(handle) = self.terminal(pane) else { return };
+        if handle.take_back() {
+            tracing::info!(%pane, "bringing a terminal back");
+            return;
+        }
+        let file = host::proto::conn_file(&self.data_dir, pane);
+        let existing = host::proto::read_conn(&file).map(|info| (file, info));
+        tracing::info!(%pane, found = existing.is_some(), "bringing a terminal back");
+        handle.attach_host(HostPlan { existing, steal: true, start: None });
+    }
+
+    /// Ends the helpers of terminals that no longer keep running (their
+    /// pane was deleted, or switched over while TerminalRooster was down).
+    fn end_stray_helpers(&self) {
+        let Ok(entries) = std::fs::read_dir(host::proto::hosts_dir(&self.data_dir)) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.ends_with(".tmp") {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            let Some(id) = name.strip_suffix(".json").and_then(|id| id.parse().ok()) else { continue };
+            let pane = PaneId(id);
+            // Not `keeps_running`: without a way to start helpers, those
+            // that run are still shown.
+            if !self.state.pane(pane).is_some_and(|p| p.keep_running) {
+                tracing::info!(%pane, "a terminal helper runs for a terminal that doesn't keep running");
+                self.end_helper(pane);
+            }
+        }
     }
 
     fn spawn_spec(&self, pane: PaneId) -> Option<SpawnSpec> {
@@ -1101,8 +1271,33 @@ impl Core {
         }
     }
 
+    /// Starts the pane's shell, ending what ran in the terminal before.
+    /// `resume`: types the pane's resume command (its agent's, say) once
+    /// the shell runs.
     fn start_process(&mut self, pane: PaneId, handle: &TerminalHandle, resume: bool) {
-        let Some(mut spec) = self.spawn_spec(pane) else { return };
+        let Some(spec) = self.process_spec(pane, handle) else { return };
+        let line = if resume { self.resume_line(pane) } else { None };
+        if let Some(new) = self.new_host(pane, &spec, handle, line.clone()) {
+            tracing::info!(%pane, shell = %spec.shell.program, cwd = %spec.cwd.display(), resume, "starting shell under a helper");
+            handle.shutdown();
+            handle.attach_host(HostPlan { existing: None, steal: false, start: Some(new) });
+            return;
+        }
+        tracing::info!(%pane, shell = %spec.shell.program, cwd = %spec.cwd.display(), resume, "starting shell");
+        if let Err(e) = handle.spawn(&spec) {
+            tracing::error!(%pane, shell = %spec.shell.program, error = %e, "failed to start shell");
+            handle.print_notice(&format!("failed to start {}: {e}", spec.shell.program));
+            return;
+        }
+        if let Some(line) = line {
+            tracing::debug!(%pane, command = %line, "typing resume command");
+            type_later(handle, line);
+        }
+    }
+
+    /// What to run in the pane, in a directory that exists.
+    fn process_spec(&self, pane: PaneId, handle: &TerminalHandle) -> Option<SpawnSpec> {
+        let mut spec = self.spawn_spec(pane)?;
         if !spec.cwd.is_dir() {
             let fallback = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()).unwrap_or_default();
             handle.print_notice(&format!(
@@ -1112,16 +1307,7 @@ impl Core {
             ));
             spec.cwd = fallback;
         }
-        tracing::info!(%pane, shell = %spec.shell.program, cwd = %spec.cwd.display(), resume, "starting shell");
-        if let Err(e) = handle.spawn(&spec) {
-            tracing::error!(%pane, shell = %spec.shell.program, error = %e, "failed to start shell");
-            handle.print_notice(&format!("failed to start {}: {e}", spec.shell.program));
-            return;
-        }
-        if resume && let Some(line) = self.resume_line(pane) {
-            tracing::debug!(%pane, command = %line, "typing resume command");
-            type_later(handle, line);
-        }
+        Some(spec)
     }
 
     /// What to type into a restored terminal: the agent's exact session when it
@@ -1139,8 +1325,13 @@ impl Core {
     }
 
     fn stop_session(&mut self, pane: PaneId) {
-        if let Some(h) = self.bg.sessions.lock().unwrap().remove(&pane) {
+        let handle = self.bg.sessions.lock().unwrap().remove(&pane);
+        if let Some(h) = &handle {
             h.shutdown();
+        }
+        // A helper this process doesn't show is ended through its file.
+        if handle.is_none_or(|h| h.is_shown_elsewhere()) {
+            self.end_helper(pane);
         }
         self.restored.remove(&pane);
     }
@@ -1168,8 +1359,9 @@ impl Core {
         codex_hook::set_running(&self.data_dir, false);
         self.bg.save_dirty(true);
         self.store.flush();
+        // Terminals under helpers run on; the next start shows them again.
         for h in self.bg.sessions.lock().unwrap().drain().map(|(_, h)| h) {
-            h.shutdown();
+            h.detach();
         }
         for (_, h) in self.scratch.drain() {
             h.shutdown();
@@ -1283,7 +1475,15 @@ fn repair(state: &mut AppState, next_id: &mut i64) -> Vec<StoreOp> {
         if owned.is_empty() {
             let id = PaneId(*next_id);
             *next_id += 1;
-            let pane = Pane { id, tab: tab.id, resume_command: None, agent: None, cwd: None, created_at: model::now() };
+            let pane = Pane {
+                id,
+                tab: tab.id,
+                resume_command: None,
+                agent: None,
+                cwd: None,
+                keep_running: false,
+                created_at: model::now(),
+            };
             state.panes.insert(id, pane.clone());
             tab.layout = Layout::Pane(id);
             ops.push(StoreOp::UpsertTab(tab.clone()));

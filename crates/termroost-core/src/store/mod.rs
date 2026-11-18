@@ -221,12 +221,12 @@ fn apply(c: &Connection, op: &StoreOp) -> rusqlite::Result<()> {
         StoreOp::UpsertPane(p) => {
             let agent = p.agent.as_ref();
             c.execute(
-                "INSERT INTO panes (id, tab_id, resume_command, agent_kind, agent_session, agent_args, cwd, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "INSERT INTO panes (id, tab_id, resume_command, agent_kind, agent_session, agent_args, cwd, created_at, keep_running)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
                  ON CONFLICT(id) DO UPDATE SET tab_id = excluded.tab_id,
                    resume_command = excluded.resume_command, agent_kind = excluded.agent_kind,
                    agent_session = excluded.agent_session, agent_args = excluded.agent_args,
-                   cwd = excluded.cwd",
+                   cwd = excluded.cwd, keep_running = excluded.keep_running",
                 params![
                     p.id.0,
                     p.tab.0,
@@ -235,7 +235,8 @@ fn apply(c: &Connection, op: &StoreOp) -> rusqlite::Result<()> {
                     agent.and_then(|a| a.session_id.clone()),
                     agent.map(|a| a.args.clone()),
                     p.cwd.as_deref().map(path_str),
-                    p.created_at
+                    p.created_at,
+                    p.keep_running
                 ],
             )?;
         }
@@ -354,7 +355,7 @@ fn load(c: &Connection) -> rusqlite::Result<AppState> {
         .collect();
 
     let mut stmt = c.prepare(
-        "SELECT id, tab_id, resume_command, agent_kind, agent_session, agent_args, created_at, cwd FROM panes",
+        "SELECT id, tab_id, resume_command, agent_kind, agent_session, agent_args, created_at, cwd, keep_running FROM panes",
     )?;
     state.panes = stmt
         .query_map([], |r| {
@@ -370,6 +371,7 @@ fn load(c: &Connection) -> rusqlite::Result<AppState> {
                 resume_command: r.get(2)?,
                 agent,
                 cwd: r.get::<_, Option<String>>(7)?.map(PathBuf::from),
+                keep_running: r.get(8)?,
                 created_at: r.get(6)?,
             })
         })?
@@ -449,6 +451,7 @@ mod tests {
                 args: "--model opus".into(),
             }),
             cwd: Some("/tmp/api/src".into()),
+            keep_running: true,
             created_at: 1,
         };
         let task = Task {

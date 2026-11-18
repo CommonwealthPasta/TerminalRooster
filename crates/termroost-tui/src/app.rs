@@ -312,7 +312,8 @@ impl App {
             | Event::CodexHookReported
             | Event::AgentObserved { .. }
             | Event::CwdChanged { .. }
-            | Event::ActivityChanged(_) => {}
+            | Event::ActivityChanged(_)
+            | Event::ShownElsewhere(_) => {}
         }
         self.dirty = true;
     }

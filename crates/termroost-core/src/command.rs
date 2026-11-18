@@ -126,6 +126,13 @@ pub enum Command {
     ClearAgent(PaneId),
     /// Starts a new shell in an exited (or running) pane, keeping its scrollback.
     RestartPane(PaneId),
+    /// Whether the pane's terminal keeps running when TerminalRooster quits.
+    /// A running program can't move in or out of a helper, so the terminal
+    /// starts again (an agent resumes its conversation).
+    SetKeepRunning {
+        pane: PaneId,
+        on: bool,
+    },
 
     CreateTask {
         project: ProjectId,
@@ -222,4 +229,8 @@ pub enum Event {
     /// working, or programs started or stopped. Read it with
     /// [`crate::TerminalHandle::activity`].
     ActivityChanged(PaneId),
+    /// A terminal that keeps running when TerminalRooster quits is now
+    /// shown elsewhere (a console window of its own); its program runs on.
+    /// [`crate::Core::bring_back`] shows it here again.
+    ShownElsewhere(PaneId),
 }

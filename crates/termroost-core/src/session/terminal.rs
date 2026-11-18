@@ -20,16 +20,22 @@ use crate::agent::AgentKind;
 use crate::alert::{Alert, Tracker};
 use crate::command::Event;
 use crate::detect::Program;
+use crate::host::client::{self, Connected, Connection, HostCommand, HostLink, LinkQueue};
+use crate::host::proto::{self, ConnInfo, Exited, FrameReader, Refusal, Spec, Welcome};
 use crate::model::PaneId;
 use crate::session::input::{self, KeyInput, MouseInput};
+use crate::session::osc::OscScanner;
 use crate::session::osc::Signal;
 use crate::session::render::{RenderContent, SharedPalette};
 use crate::session::shell::ShellCommand;
 use crate::session::snapshot;
 use crate::session::tap::TapPty;
+use alacritty_terminal::vte::ansi::Processor;
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 /// Size of the terminal grid and of one cell in pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GridSize {
     pub cols: u16,
     pub rows: u16,
@@ -44,7 +50,7 @@ impl Default for GridSize {
 }
 
 impl GridSize {
-    fn window_size(self) -> WindowSize {
+    pub(crate) fn window_size(self) -> WindowSize {
         WindowSize {
             num_lines: self.rows,
             num_cols: self.cols,
@@ -92,11 +98,87 @@ pub(crate) struct SpawnSpec {
     pub env: HashMap<String, String>,
 }
 
+/// Where a running program's input goes.
+enum Link {
+    /// A PTY of this process, read by alacritty's event loop.
+    Local(EventLoopSender),
+    /// A helper process that owns the PTY (see [`crate::host`]).
+    Hosted(HostLink),
+}
+
+impl Link {
+    fn input(&self, bytes: Cow<'static, [u8]>) {
+        match self {
+            Link::Local(s) => {
+                let _ = s.send(Msg::Input(bytes));
+            }
+            Link::Hosted(h) => h.input(bytes.into_owned()),
+        }
+    }
+
+    fn resize(&self, size: GridSize) {
+        match self {
+            Link::Local(s) => {
+                let _ = s.send(Msg::Resize(size.window_size()));
+            }
+            Link::Hosted(h) => h.resize(size),
+        }
+    }
+
+    /// Ends the program.
+    fn end(&self) {
+        match self {
+            Link::Local(s) => {
+                let _ = s.send(Msg::Shutdown);
+            }
+            Link::Hosted(h) => h.end(),
+        }
+    }
+
+    /// Leaves the program: a helper's runs on, one of this process ends.
+    fn detach(&self) {
+        match self {
+            Link::Local(s) => {
+                let _ = s.send(Msg::Shutdown);
+            }
+            Link::Hosted(h) => h.detach(),
+        }
+    }
+}
+
+/// How a terminal gets to the helper that runs its program (see
+/// [`TerminalHandle::attach_host`]).
+pub(crate) struct HostPlan {
+    /// The helper that runs it, if one should: its connection file and what
+    /// that holds.
+    pub existing: Option<(PathBuf, ConnInfo)>,
+    /// Push off a client attached elsewhere (a console window).
+    pub steal: bool,
+    /// Starts a helper if none runs.
+    pub start: Option<NewHost>,
+}
+
+/// How to start a helper for a terminal.
+pub(crate) struct NewHost {
+    pub command: HostCommand,
+    pub spec: Spec,
+    /// The helper's working directory.
+    pub cwd: PathBuf,
+    /// Typed into the program once it runs (a restored agent's resume command).
+    pub then_type: Option<String>,
+}
+
 /// State shared between the handle, the term's event proxy and the PTY thread.
 pub(crate) struct Shared {
     pane: PaneId,
     events: async_channel::Sender<Event>,
-    sender: Mutex<Option<EventLoopSender>>,
+    /// Where the program's input goes, while one runs here.
+    link: Mutex<Option<Link>>,
+    /// History kept by the term, for a term made anew.
+    scrollback_lines: usize,
+    /// The program runs under a helper that shows it in another client (a
+    /// console window of its own).
+    elsewhere: AtomicBool,
     /// A `TerminalDirty` event is outstanding.
     render_pending: AtomicBool,
     /// Content changed since the last scrollback save.
@@ -201,9 +283,29 @@ impl Shared {
         if bytes.is_empty() {
             return;
         }
-        if let Some(s) = self.sender.lock().unwrap().as_ref() {
-            let _ = s.send(Msg::Input(bytes));
+        if let Some(link) = self.link.lock().unwrap().as_ref() {
+            link.input(bytes);
         }
+    }
+
+    fn is_run(&self, run: u64) -> bool {
+        matches!(*self.proc.lock().unwrap(), ProcState::Running(r) if r == run)
+    }
+
+    /// Another client of the program's helper shows the terminal now (see
+    /// [`crate::host`]). `connected`: this one stays connected, paused, and
+    /// shows it again when the other leaves.
+    fn shown_elsewhere(&self, run: u64, connected: bool) {
+        if !self.is_run(run) {
+            return;
+        }
+        if !connected && let Some(link) = self.link.lock().unwrap().take() {
+            link.detach();
+        }
+        self.elsewhere.store(true, Ordering::Release);
+        tracing::info!(pane = %self.pane, "terminal shown elsewhere");
+        self.send(Event::ShownElsewhere(self.pane));
+        self.wake();
     }
 
     fn mark_exited(&self, run: Option<u64>, code: Option<i32>) {
@@ -216,7 +318,8 @@ impl Shared {
             }
             *proc = ProcState::Exited(code);
         }
-        *self.sender.lock().unwrap() = None;
+        *self.link.lock().unwrap() = None;
+        self.elsewhere.store(false, Ordering::Release);
         self.shell_pid.store(0, Ordering::Release);
         tracing::info!(pane = %self.pane, ?code, "process exited");
         self.send(Event::ProcessExited { pane: self.pane, code });
@@ -325,7 +428,9 @@ impl TerminalHandle {
         let shared = Arc::new(Shared {
             pane,
             events,
-            sender: Mutex::new(None),
+            link: Mutex::new(None),
+            scrollback_lines,
+            elsewhere: AtomicBool::new(false),
             render_pending: AtomicBool::new(false),
             save_dirty: AtomicBool::new(false),
             typed: AtomicBool::new(false),
@@ -372,9 +477,10 @@ impl TerminalHandle {
     /// Starts (or restarts) the shell process.
     pub(crate) fn spawn(&self, spec: &SpawnSpec) -> std::io::Result<()> {
         let shared = &self.0.shared;
-        if let Some(old) = shared.sender.lock().unwrap().take() {
-            let _ = old.send(Msg::Shutdown);
+        if let Some(old) = shared.link.lock().unwrap().take() {
+            old.end();
         }
+        shared.elsewhere.store(false, Ordering::Release);
         // On Windows the command line is built by joining the program and the
         // arguments: quote a program path with spaces (`C:\Program Files\…`),
         // and arguments too (their quotes were removed when splitting).
@@ -410,11 +516,57 @@ impl TerminalHandle {
         let run = shared.run_counter.fetch_add(1, Ordering::AcqRel) + 1;
         let proxy = Proxy { shared: shared.clone(), run: Some(run) };
         let event_loop = EventLoop::new(self.0.term.clone(), proxy, pty, true, false)?;
-        *shared.sender.lock().unwrap() = Some(event_loop.channel());
+        *shared.link.lock().unwrap() = Some(Link::Local(event_loop.channel()));
         *shared.proc.lock().unwrap() = ProcState::Running(run);
         let _ = event_loop.spawn();
         shared.wake();
         Ok(())
+    }
+
+    /// Shows the program a helper process runs, starting the helper if
+    /// needed, in place of what ran here (which ends). Connects on a thread
+    /// of its own; what is typed meanwhile waits for the connection.
+    pub(crate) fn attach_host(&self, plan: HostPlan) {
+        let shared = &self.0.shared;
+        if let Some(old) = shared.link.lock().unwrap().take() {
+            old.detach();
+        }
+        let (link, queue) = HostLink::new();
+        let run = shared.run_counter.fetch_add(1, Ordering::AcqRel) + 1;
+        shared.elsewhere.store(false, Ordering::Release);
+        shared.shell_pid.store(0, Ordering::Release);
+        shared.track(Tracker::reset);
+        shared.set_programs(Vec::new());
+        *shared.cwd.lock().unwrap() = None;
+        *shared.link.lock().unwrap() = Some(Link::Hosted(link.clone()));
+        *shared.proc.lock().unwrap() = ProcState::Running(run);
+        let session = self.0.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("host-link-{}", shared.pane))
+            .spawn(move || run_host_link(&session, run, plan, &link, queue));
+        if let Err(e) = spawned {
+            tracing::error!(pane = %shared.pane, error = %e, "could not connect to the terminal's helper");
+            shared.mark_exited(Some(run), None);
+        }
+        shared.wake();
+    }
+
+    /// The program runs under a helper that shows it elsewhere (see
+    /// [`Event::ShownElsewhere`]).
+    pub fn is_shown_elsewhere(&self) -> bool {
+        self.0.shared.elsewhere.load(Ordering::Acquire)
+    }
+
+    /// Asks the helper to show the terminal here again, if this terminal
+    /// waits on it for that. Returns whether it does.
+    pub(crate) fn take_back(&self) -> bool {
+        match self.0.shared.link.lock().unwrap().as_ref() {
+            Some(Link::Hosted(link)) => {
+                link.take();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// ConPTY clears the screen when it starts and from then on draws the
@@ -434,11 +586,20 @@ impl TerminalHandle {
         self.0.shared.bump();
     }
 
-    /// Stops the shell process (the content is kept).
+    /// Stops the shell process (the content is kept), a helper's too.
     pub(crate) fn shutdown(&self) {
         self.0.shared.shell_pid.store(0, Ordering::Release);
-        if let Some(s) = self.0.shared.sender.lock().unwrap().take() {
-            let _ = s.send(Msg::Shutdown);
+        if let Some(link) = self.0.shared.link.lock().unwrap().take() {
+            link.end();
+        }
+    }
+
+    /// Lets go of the shell process: one a helper runs keeps running, one of
+    /// this process stops.
+    pub(crate) fn detach(&self) {
+        self.0.shared.shell_pid.store(0, Ordering::Release);
+        if let Some(link) = self.0.shared.link.lock().unwrap().take() {
+            link.detach();
         }
     }
 
@@ -608,15 +769,11 @@ impl TerminalHandle {
         }
         {
             let mut term = self.0.term.lock();
-            if cfg!(windows) {
-                resize_like_conpty(&mut term, size);
-            } else {
-                term.resize(size);
-            }
+            resize_grid(&mut term, size);
             apply_pin(&mut term, &mut self.0.shared.pin.lock().unwrap(), false);
         }
-        if let Some(s) = self.0.shared.sender.lock().unwrap().as_ref() {
-            let _ = s.send(Msg::Resize(size.window_size()));
+        if let Some(link) = self.0.shared.link.lock().unwrap().as_ref() {
+            link.resize(size);
         }
         self.0.shared.bump();
     }
@@ -750,6 +907,202 @@ impl TerminalHandle {
     }
 }
 
+/// Resizes a term the way its PTY resizes the program's screen.
+fn resize_grid<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>, size: GridSize) {
+    if cfg!(windows) {
+        resize_like_conpty(term, size);
+    } else {
+        term.resize(size);
+    }
+}
+
+/// Connects a terminal to its helper (see [`TerminalHandle::attach_host`])
+/// and shows the program's output until the program ends or the terminal
+/// lets go. Runs on a thread of its own.
+fn run_host_link(session: &Arc<Session>, run: u64, plan: HostPlan, link: &HostLink, queue: LinkQueue) {
+    let shared = &session.shared;
+    let notice = |text: &str| TerminalHandle(session.clone()).print_notice(text);
+    let size = *shared.size.lock().unwrap();
+    let mut connected = None;
+    if let Some((file, info)) = &plan.existing {
+        match client::connect(info, plan.steal, true, size) {
+            Ok(c) => connected = Some(c),
+            Err(e) => {
+                tracing::info!(pane = %shared.pane, error = %e, "the terminal's helper is gone");
+                let _ = std::fs::remove_file(file);
+            }
+        }
+    }
+    // Typed into a new helper's program; `Some` once one was started.
+    let mut fresh = None;
+    if connected.is_none()
+        && let Some(new) = plan.start
+    {
+        tracing::info!(pane = %shared.pane, program = %new.spec.program, "starting a helper for the terminal");
+        match client::start(&new.command, &new.spec, &new.cwd).and_then(|info| client::connect(&info, true, true, size))
+        {
+            Ok(c) => {
+                connected = Some(c);
+                fresh = Some(new.then_type);
+            }
+            Err(e) => {
+                tracing::error!(pane = %shared.pane, error = %e, "could not start the terminal's helper");
+                notice(&format!("failed to start {}: {e}", new.spec.program));
+            }
+        }
+    }
+    let conn = match connected {
+        Some(Connected::Attached(conn)) => conn,
+        Some(Connected::Refused(refusal)) => {
+            tracing::warn!(pane = %shared.pane, ?refusal, "the terminal's helper refused");
+            notice(&match refusal {
+                Refusal::Version => {
+                    "this terminal runs under a helper from another version of TerminalRooster, which can't show it"
+                        .to_owned()
+                }
+                _ => format!("the terminal's helper refused to show it ({refusal:?})"),
+            });
+            shared.mark_exited(Some(run), None);
+            return;
+        }
+        None => {
+            shared.mark_exited(Some(run), None);
+            return;
+        }
+    };
+    let Connection { welcome, reader, writer } = conn;
+    // What was queued goes out (an `END` too, should the terminal have been
+    // closed meanwhile).
+    std::thread::Builder::new().name(format!("host-writer-{}", shared.pane)).spawn(move || queue.run(writer)).ok();
+    if link.is_detached() || !shared.is_run(run) {
+        return;
+    }
+    tracing::info!(pane = %shared.pane, waits = welcome.is_none(), fresh = fresh.is_some(), "connected to the terminal's helper");
+    if let Some(Some(line)) = &fresh {
+        let handle = TerminalHandle(session.clone());
+        let line = line.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            handle.write(format!("{line}\r"));
+        });
+    }
+    read_host(session, run, reader, link, welcome, fresh.is_some());
+}
+
+/// The helper shows the terminal here (again): a new screen, which the
+/// helper fills next. Returns the size it was made at.
+fn take_welcome(session: &Arc<Session>, welcome: &Welcome) -> GridSize {
+    let shared = &session.shared;
+    let size = *shared.size.lock().unwrap();
+    {
+        let config = term::Config { scrolling_history: shared.scrollback_lines, ..Default::default() };
+        *session.term.lock() = Term::new(config, &size, Proxy { shared: shared.clone(), run: None });
+        *shared.pin.lock().unwrap() = Pin::Off;
+    }
+    shared.shell_pid.store(welcome.shell_pid, Ordering::Release);
+    shared.elsewhere.store(false, Ordering::Release);
+    if let Some(title) = welcome.title.clone().filter(|t| !t.is_empty()) {
+        *shared.title.lock().unwrap() = Some(title.clone());
+        // Where the agent is (working or not), without alerting.
+        let _ = shared.track(|tracker| tracker.title(&title));
+        shared.send(Event::TitleChanged { pane: shared.pane, title });
+    }
+    size
+}
+
+/// Feeds what the helper sends into the term. `welcome`: the terminal shows
+/// here; without, another client shows it and this one waits. After each
+/// welcome the first output is the whole screen. `restored`: a new helper
+/// started with earlier output, which the view keeps in sight above the
+/// program's (see [`Pin`]).
+fn read_host(
+    session: &Arc<Session>,
+    run: u64,
+    mut reader: FrameReader<TcpStream>,
+    link: &HostLink,
+    welcome: Option<Welcome>,
+    mut restored: bool,
+) {
+    let shared = &session.shared;
+    let mut parser: Processor = Processor::new();
+    let mut scanner = OscScanner::default();
+    let mut signals = Vec::new();
+    // The size the term was made at, until the screen that fills it comes.
+    let mut screen = match welcome {
+        Some(w) => Some(take_welcome(session, &w)),
+        None => {
+            shared.shown_elsewhere(run, true);
+            None
+        }
+    };
+    loop {
+        // A synchronized update (DEC mode 2026) shows at the latest by then.
+        let deadline = parser.sync_timeout().sync_timeout();
+        let timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()).max(Duration::from_millis(1)));
+        let _ = reader.get_ref().set_read_timeout(timeout);
+        let frame = match reader.next() {
+            Ok(Some(frame)) => frame,
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                parser.stop_sync(&mut *session.term.lock());
+                shared.wake();
+                continue;
+            }
+            end => {
+                if !link.is_detached() {
+                    tracing::warn!(pane = %shared.pane, result = ?end.map(|_| ()), "lost the terminal's helper");
+                    shared.mark_exited(Some(run), None);
+                }
+                return;
+            }
+        };
+        match frame.kind {
+            proto::WELCOME => {
+                let Ok(welcome) = proto::parse::<Welcome>(&frame.payload) else { continue };
+                tracing::info!(pane = %shared.pane, "terminal shown here again");
+                // Nothing half-read of the old screen carries over.
+                parser = Processor::new();
+                screen = Some(take_welcome(session, &welcome));
+            }
+            proto::OUTPUT => {
+                if screen.is_none() {
+                    scanner.feed(&frame.payload, &mut signals);
+                    for signal in signals.drain(..) {
+                        shared.on_signal(signal);
+                    }
+                }
+                let mut term = session.term.lock();
+                parser.advance(&mut *term, &frame.payload);
+                if let Some(size) = screen.take() {
+                    // The view changed size while the screen came.
+                    let now = *shared.size.lock().unwrap();
+                    if now != size {
+                        resize_grid(&mut term, now);
+                    }
+                    if std::mem::take(&mut restored) && cfg!(windows) && term.grid().history_size() > 0 {
+                        // ConPTY's own clear went by in the helper.
+                        let mut pin = shared.pin.lock().unwrap();
+                        *pin = Pin::On { follow: true, cleared: true };
+                        apply_pin(&mut term, &mut pin, false);
+                    }
+                }
+                drop(term);
+                shared.wake();
+            }
+            proto::PAUSED => shared.shown_elsewhere(run, true),
+            proto::EXITED => {
+                let code = proto::parse::<Exited>(&frame.payload).ok().and_then(|e| e.code);
+                shared.mark_exited(Some(run), code);
+                return;
+            }
+            proto::KICKED => {
+                shared.shown_elsewhere(run, false);
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Keeps output from before a shell started in sight on Windows.
 ///
 /// ConPTY clears the screen when a shell starts and from then on draws the
@@ -833,7 +1186,7 @@ fn apply_pin<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>, pi
 /// top: when the screen gets taller, the content stays where it is and the
 /// new rows are added below. (alacritty instead brings lines down from the
 /// history to fill them, which ConPTY then draws over, so they were lost.)
-fn resize_like_conpty<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>, size: GridSize) {
+pub(crate) fn resize_like_conpty<T: alacritty_terminal::event::EventListener>(term: &mut Term<T>, size: GridSize) {
     let rows = size.rows as usize;
     if rows > term.screen_lines() && !term.mode().contains(TermMode::ALT_SCREEN) {
         // The rows first, at the current width, to see how many lines came down.
@@ -855,7 +1208,7 @@ fn resize_like_conpty<T: alacritty_terminal::event::EventListener>(term: &mut Te
 /// `C:\Program Files\Git\bin\bash.exe` is split at the space and Windows
 /// would first look for `C:\Program.exe`.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn quote_program(program: &str) -> String {
+pub(crate) fn quote_program(program: &str) -> String {
     if program.contains(char::is_whitespace) && !program.starts_with('"') {
         format!("\"{program}\"")
     } else {
