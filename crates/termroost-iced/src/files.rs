@@ -9,8 +9,9 @@
 //! remove files all the time. Folders that can't be watched are read again
 //! every few seconds instead.
 //!
-//! Right-clicking an entry (or the folder at the top) opens a small menu
-//! under it, to show the entry in the system's file manager.
+//! Right-clicking an entry (or the folder at the top) opens a small menu that
+//! floats under it, for a new file there or to show the entry in the system's
+//! file manager.
 //!
 //! What git leaves out (`.gitignore`, `.git/info/exclude`, the global
 //! excludes file) is dimmed, along with everything inside it.
@@ -25,6 +26,7 @@ use iced::widget::{button, column, container, mouse_area, operation, row, space,
 use iced::{Alignment, Element, Length, Task};
 
 use crate::app::{App, Message};
+use crate::context_menu::context_menu;
 use crate::file_icons::{self, Hues};
 use crate::folder_watch::{self, Changes, FolderWatch};
 use crate::icons::{Icon, icon};
@@ -105,8 +107,10 @@ pub enum FilesMsg {
     Changed(Changes),
     /// Time to read the folders shown again (they can't all be watched).
     Poll,
-    /// An entry was right-clicked: open its menu (or close it, if open).
+    /// An entry was right-clicked: open its menu.
     Menu(PathBuf),
+    /// Something else was clicked, or the wheel turned, while the menu was open.
+    CloseMenu,
     /// Show a file, or open a folder, in the system's file manager.
     Reveal {
         path: PathBuf,
@@ -203,11 +207,11 @@ pub enum Row<'a> {
         open: bool,
         /// Ignored by git, itself or as part of an ignored folder.
         dim: bool,
+        /// Its menu is open.
+        menu: bool,
     },
     /// "Loading…", an error, or how many entries are not shown.
     Note { text: String, depth: usize },
-    /// The menu of the entry above it.
-    Menu { entry: &'a Entry, depth: usize },
     /// The name of a new file, at the top of its folder.
     NewFile { new: &'a NewFile, depth: usize },
 }
@@ -267,10 +271,8 @@ fn push_rows<'a>(dir: &Path, depth: usize, dim: bool, state: &'a FilesState, out
             for entry in entries.iter().take(MAX_ENTRIES) {
                 let open = entry.is_dir && state.expanded.contains(&entry.path);
                 let dim = dim || entry.ignored;
-                out.push(Row::Entry { entry, depth, open, dim });
-                if state.menu.as_ref() == Some(&entry.path) {
-                    out.push(Row::Menu { entry, depth });
-                }
+                let menu = state.menu.as_ref() == Some(&entry.path);
+                out.push(Row::Entry { entry, depth, open, dim, menu });
                 if open {
                     push_rows(&entry.path, depth + 1, dim, state, out);
                 }
@@ -403,7 +405,11 @@ impl App {
             }
             FilesMsg::Poll => self.refresh_files(),
             FilesMsg::Menu(path) => {
-                self.files.menu = if self.files.menu.as_ref() == Some(&path) { None } else { Some(path) };
+                self.files.menu = Some(path);
+                Task::none()
+            }
+            FilesMsg::CloseMenu => {
+                self.files.menu = None;
                 Task::none()
             }
             FilesMsg::Reveal { path, is_dir } => {
@@ -494,20 +500,18 @@ impl App {
         let lines = rows(&root, &self.files).into_iter().map(|r| file_row(r, hues));
         let path = mouse_area(muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill))
             .on_right_press(Message::Files(FilesMsg::Menu(root.clone())));
+        // The folder's own menu, under its name.
+        let menu = (self.files.menu.as_ref() == Some(&root)).then(|| file_menu(root.clone(), true));
+        let path = context_menu(path, menu, Message::Files(FilesMsg::CloseMenu));
         let top = row![path, icon_button(Icon::Plus, Message::Files(FilesMsg::NewFile(root.clone())), "New file")]
             .align_y(Alignment::Center);
-        // The folder's own menu, under its name; always there, so the tree keeps its place.
-        let root_menu: Element<'_, Message> = match &self.files.menu {
-            Some(m) if *m == root => file_menu(root.clone(), true, 0.0),
-            _ => space::vertical().height(0).into(),
-        };
-        column![top, root_menu, ui::scroll(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
+        column![top, ui::scroll(column(lines).width(Length::Fill)).height(Length::Fill)].spacing(8).into()
     }
 }
 
 fn file_row(r: Row<'_>, hues: Hues) -> Element<'_, Message> {
     match r {
-        Row::Entry { entry, depth, open, dim } => {
+        Row::Entry { entry, depth, open, dim, menu } => {
             let chevron: Element<'_, Message> = match (entry.is_dir, open) {
                 (true, true) => icon(Icon::ChevronDown, CHEVRON, theme::muted).into(),
                 (true, false) => icon(Icon::ChevronRight, CHEVRON, theme::muted).into(),
@@ -530,12 +534,14 @@ fn file_row(r: Row<'_>, hues: Hues) -> Element<'_, Message> {
                 .padding([3, 6])
                 .style(theme::row_button)
                 .on_press(Message::Files(press));
-            mouse_area(line).on_right_press(Message::Files(FilesMsg::Menu(entry.path.clone()))).into()
+            let line = mouse_area(line).on_right_press(Message::Files(FilesMsg::Menu(entry.path.clone())));
+            let menu = menu.then(|| file_menu(entry.path.clone(), entry.is_dir));
+            // Lined up with the entry's icon, past the line's padding.
+            context_menu(line, menu, Message::Files(FilesMsg::CloseMenu))
+                .indent(6.0 + depth as f32 * INDENT + CHEVRON + GAP)
+                .into()
         }
-        // Both line up with the icons of the entries around them.
-        Row::Menu { entry, depth } => {
-            file_menu(entry.path.clone(), entry.is_dir, depth as f32 * INDENT + CHEVRON + GAP)
-        }
+        // Lined up with the icons of the entries around it.
         Row::Note { text: note, depth } => {
             row![space::horizontal().width(depth as f32 * INDENT + CHEVRON + GAP), muted_text(note)]
                 .padding([3, 6])
@@ -570,7 +576,7 @@ fn file_row(r: Row<'_>, hues: Hues) -> Element<'_, Message> {
 
 /// The menu of an entry: a new file in it (or next to it), or showing it in
 /// the system's file manager.
-fn file_menu<'a>(path: PathBuf, is_dir: bool, indent: f32) -> Element<'a, Message> {
+fn file_menu<'a>(path: PathBuf, is_dir: bool) -> Element<'a, Message> {
     let item = |label: &'static str, msg: FilesMsg| {
         button(text(label).size(13))
             .width(Length::Fill)
@@ -583,9 +589,7 @@ fn file_menu<'a>(path: PathBuf, is_dir: bool, indent: f32) -> Element<'a, Messag
         item("New file", FilesMsg::NewFile(dir)),
         item(reveal::label(is_dir), FilesMsg::Reveal { path, is_dir }),
     ];
-    row![space::horizontal().width(indent), container(items).padding(4).width(220).style(theme::menu)]
-        .padding([2, 6])
-        .into()
+    container(items).padding(4).width(220).style(theme::menu).into()
 }
 
 #[cfg(test)]
@@ -672,16 +676,17 @@ mod tests {
         rows(Path::new(root), state)
             .into_iter()
             .map(|r| match r {
-                Row::Entry { entry, depth, open, dim } => {
+                Row::Entry { entry, depth, open, dim, menu } => {
                     let mark = match (entry.is_dir, open) {
                         (true, true) => "▾",
                         (true, false) => "▸",
                         _ => "",
                     };
-                    format!("{depth}:{mark}{}{}", entry.name, if dim { "~" } else { "" })
+                    let dim = if dim { "~" } else { "" };
+                    let menu = if menu { "[menu]" } else { "" };
+                    format!("{depth}:{mark}{}{dim}{menu}", entry.name)
                 }
                 Row::Note { text, depth } => format!("{depth}:({text})"),
-                Row::Menu { entry, depth } => format!("{depth}:[menu of {}]", entry.name),
                 Row::NewFile { new, depth } => format!("{depth}:[new file {:?}]", new.name),
             })
             .collect()
@@ -779,16 +784,17 @@ mod tests {
     }
 
     #[test]
-    fn a_menu_opens_under_its_entry() {
+    fn a_menu_belongs_to_its_entry_and_takes_no_line() {
         let mut state = FilesState::default();
         state.listings.insert("/r".into(), Listing::Ready(vec![entry("/r/src", true), entry("/r/x.md", false)]));
         state.listings.insert("/r/src".into(), Listing::Ready(vec![entry("/r/src/lib.rs", false)]));
         state.expanded.insert("/r/src".into());
         state.menu = Some("/r/src".into());
-        assert_eq!(lines("/r", &state), ["0:▾src", "0:[menu of src]", "1:lib.rs", "0:x.md"]);
+        assert_eq!(lines("/r", &state), ["0:▾src[menu]", "1:lib.rs", "0:x.md"]);
         state.menu = Some("/r/src/lib.rs".into());
-        assert_eq!(lines("/r", &state), ["0:▾src", "1:lib.rs", "1:[menu of lib.rs]", "0:x.md"]);
-        assert_eq!(shown_dirs(Path::new("/r"), &state).len(), 2, "menus aren't folders to read");
+        assert_eq!(lines("/r", &state), ["0:▾src", "1:lib.rs[menu]", "0:x.md"]);
+        state.menu = Some("/r".into());
+        assert_eq!(lines("/r", &state), ["0:▾src", "1:lib.rs", "0:x.md"], "the folder's own is at the top");
     }
 
     #[test]

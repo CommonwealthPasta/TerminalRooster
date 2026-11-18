@@ -5,6 +5,7 @@ mod agent_icon;
 mod app;
 mod busy;
 mod color_picker;
+mod context_menu;
 #[cfg(target_os = "linux")]
 mod desktop_entry;
 mod dialogs;
