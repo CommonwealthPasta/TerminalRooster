@@ -340,7 +340,9 @@ impl App {
             ]
             .spacing(4)
             .align_y(Alignment::Center),
-            muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None),
+            // Cut at the item's edge: a long folder name would otherwise run
+            // on under the edit and delete buttons.
+            container(muted_text(short_dir(&p.working_dir, 24)).wrapping(text::Wrapping::None)).clip(true),
         ]
         .spacing(1);
         let body = mouse_area(container(label).padding(ITEM_PADDING).width(Length::Fill))
