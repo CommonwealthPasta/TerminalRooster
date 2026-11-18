@@ -32,7 +32,7 @@ use crate::reveal;
 use crate::side_panel::SideTab;
 use crate::sidebar::{muted_text, short_dir};
 use crate::theme::{self, Tone};
-use crate::ui;
+use crate::ui::{self, icon_button};
 
 /// Entries shown per folder; the rest are counted.
 const MAX_ENTRIES: usize = 1000;
@@ -492,8 +492,10 @@ impl App {
         let Some(root) = self.files_root() else { return space::horizontal().width(0).into() };
         let hues = Hues::of(&self.active_theme());
         let lines = rows(&root, &self.files).into_iter().map(|r| file_row(r, hues));
-        let top = mouse_area(muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill))
+        let path = mouse_area(muted_text(short_dir(&root, 40)).wrapping(text::Wrapping::None).width(Length::Fill))
             .on_right_press(Message::Files(FilesMsg::Menu(root.clone())));
+        let top = row![path, icon_button(Icon::Plus, Message::Files(FilesMsg::NewFile(root.clone())), "New file")]
+            .align_y(Alignment::Center);
         // The folder's own menu, under its name; always there, so the tree keeps its place.
         let root_menu: Element<'_, Message> = match &self.files.menu {
             Some(m) if *m == root => file_menu(root.clone(), true, 0.0),
