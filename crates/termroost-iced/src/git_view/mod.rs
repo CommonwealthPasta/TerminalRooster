@@ -74,6 +74,8 @@ pub enum GitViewMsg {
     ChangesRead(DocId, u64, Box<Result<WorkingChanges, String>>),
     /// Fold or unfold a file of the changes.
     ToggleChange(DocId, Section, String),
+    /// Fold or unfold a section of the changes.
+    ToggleSection(DocId, Section),
     /// Stage what is picked, or unstage it when it is staged.
     Move(DocId, Pick),
     /// It was staged or unstaged (or why not), and the changes read again.

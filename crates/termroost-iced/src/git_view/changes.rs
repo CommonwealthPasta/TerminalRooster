@@ -119,6 +119,8 @@ pub struct ChangesDoc {
     /// Files the user folded or unfolded (big ones, and staged ones, start
     /// folded).
     toggled: HashSet<(Section, String)>,
+    /// Sections showing only their title.
+    folded_sections: HashSet<Section>,
     /// Reads started so far, and the number of the one shown.
     reads: u64,
     shown_read: u64,
@@ -149,6 +151,7 @@ impl ChangesDoc {
             repo,
             changes: None,
             toggled: HashSet::new(),
+            folded_sections: HashSet::new(),
             reads: 0,
             shown_read: 0,
             reading: false,
@@ -185,6 +188,17 @@ impl ChangesDoc {
         let key = (section, path);
         if !self.toggled.remove(&key) {
             self.toggled.insert(key);
+        }
+    }
+
+    pub fn section_folded(&self, section: Section) -> bool {
+        self.folded_sections.contains(&section)
+    }
+
+    /// Folds a section, or unfolds it.
+    fn toggle_section(&mut self, section: Section) {
+        if !self.folded_sections.remove(&section) {
+            self.folded_sections.insert(section);
         }
     }
 
@@ -458,6 +472,11 @@ impl App {
             GitViewMsg::ToggleChange(doc, section, path) => {
                 if let Some(c) = self.changes_doc_mut(doc) {
                     c.toggle_file(section, path);
+                }
+            }
+            GitViewMsg::ToggleSection(doc, section) => {
+                if let Some(c) = self.changes_doc_mut(doc) {
+                    c.toggle_section(section);
                 }
             }
             GitViewMsg::Move(doc, pick) => return self.move_pick(doc, pick),

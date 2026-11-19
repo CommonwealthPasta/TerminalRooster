@@ -1,5 +1,6 @@
 //! How the uncommitted changes look: a section for each kind of change,
-//! with a button to stage (or unstage) all of it, then its files, each with
+//! its title folding it, with a button to stage (or unstage) all of it,
+//! then its files, each with
 //! a button for the whole file and one for each hunk. Lines chosen in a
 //! hunk are marked, and its button then stages just those. Above it all
 //! (not scrolled away) is the message of the next commit, and its button.
@@ -18,7 +19,7 @@ use crate::app::{App, Message};
 use crate::diff_lines::DiffLines;
 use crate::editor::DocId;
 use crate::files::FilesMsg;
-use crate::icons::Icon;
+use crate::icons::{Icon, icon};
 use crate::keymap::Keymap;
 use crate::sidebar::muted_text;
 use crate::theme::{self, MONO, SEMIBOLD, Tone};
@@ -125,7 +126,11 @@ impl App {
                 continue;
             }
             empty = false;
-            page = page.push(section_header(doc, section, files.len(), c.busy));
+            let folded = c.section_folded(section);
+            page = page.push(section_header(doc, section, files.len(), folded, c.busy));
+            if folded {
+                continue;
+            }
             for file in files.iter().take(MAX_FILES) {
                 page = page.push(self.changed_file(doc, c, section, file, files.len()));
             }
@@ -243,8 +248,9 @@ fn hunk_button<'a>(label: String, press: Option<Message>) -> Element<'a, Message
         .into()
 }
 
-/// A section's title and how many files it has, with a button for all of them.
-fn section_header<'a>(doc: DocId, section: Section, files: usize, busy: bool) -> Element<'a, Message> {
+/// A section's title and how many files it has, with a button for all of
+/// them. Pressed, the title folds or unfolds the section.
+fn section_header<'a>(doc: DocId, section: Section, files: usize, folded: bool, busy: bool) -> Element<'a, Message> {
     let all = match section {
         Section::Staged => "Unstage all",
         Section::Conflicts => "Mark all resolved",
@@ -252,14 +258,19 @@ fn section_header<'a>(doc: DocId, section: Section, files: usize, busy: bool) ->
     };
     let press = (!busy).then_some(Message::GitView(GitViewMsg::Move(doc, Pick::All(section))));
     let tone = if section == Section::Conflicts { Tone::Warning } else { Tone::Neutral };
-    row![
-        text(section.title()).size(theme::TEXT).font(SEMIBOLD),
-        ui::badge(files.to_string(), tone),
-        space::horizontal(),
-        ui::small(all, theme::button_secondary).on_press_maybe(press),
-    ]
-    .spacing(8)
-    .padding(Padding { top: 6.0, right: 0.0, bottom: 0.0, left: 4.0 })
-    .align_y(Alignment::Center)
-    .into()
+    let chevron = icon(if folded { Icon::ChevronRight } else { Icon::ChevronDown }, 13.0, theme::muted);
+    let title =
+        row![chevron, text(section.title()).size(theme::TEXT).font(SEMIBOLD), ui::badge(files.to_string(), tone)]
+            .spacing(8)
+            .align_y(Alignment::Center);
+    let toggle = button(title)
+        .padding(0)
+        .style(theme::button_bare)
+        .on_press(Message::GitView(GitViewMsg::ToggleSection(doc, section)))
+        .width(Length::Fill);
+    row![toggle, ui::small(all, theme::button_secondary).on_press_maybe(press)]
+        .spacing(8)
+        .padding(Padding { top: 6.0, right: 0.0, bottom: 0.0, left: 4.0 })
+        .align_y(Alignment::Center)
+        .into()
 }
