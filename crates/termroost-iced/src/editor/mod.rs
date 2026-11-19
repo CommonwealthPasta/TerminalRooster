@@ -1,7 +1,8 @@
 //! Files opened from the Files tab. Each session has its own open files, and
 //! one of them can be shown in place of the session's terminals. A commit
 //! picked in the Git tab opens among them too (see `git_view`). Pictures
-//! open in a viewer instead of the editor.
+//! open in a viewer instead of the editor; an SVG can be switched between
+//! the two.
 
 mod disk;
 mod external;
@@ -224,6 +225,10 @@ pub enum EditorMsg {
     PictureReloaded(DocId, Result<FilePicture, String>),
     /// A picture was zoomed or moved.
     Zoom(DocId, Zoom),
+    /// Show an SVG's text instead of its picture.
+    AsText(DocId),
+    /// Show an SVG's picture instead of its text.
+    AsPicture(DocId),
 }
 
 impl EditorMsg {
@@ -537,6 +542,44 @@ impl App {
         Task::perform(async move { rx.recv().await.unwrap_or_else(|_| Err("reading it stopped".into())) }, move |r| {
             Message::Editor(done(id, r))
         })
+    }
+
+    /// Shows an open SVG's text, in the editor files open in.
+    fn show_as_text(&mut self, id: DocId) -> Task<Message> {
+        if !matches!(self.doc(id), Some((_, d)) if matches!(d.kind, DocKind::Picture(_))) {
+            return Task::none();
+        }
+        self.open_as_text(id)
+    }
+
+    /// Opens an open file's text in place of what it shows now.
+    fn open_as_text(&mut self, id: DocId) -> Task<Message> {
+        let Some((tab, doc)) = self.doc(id) else { return Task::none() };
+        let path = doc.path.clone();
+        self.open_files_dirty = true;
+        if self.prefs.file_editor == FileEditor::Terminal {
+            let Some(kind) = self.launch_editor(tab, &path) else { return Task::none() };
+            if let Some(doc) = self.doc_mut(id) {
+                doc.kind = kind;
+            }
+            return self.focus_active();
+        }
+        if let Some(doc) = self.doc_mut(id) {
+            doc.kind = DocKind::Loading;
+        }
+        self.read_doc(id, path)
+    }
+
+    /// Shows an open SVG's picture instead of its text, once the text is saved.
+    fn show_as_picture(&mut self, id: DocId) -> Task<Message> {
+        let Some(doc) = self.doc_mut(id) else { return Task::none() };
+        if !matches!(&doc.kind, DocKind::Text(t) if !t.modified() && !t.saving) {
+            return Task::none();
+        }
+        doc.kind = DocKind::Loading;
+        let path = doc.path.clone();
+        self.open_files_dirty = true;
+        self.read_picture(id, path)
     }
 
     /// Starts Neovim or Vim (or the editor command set) on `path`, in a
@@ -913,6 +956,11 @@ impl App {
             EditorMsg::PictureLoaded(id, Err(e)) => {
                 let Some((tab, doc)) = self.doc(id) else { return Task::none() };
                 let name = self.file_label(Some(tab), &doc.path);
+                // An SVG that can't be drawn opens as text, to be put right.
+                if picture::has_text(&doc.path) {
+                    self.error = Some(format!("Can't show {name} as a picture: {e}."));
+                    return self.open_as_text(id);
+                }
                 self.close_doc(id);
                 self.error = Some(format!("Can't open {name}: {e}."));
                 self.focus_active()
@@ -935,6 +983,8 @@ impl App {
                 }
                 Task::none()
             }
+            EditorMsg::AsText(id) => self.show_as_text(id),
+            EditorMsg::AsPicture(id) => self.show_as_picture(id),
         }
     }
 }

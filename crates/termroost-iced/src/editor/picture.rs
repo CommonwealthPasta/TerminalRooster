@@ -44,6 +44,11 @@ pub fn kind_of(path: &Path) -> Option<Kind> {
     }
 }
 
+/// The picture at `path` is text that can be edited: an SVG, not gzipped.
+pub fn has_text(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+}
+
 /// A picture ready to draw.
 #[derive(Clone)]
 pub struct Picture {
@@ -196,6 +201,9 @@ mod tests {
         assert_eq!(kind_of(Path::new("logo.svgz")), Some(Kind::Vector));
         assert_eq!(kind_of(Path::new("main.rs")), None);
         assert_eq!(kind_of(Path::new("png")), None, "a name, not an extension");
+        assert!(has_text(Path::new("logo.SVG")));
+        assert!(!has_text(Path::new("logo.svgz")), "gzipped");
+        assert!(!has_text(Path::new("shot.png")));
     }
 
     #[test]

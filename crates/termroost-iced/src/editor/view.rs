@@ -1,7 +1,7 @@
 //! The strip of open files above the terminals, and the file shown.
 
 use iced::widget::{Button, Row, button, center, column, container, row, space, text, text_editor, tooltip};
-use iced::{Alignment, Element, Length, Padding};
+use iced::{Alignment, Element, Length, Padding, Theme};
 
 use super::picture::{self, PictureDoc, Zoom};
 use super::text::char_column;
@@ -177,6 +177,14 @@ fn banner_button<'a>(label: &'a str, msg: EditorMsg) -> Button<'a, Message> {
     ui::small(label, theme::button_secondary).on_press(Message::Editor(msg))
 }
 
+/// A button small enough for the status line.
+fn status_button<'a>(
+    label: &'a str,
+    style: impl Fn(&Theme, button::Status) -> button::Style + 'a,
+) -> Button<'a, Message> {
+    button(text(label).size(TEXT_SM).wrapping(text::Wrapping::None)).padding([0, 6]).style(style)
+}
+
 impl App {
     /// Under a picture: the file, the picture's size and format, and how it is zoomed.
     fn picture_status<'a>(&'a self, doc: &'a OpenFile, p: &'a PictureDoc) -> Element<'a, Message> {
@@ -204,9 +212,14 @@ impl App {
         if let Some(scale) = p.zoom.scale.filter(|s| *s != 1.0) {
             line = line.push(muted_text(format!("{:.0}%", scale * 100.0)).wrapping(text::Wrapping::None));
         }
-        let zoom = row![zoom_to("Fit", Zoom::default(), p.zoom.scale.is_none())]
+        let mut zoom = row![zoom_to("Fit", Zoom::default(), p.zoom.scale.is_none())]
             .push(zoom_to("100%", actual, p.zoom.scale == Some(1.0)))
             .spacing(2);
+        if picture::has_text(&doc.path) {
+            zoom = zoom.push(
+                status_button("Edit as text", theme::button_ghost).on_press(Message::Editor(EditorMsg::AsText(id))),
+            );
+        }
         line.push(zoom).padding([3, 8]).into()
     }
 
@@ -220,15 +233,23 @@ impl App {
         if t.saving {
             info.push("Saving…".to_owned());
         }
-        row![
+        let mut line = row![
             container(muted_text(self.doc_label(&doc.path)).wrapping(text::Wrapping::None))
                 .width(Length::Fill)
                 .clip(true),
             muted_text(info.join("  ·  ")).wrapping(text::Wrapping::None),
         ]
         .spacing(12)
-        .align_y(Alignment::Center)
-        .padding([3, 8])
-        .into()
+        .align_y(Alignment::Center);
+        // An SVG's picture is drawn from the file, so it shows once saved.
+        if picture::has_text(&doc.path) {
+            let show = status_button("Show picture", theme::button_ghost);
+            line = line.push(if t.modified() || t.saving {
+                tip(show, "Save first", tooltip::Position::Top)
+            } else {
+                show.on_press(Message::Editor(EditorMsg::AsPicture(doc.id))).into()
+            });
+        }
+        line.padding([3, 8]).into()
     }
 }
