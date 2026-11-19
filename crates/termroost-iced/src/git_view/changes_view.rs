@@ -1,9 +1,9 @@
 //! How the uncommitted changes look: a section for each kind of change,
 //! its title folding it, with a button to stage (or unstage) all of it,
-//! then its files, each with
-//! a button for the whole file and one for each hunk. Lines chosen in a
-//! hunk are marked, and its button then stages just those. Above it all
-//! (not scrolled away) is the message of the next commit, and its button.
+//! then its files, each with a button for the whole file and one for each
+//! hunk. Lines chosen in a hunk are marked, and its button then stages just
+//! those. Above it all (not scrolled away) is the message of the next
+//! commit with its button, and one that folds or unfolds every file.
 
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
@@ -12,9 +12,9 @@ use iced::widget::{Row, button, center, column, container, row, space, text, tex
 use iced::{Alignment, Element, Length, Padding};
 use termroost_core::git::{FileDiff, FileStatus, WorkingChanges};
 
-use super::GitViewMsg;
 use super::changes::{ChangesDoc, Pick, Section};
 use super::view::{file_body_with, file_digits, file_header};
+use super::{CHANGES_SCROLL, GitViewMsg};
 use crate::app::{App, Message};
 use crate::diff_lines::DiffLines;
 use crate::editor::DocId;
@@ -116,7 +116,8 @@ impl App {
             .into()
     }
 
-    /// The sections of the changes and their files, scrolled.
+    /// The sections of the changes and their files, scrolled, under a bar
+    /// that folds or unfolds every file.
     fn view_sections<'a>(&'a self, doc: DocId, c: &'a ChangesDoc, changes: &'a WorkingChanges) -> Element<'a, Message> {
         let mut page = column![].spacing(12);
         let mut empty = true;
@@ -147,9 +148,13 @@ impl App {
             };
             page = page.push(container(text(what).size(theme::TEXT).style(ui::muted)).padding([8, 4]));
         }
-        ui::scroll(container(page).padding(Padding { top: 0.0, right: 14.0, bottom: 12.0, left: 4.0 }))
-            .height(Length::Fill)
-            .into()
+        let list = ui::scroll(container(page).padding(Padding { top: 0.0, right: 14.0, bottom: 12.0, left: 4.0 }))
+            .id(CHANGES_SCROLL)
+            .height(Length::Fill);
+        // Always there, so the list keeps its place (and scroll) in the tree.
+        let bar: Element<'a, Message> =
+            if empty { space::vertical().height(0).into() } else { fold_bar(doc, c, changes) };
+        column![bar, list].into()
     }
 
     /// A file of a section: its header with a button for the whole file,
@@ -246,6 +251,18 @@ fn hunk_button<'a>(label: String, press: Option<Message>) -> Element<'a, Message
         .style(theme::button_secondary)
         .on_press_maybe(press)
         .into()
+}
+
+/// Over the list, not scrolled away: Collapse all while a file shows its
+/// changes, else Expand all.
+fn fold_bar<'a>(doc: DocId, c: &ChangesDoc, changes: &WorkingChanges) -> Element<'a, Message> {
+    let unfolded = c.any_unfolded(changes, MAX_FILES);
+    let label = if unfolded { "Collapse all" } else { "Expand all" };
+    // With every section folded, no file would show either way.
+    let open = Section::ALL.into_iter().any(|s| !c.section_folded(s) && s.files(changes).next().is_some());
+    let press = open.then_some(Message::GitView(GitViewMsg::FoldAll(doc, unfolded)));
+    let toggle = ui::small(label, theme::button_ghost).on_press_maybe(press);
+    row![space::horizontal(), toggle].padding(Padding { top: 0.0, right: 14.0, bottom: 4.0, left: 4.0 }).into()
 }
 
 /// A section's title and how many files it has, with a button for all of
