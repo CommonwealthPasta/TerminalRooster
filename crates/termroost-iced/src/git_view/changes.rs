@@ -116,7 +116,8 @@ pub struct ChangesDoc {
     pub repo: Repo,
     /// `None` until first read.
     pub changes: Option<Result<WorkingChanges, String>>,
-    /// Files the user folded or unfolded (big ones start folded).
+    /// Files the user folded or unfolded (big ones, and staged ones, start
+    /// folded).
     toggled: HashSet<(Section, String)>,
     /// Reads started so far, and the number of the one shown.
     reads: u64,
@@ -169,9 +170,22 @@ impl ChangesDoc {
         !self.busy && (staged || self.amend) && !self.message.text().trim().is_empty()
     }
 
+    /// Whether a file shows only its header. Staged files start folded: a
+    /// list of what the next commit takes, under its message, which grows
+    /// by a line (not a whole diff) for each file staged further down.
     pub fn folded(&self, section: Section, file: &FileDiff, files_in_section: usize) -> bool {
-        let starts = starts_folded(file) || (section == Section::Untracked && files_in_section > FOLD_UNTRACKED);
+        let starts = starts_folded(file)
+            || section == Section::Staged
+            || (section == Section::Untracked && files_in_section > FOLD_UNTRACKED);
         starts != self.toggled.contains(&(section, file.path.clone()))
+    }
+
+    /// Folds a file, or unfolds it.
+    fn toggle_file(&mut self, section: Section, path: String) {
+        let key = (section, path);
+        if !self.toggled.remove(&key) {
+            self.toggled.insert(key);
+        }
     }
 
     /// Takes in a read numbered `n`, unless a later one is shown already.
@@ -443,10 +457,7 @@ impl App {
             }
             GitViewMsg::ToggleChange(doc, section, path) => {
                 if let Some(c) = self.changes_doc_mut(doc) {
-                    let key = (section, path);
-                    if !c.toggled.remove(&key) {
-                        c.toggled.insert(key);
-                    }
+                    c.toggle_file(section, path);
                 }
             }
             GitViewMsg::Move(doc, pick) => return self.move_pick(doc, pick),
@@ -620,5 +631,18 @@ mod tests {
         changes.unstaged[0].hunks[0].lines[1].text = "b2".into();
         d.take(2, Ok(changes));
         assert_eq!(d.chosen, None);
+    }
+
+    #[test]
+    fn staged_files_start_folded() {
+        let mut d = doc();
+        let Some(Ok(changes)) = d.changes.clone() else { unreachable!() };
+        let file = &changes.unstaged[0];
+        assert!(!d.folded(Section::Unstaged, file, 1));
+        assert!(d.folded(Section::Staged, file, 1));
+        // Unfolded by hand, a staged file stays so; the same file unstaged is apart.
+        d.toggle_file(Section::Staged, file.path.clone());
+        assert!(!d.folded(Section::Staged, file, 1));
+        assert!(!d.folded(Section::Unstaged, file, 1));
     }
 }
