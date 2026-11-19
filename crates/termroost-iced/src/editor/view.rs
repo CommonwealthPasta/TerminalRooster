@@ -1,17 +1,26 @@
 //! The strip of open files above the terminals, and the file shown.
 
 use iced::widget::{button, center, column, container, row, space, text, text_editor, tooltip};
-use iced::{Alignment, Element, Length};
+use iced::{Alignment, Element, Length, Padding};
 
 use super::text::char_column;
 use super::{Conflict, DocId, DocKind, EditorMsg, FILE_EDITOR, OpenFile, TextDoc, highlight, keys};
 use crate::app::{App, Message};
 use crate::file_icons::{self, Hues, Look};
-use crate::icons::Icon;
+use crate::icons::{self, Icon};
 use crate::sidebar::{display_dir, muted_text};
 use crate::terminal_view::TerminalView;
 use crate::theme::{self, MONO, SEMIBOLD, Tone};
-use crate::ui::{self, icon_button, tip};
+use crate::ui::{self, tip};
+
+/// Size of a tab's name in the strip of open files. Its line is 1.3 times
+/// this tall (iced's default line height).
+const TAB_TEXT: f32 = 12.0;
+/// Space above and below a tab's name.
+const TAB_PADDING_Y: f32 = 3.0;
+/// Height of the box a file tab's close button sits at the top of; the
+/// taller it is, the higher the button sits next to the name.
+const CLOSE_BOX: f32 = 19.0;
 
 impl App {
     /// "Terminals", then each file the visible session has open. Nothing
@@ -22,15 +31,31 @@ impl App {
         };
         let hues = Hues::of(&self.active_theme());
         // A file's tab leads with the icon its name has in the Files tab.
-        let tab = |label: String, look: Option<Look>, selected: bool, msg: Message| {
+        let tab = |label: String, look: Option<Look>, selected: bool, msg: Message, close: Option<Message>| {
             let font = if selected { SEMIBOLD } else { theme::UI };
             let icon = look.map(|look| file_icons::icon(look, hues, false, 13.0));
-            let label = row![icon, text(label).size(12).font(font).wrapping(text::Wrapping::None)]
+            let label = row![icon, text(label).size(TAB_TEXT).font(font).wrapping(text::Wrapping::None)]
                 .spacing(5)
                 .align_y(Alignment::Center);
-            button(label).padding([3, 10]).style(theme::segment(selected)).on_press(msg)
+            let style = theme::segment(selected);
+            let Some(close) = close else {
+                return button(label).padding([TAB_PADDING_Y, 10.0]).style(style).on_press(msg);
+            };
+            // The close button is inside the tab, toward its top right corner:
+            // it sits at the top of a box taller than the name's line, and the
+            // tab's padding gives up the difference, so the tab keeps its height.
+            // It takes its own clicks, so closing doesn't show the file first.
+            let ink = |t: &iced::Theme| theme::ink(t).scale_alpha(0.78);
+            let x = button(icons::icon(Icon::Close, 10.0, ink)).padding(1).style(theme::button_ghost).on_press(close);
+            let label = row![label, container(x).height(CLOSE_BOX)].spacing(6).align_y(Alignment::Center);
+            let padding_y = TAB_PADDING_Y - (CLOSE_BOX - TAB_TEXT * 1.3) / 2.0;
+            button(label)
+                .padding(Padding { top: padding_y, bottom: padding_y, left: 10.0, right: 3.0 })
+                .style(style)
+                .on_press(msg)
         };
-        let terminals = tab("Terminals".into(), None, files.shown.is_none(), Message::Editor(EditorMsg::Show(None)));
+        let terminals =
+            tab("Terminals".into(), None, files.shown.is_none(), Message::Editor(EditorMsg::Show(None)), None);
         let mut strip = row![terminals].spacing(4).align_y(Alignment::Center);
         for doc in &files.open {
             let mut name = doc.label();
@@ -39,11 +64,13 @@ impl App {
             if doc.modified() {
                 name.push_str(" ●");
             }
-            let item = row![
-                tab(name, look, files.shown == Some(doc.id), Message::Editor(EditorMsg::Show(Some(doc.id)))),
-                icon_button(Icon::Close, Message::Editor(EditorMsg::Close(doc.id)), "Close"),
-            ]
-            .align_y(Alignment::Center);
+            let item = tab(
+                name,
+                look,
+                files.shown == Some(doc.id),
+                Message::Editor(EditorMsg::Show(Some(doc.id))),
+                Some(Message::Editor(EditorMsg::Close(doc.id))),
+            );
             strip = strip.push(tip(item, display_dir(&doc.path), tooltip::Position::Bottom));
         }
         container(column![container(strip.wrap()).padding([5, 8]), ui::divider()]).into()
