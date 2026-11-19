@@ -1,6 +1,6 @@
 //! What is not committed yet in a session's repository, shown in place of
-//! its terminals: files with conflicts, changes not staged, new files, and
-//! staged changes. Whole files, single hunks or all of a section are staged
+//! its terminals: files with conflicts, staged changes, changes not staged,
+//! and new files. Whole files, single hunks or all of a section are staged
 //! and unstaged from here, and so are lines chosen in a hunk: pressed one
 //! by one, dragged over, or with Shift for a range and Ctrl for one more.
 //! What is staged is then committed with a message written above it (or
@@ -28,15 +28,17 @@ const FOLD_UNTRACKED: usize = 20;
 pub enum Section {
     /// Files with a merge conflict.
     Conflicts,
+    Staged,
     /// Changes not staged yet.
     Unstaged,
     /// Files git doesn't track yet.
     Untracked,
-    Staged,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [Section::Conflicts, Section::Unstaged, Section::Untracked, Section::Staged];
+    /// In the order shown: conflicts first, as they stop a commit, then what
+    /// the next commit takes, under its message, then what it doesn't yet.
+    pub const ALL: [Section; 4] = [Section::Conflicts, Section::Staged, Section::Unstaged, Section::Untracked];
 
     pub fn title(self) -> &'static str {
         match self {
